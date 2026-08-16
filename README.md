@@ -19,6 +19,8 @@ queryable, huntable case workspace instead of raw XML.
   unsupported Sigma rule is reported explicitly, not swallowed -- the
   direct answer to "importing into ELK silently drops records."
 
+**Full user guide: [English](docs/user_guide.md) | [中文](docs/user_guide.zh-CN.md)**
+
 See `docs/architecture.md` for how it works, `docs/schema.md` for the
 normalized event schema, `docs/sigma_backend.md` for the detection engine,
 and `docs/known_limitations.md` for known v1 scope decisions and edge

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seclogx"
+version = "0.1.0"
+description = "Fast, pandas-friendly threat hunting and analysis over Windows Event Log (.evtx) forensic acquisitions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "seclogx contributors" }]
+dependencies = [
+    "evtx>=0.9",
+    "duckdb>=1.0",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "pysigma>=0.11",
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+seclogx = "seclogx.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

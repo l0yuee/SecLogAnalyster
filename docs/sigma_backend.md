@@ -1,0 +1,68 @@
+# The Sigma backend, and how to extend it
+
+No official DuckDB (or generic ANSI-SQL) pySigma backend exists, so
+`detect/backend.py` implements a small custom one, closely modeled on the
+public `pySigma-backend-sqlite` backend's token configuration (LIKE-based
+string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
+
+## How a Sigma rule becomes a DuckDB query
+
+1. **Field mapping** (`detect/pipeline.py` `FIELD_MAPPING`): Sigma's
+   standard field taxonomy (`Image`, `CommandLine`, `ParentImage`, ...) is
+   mapped to a full, parenthesized SQL expression against the `events`
+   table, e.g. `Image` -> `(event_data ->> 'Image')`. The backend's
+   `field_quote`/`field_escape` are left unset, so this mapped string is
+   substituted as-is wherever a template needs `{field}`.
+
+   **Always parenthesize new field mappings.** Empirically, DuckDB's
+   `->`/`->>` operators don't bind as tightly as expected against
+   `LIKE ... AND ...` in a compound WHERE clause; an unparenthesized
+   mapping can misparse and fail at execution time with a confusing
+   type-cast error rather than a clear syntax error.
+
+2. **Logsource routing** (`detect/pipeline.py` `LOGSOURCE_ROUTES`): a
+   Sigma rule's `logsource.category` (e.g. `process_creation`) is turned
+   into an added `channel = '...' AND EventID = ...` condition via
+   pySigma's `AddConditionTransformation`, scoped to that category via
+   `LogsourceCondition`. v1 routes every category to its Sysmon
+   equivalent (see `docs/known_limitations.md` for why).
+
+3. **Conversion** (`detect/backend.py` `DuckDBBackend`): the mapped,
+   routed rule is converted to a bare boolean WHERE-clause fragment (not
+   a full `SELECT`, deliberately -- stays decoupled from the `events`
+   view name). `detect/hunt.py` wraps it as
+   `SELECT * FROM events WHERE <fragment>`.
+
+## Adding support for a new field or category
+
+- New field used by a rule you want to run: add an entry to
+  `FIELD_MAPPING` in `detect/pipeline.py`, parenthesized, pointing at the
+  right `event_data` key (or a top-level normalized column for
+  System-level fields, e.g. `Computer` -> `computer`).
+- New logsource category: add an entry to `LOGSOURCE_ROUTES` with its
+  `(channel, EventID)` target.
+- After changing either, run `seclogx rules validate --rules <dir>`
+  against the rules you care about to confirm they convert, then run
+  `seclogx hunt <case> --rules <dir>` against a case with known-good data
+  to sanity check real matches (see the mimikatz-record test in this
+  project's development history for the pattern: hand-craft one
+  synthetic NDJSON record shaped like a real match, flatten it into a
+  throwaway case, and confirm exactly the expected rule fires).
+
+## Adding more bundled rules
+
+Rules are copied unmodified from `github.com/SigmaHQ/sigma` (Detection
+Rule License 1.1 -- bundling/redistribution is fine with attribution
+preserved). `data/sigma_rules/SOURCES.md` records the exact upstream path
+and commit for every bundled rule; follow the same pattern (copy the
+rule file as-is, don't hand-edit its content, record it in
+`SOURCES.md`) when adding more.
+
+## Not supported in v1
+
+- Case-sensitive matching (`|cased`) and numeric comparison modifiers
+  (`|lt`, `|gt`, ...) -- rules using them fail conversion explicitly.
+- Sigma correlation rules.
+
+Both fail loudly (`seclogx rules validate`, or as a `hunt` failure entry)
+rather than silently producing a wrong query.

@@ -1,0 +1,30 @@
+from __future__ import annotations
+
+import typer
+
+from .. import __version__
+from .case_cmds import case_app
+from .hunt_cmd import hunt_command
+from .ingest_cmd import ingest_command
+from .query_cmd import channels_command, query_command, summary_command
+from .rules_cmd import rules_app
+from .timeline_cmd import timeline_command
+
+app = typer.Typer(help="seclogx -- fast, pandas-friendly Windows Event Log threat hunting", no_args_is_help=True)
+app.add_typer(case_app, name="case")
+app.add_typer(rules_app, name="rules")
+app.command("ingest")(ingest_command)
+app.command("query")(query_command)
+app.command("summary")(summary_command)
+app.command("channels")(channels_command)
+app.command("hunt")(hunt_command)
+app.command("timeline")(timeline_command)
+
+
+@app.command("version")
+def version() -> None:
+    typer.echo(__version__)
+
+
+if __name__ == "__main__":
+    app()

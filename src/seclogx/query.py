@@ -28,17 +28,51 @@ queryable here -- true for both the eager and chunked accessors.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
 import duckdb
 import pandas as pd
 
+from .memcheck import available_memory_bytes
+
 # DuckDB's internal vector size (rows per execution batch) -- fetch_df_chunk()
 # takes a count of these, not a row count, so user-facing `chunksize` (rows)
 # is translated via this constant.
 _DUCKDB_VECTOR_SIZE = 2048
 DEFAULT_CHUNKSIZE = 100_000
+
+# When available system memory can't be determined at all (memcheck.py
+# returns None), fall back to this absolute cap rather than either
+# blocking everything or assuming unlimited memory.
+_UNKNOWN_MEMORY_FALLBACK_BYTES = 200 * 1024 * 1024
+
+
+@dataclass
+class ResultSizeEstimate:
+    """How big a query's result is expected to be, estimated cheaply:
+    `count(*)` for the row count (a streaming aggregate, not a
+    materialization) plus a small sample (`LIMIT sample_rows`) to get
+    pandas' actual (deep, including string/object overhead) bytes-per-row,
+    extrapolated to the full row count. Both steps are bounded regardless
+    of the table's total size, so estimating is itself memory-safe."""
+
+    row_count: int
+    estimated_bytes: int
+    sampled_rows: int
+
+    def fits_in_memory(self, safety_fraction: float = 0.25) -> bool:
+        """Whether materializing this result as one DataFrame is safe,
+        judged against a fraction of currently available system memory
+        (default: no more than a quarter of it) -- leaves headroom for
+        pandas' own transformation overhead and everything else running on
+        the analyst's machine, not just the raw DataFrame bytes. Falls
+        back to an absolute cap if available memory can't be determined at
+        all, rather than assuming unlimited memory."""
+        available = available_memory_bytes()
+        budget = available * safety_fraction if available is not None else _UNKNOWN_MEMORY_FALLBACK_BYTES
+        return self.estimated_bytes <= budget
 
 
 class CaseDB:
@@ -47,6 +81,12 @@ class CaseDB:
         self.lake_dir = self.case_dir / "lake"
         self._con = duckdb.connect()
         self.tables: list[str] = []
+        # search.py's per-table "which columns hold a JSON object" detection
+        # is content-sniffed (see there for why), not free -- cached here so
+        # it only runs once per table per CaseDB instance, not once per
+        # condition. Invalidated naturally whenever Case creates a fresh
+        # CaseDB (post-ingest).
+        self._json_object_columns_cache: dict[str, list[str]] = {}
         if self.lake_dir.exists():
             for table_dir in sorted(p for p in self.lake_dir.iterdir() if p.is_dir()):
                 if not any(table_dir.rglob("*.parquet")):
@@ -101,6 +141,24 @@ class CaseDB:
             if chunk.empty:
                 return
             yield chunk
+
+    def estimate(self, query: str, params: list | None = None, sample_rows: int = 2000) -> ResultSizeEstimate:
+        """Cheaply estimate a query's result size before deciding whether
+        to fetch it eagerly -- see `ResultSizeEstimate`. Used by
+        `search.py` to refuse an eager fetch that would risk exhausting
+        memory and point the caller at a chunked/streamed alternative
+        instead."""
+        self._require_data()
+        (row_count,) = self._con.execute(f"SELECT count(*) FROM ({query}) AS _estimate", params or []).fetchone()
+        if row_count == 0:
+            return ResultSizeEstimate(row_count=0, estimated_bytes=0, sampled_rows=0)
+        sample = self._con.execute(
+            f"SELECT * FROM ({query}) AS _estimate LIMIT {int(sample_rows)}", params or []
+        ).fetchdf()
+        bytes_per_row = (sample.memory_usage(deep=True).sum() / len(sample)) if len(sample) else 0
+        return ResultSizeEstimate(
+            row_count=row_count, estimated_bytes=int(bytes_per_row * row_count), sampled_rows=len(sample)
+        )
 
     def table(self, name: str, order_by: str | None = None) -> pd.DataFrame:
         """Full contents of any table this case has (see `.tables`) as a

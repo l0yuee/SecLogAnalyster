@@ -25,6 +25,10 @@ from .ingest.manifest import IngestReport
 from .logsources import run_aux_ingest
 from .logsources.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .query import DEFAULT_CHUNKSIZE, CaseDB
+from .search import Match, conditions_from_dicts
+from .search import search as _search
+from .search import search_chunks as _search_chunks
+from .search import search_to_csv as _search_to_csv
 from .timeline import build_timeline, build_timeline_chunks
 
 
@@ -175,6 +179,66 @@ class Case:
 
     def query(self, sql: str) -> pd.DataFrame:
         return self.db.sql(sql)
+
+    # -- plain-language search (no SQL required) ---------------------------------
+    def search(
+        self,
+        table: str,
+        eq: dict | None = None,
+        contains: dict | None = None,
+        regex: dict | None = None,
+        match: Match = "all",
+        case_sensitive: bool = False,
+    ) -> pd.DataFrame:
+        """Query any table without writing SQL: `eq`/`contains`/`regex` are
+        `{field: value}` (or `{field: [value1, value2, ...]}` for "this
+        field is any of these values") dicts for exact, fuzzy/substring,
+        and regular-expression matching respectively. Different fields
+        combine with AND by default (`match="any"` for OR); values within
+        one field's condition always combine with OR. Matching is
+        case-insensitive by default.
+
+            c.search("web_logs", contains={"uri_stem": "admin"}, eq={"status": [401, 403]})
+
+        Refuses (raising ResultTooLargeError) rather than risking an
+        out-of-memory crash if the estimated result is too large for the
+        machine's available memory -- see `.search_chunks()`/
+        `.search_to_csv()` for the alternatives it points you at."""
+        conditions = conditions_from_dicts(eq, contains, regex, case_sensitive)
+        return _search(self.db, table, conditions, match=match)
+
+    def search_chunks(
+        self,
+        table: str,
+        eq: dict | None = None,
+        contains: dict | None = None,
+        regex: dict | None = None,
+        match: Match = "all",
+        case_sensitive: bool = False,
+        chunksize: int = DEFAULT_CHUNKSIZE,
+    ) -> Iterator[pd.DataFrame]:
+        """Bounded-memory alternative to `.search()` -- same arguments,
+        yields an Iterator[pd.DataFrame] instead of one DataFrame, safe at
+        any result size."""
+        conditions = conditions_from_dicts(eq, contains, regex, case_sensitive)
+        return _search_chunks(self.db, table, conditions, match=match, chunksize=chunksize)
+
+    def search_to_csv(
+        self,
+        table: str,
+        path,
+        eq: dict | None = None,
+        contains: dict | None = None,
+        regex: dict | None = None,
+        match: Match = "all",
+        case_sensitive: bool = False,
+        chunksize: int = DEFAULT_CHUNKSIZE,
+    ) -> int:
+        """The other bounded-memory alternative to `.search()`: streams
+        every matching row straight to a CSV file. Returns the row count
+        written."""
+        conditions = conditions_from_dicts(eq, contains, regex, case_sensitive)
+        return _search_to_csv(self.db, table, conditions, path, match=match, chunksize=chunksize)
 
     def query_chunks(self, sql: str, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
         """Bounded-memory alternative to `.query()` -- yields the result as

@@ -139,6 +139,54 @@ not oversights -- documented so they're easy to revisit later.
   scope in v1** -- only the standard access (W3C/CLF/Combined) and error
   (HTTPERR / `error_log` / catalina) log categories are covered.
 
+## Plain-language search (`search.py` / `seclogx search` / `Case.search()`)
+
+- **`equals` always compares the text representation of a value**, not
+  its native type -- deliberate, so an analyst doesn't need to know or
+  care whether `status` is stored as an integer: `eq={"status": "404"}`
+  and a hypothetical `eq={"status": 404}` behave the same either way.
+- **`contains` is a literal substring search, not a wildcard pattern.**
+  The value's `%`, `_`, and `\` are escaped before being wrapped in
+  `%...%`, so searching for a literal `%` or `_` works as expected rather
+  than being interpreted as a SQL wildcard. Use `regex` if you actually
+  need wildcard-like or more complex pattern matching.
+- **`regex` uses DuckDB's RE2-based regex engine** -- no
+  lookahead/lookbehind (RE2 doesn't support them), which most Sigma/log
+  regex patterns don't need anyway.
+- **Multiple values for one field (`--eq status=404,500` on the CLI, or
+  `eq={"status": ["404", "500"]}` in Python) combine with OR; comma-splits
+  in the CLI only apply to `--eq`/`--contains`, not `--regex`** (a regex
+  pattern can legitimately contain a literal comma, so `--regex` treats
+  its value as one whole pattern, never split).
+- **A field that resolves into a JSON *array* column
+  (`scheduled_tasks.actions`/`triggers`) can't be searched by key** --
+  only JSON *object* columns support keyed extraction. Search `actions`/
+  `triggers` directly (as a whole-column `contains`/`regex` match against
+  its JSON-serialized text) instead of trying to reach a field inside one
+  of its list entries.
+- **An unresolvable field name only raises `UnknownFieldError` when the
+  table has no JSON-object catchall to fall back to** (e.g.
+  `scheduled_tasks`). On a table that does have one (`events`,
+  `web_logs`, ...), an unknown key is indistinguishable from "a real key
+  that just isn't present in this data" -- both correctly return zero
+  matches rather than an error, since DuckDB's `->>` on a missing JSON key
+  returns NULL rather than failing.
+- **The memory-safety check (`search()`, refusing via `ResultTooLargeError`)
+  is an estimate, not exact** -- `count(*)` for the row count (exact) times
+  a bytes-per-row figure from a small sample (`LIMIT 2000` by default),
+  extrapolated to the full result. A result with unusually wide variance
+  in row size (e.g. `event_data`/`extra`/`fields` payloads that vary
+  enormously in size row-to-row) can be estimated somewhat off in either
+  direction. The default safety margin (`safety_fraction=0.25`, i.e. an
+  eager fetch is allowed up to a quarter of currently available memory)
+  is deliberately conservative to absorb this.
+- **"Available system memory" is best-effort and can be unknown.**
+  `memcheck.available_memory_bytes()` tries `/proc/meminfo` (Linux),
+  `os.sysconf` (POSIX, coarser), then `GlobalMemoryStatusEx` (Windows);
+  on a platform/environment where none of those work, it returns `None`,
+  and `fits_in_memory()` falls back to a fixed 200MB absolute cap rather
+  than assuming unlimited memory.
+
 ## Scale
 
 - Designed for a single workstation, not a distributed system -- see

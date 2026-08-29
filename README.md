@@ -23,17 +23,25 @@ workspace instead of raw XML and inconsistent text logs.
   or your own) compiled to DuckDB SQL and run against the case, with
   MITRE ATT&CK tags surfaced on every match -- covers Windows Event Log
   and web access logs (`category: webserver`).
+- **No SQL required.** `seclogx search` / `Case.search()` query any table
+  with plain field/value conditions -- exact match, fuzzy/substring
+  match, or regular expressions, case-insensitive by default, any number
+  of conditions combined with AND/OR -- for analysts who'd rather not
+  write SQL by hand.
 - **pandas-native**: every log family -- events, web access/error logs,
   Scheduled Tasks, Exchange logs -- is reachable as a `pandas.DataFrame`
   through a named accessor (`c.web_logs()`, `c.scheduled_tasks()`, ...),
   the same first-class treatment `events` gets, ready for a notebook.
 - **Bounded-memory analysis for every log family.** Web access/error logs
   especially can reach terabyte scale -- every DataFrame accessor has a
-  `_chunks()` sibling (`c.web_logs_chunks()`, `c.query_chunks()`, ...)
-  that streams the result as an iterator of DataFrames instead of one,
-  and `--out`/console preview in the CLI use this automatically, so
-  neither exporting nor previewing a huge table requires it to fit in
-  memory first.
+  `_chunks()` sibling (`c.web_logs_chunks()`, `c.query_chunks()`,
+  `c.search_chunks()`, ...) that streams the result as an iterator of
+  DataFrames instead of one, and `--out`/console preview in the CLI use
+  this automatically, so neither exporting nor previewing a huge table
+  requires it to fit in memory first. `search()` goes further and checks
+  the result against the machine's actual available memory before
+  fetching, refusing (with the chunked/streamed alternative named in the
+  error) rather than risking an out-of-memory crash.
 - **Handles realistic case volumes on a single workstation**, lazily --
   DuckDB + Parquet, no cluster required.
 - **Never silently drops data.** Every parse error, partial file read,
@@ -84,6 +92,10 @@ seclogx query incident42 "
   LIMIT 20
 "
 
+# Or the same thing without writing SQL: plain field/value conditions,
+# fuzzy/exact/regex, case-insensitive by default
+seclogx search incident42 events --contains Image=mimikatz --eq host=WKS01
+
 # Hunt with the bundled curated Sigma rule set (or --rules <your dir>)
 seclogx hunt incident42
 
@@ -114,6 +126,16 @@ c.exchange_logs(log_type="HttpProxy")
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
 c.db.table("web_logs")            # generic escape hatch: any table this case has, by name
 
+# No SQL required: exact/fuzzy/regex conditions against any table, AND/OR,
+# case-insensitive by default. Refuses (pointing at the alternatives below)
+# rather than risking an out-of-memory crash if the estimated result is
+# too large for this machine.
+c.search("web_logs", contains={"uri_stem": "admin"}, eq={"status": [401, 403]})
+c.search("events", regex={"CommandLine": r".*-enc.*"})
+for chunk in c.search_chunks("web_logs", contains={"uri_stem": "admin"}):
+    process(chunk)
+c.search_to_csv("web_logs", "admin_hits.csv", contains={"uri_stem": "admin"})
+
 # Every accessor above has a bounded-memory "_chunks()" sibling for tables
 # too large to hold as one DataFrame (web logs especially) -- an iterator
 # of DataFrames instead of one, each independently small regardless of
@@ -134,6 +156,7 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
 | `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs) |
 | `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |
+| `seclogx search <case> <table> [--eq/--contains/--regex FIELD=VALUE]...` | Query any table without writing SQL: exact/fuzzy/regex conditions, case-insensitive by default, combined with AND (or `--match-any` for OR) |
 | `seclogx tasks <case> [--suspicious]` | List ingested Scheduled Task definitions, optionally filtered by a built-in heuristic |
 | `seclogx hunt <case> [--rules DIR] [--min-level LEVEL]` | Run Sigma rules, report matches + ATT&CK tags |
 | `seclogx rules validate [--rules DIR]` | Check which rules convert vs are unsupported |

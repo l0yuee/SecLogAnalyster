@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable
 
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
+from ..csvutil import export_chunks_to_csv
+
 console = Console()
+
+__all__ = ["console", "print_df", "print_df_chunks", "export_chunks_to_csv"]
 
 
 def print_df(df: pd.DataFrame, title: str | None = None, max_rows: int = 50) -> None:
@@ -53,21 +56,3 @@ def print_df_chunks(chunks: Iterable[pd.DataFrame], title: str | None = None, ma
     console.print(table)
     if more:
         console.print("[dim]... more rows not shown (use --out to export all)[/dim]")
-
-
-def export_chunks_to_csv(chunks: Iterator[pd.DataFrame], path: Path) -> int:
-    """Stream a chunked result straight to CSV, one chunk at a time --
-    never holding more than one chunk in memory, so `--out` on a
-    real-world-sized table doesn't require the whole thing to fit in RAM
-    first (see query.py's module docstring). Returns the total row count
-    written."""
-    total = 0
-    header_written = False
-    with open(path, "w", newline="") as f:
-        for chunk in chunks:
-            chunk.to_csv(f, index=False, header=not header_written)
-            header_written = True
-            total += len(chunk)
-    if not header_written:
-        open(path, "w").close()
-    return total

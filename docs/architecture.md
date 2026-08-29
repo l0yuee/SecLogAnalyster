@@ -106,6 +106,59 @@ for both `--out` (streamed straight to CSV, one chunk at a time -- see
 result, at the cost of not being able to report an exact "N more rows"
 count without materializing everything to know it).
 
+### Querying without SQL: `search.py`
+
+`seclogx search` / `Case.search()` let an analyst filter any table with
+plain field/operator/value conditions -- no SQL. `search.py` translates
+these into the same parameterized SQL `.sql()`/`.sql_chunks()` already
+run, in three steps:
+
+1. **Field resolution** (`resolve_field`): a field name that matches one
+   of the table's real columns is used directly; otherwise it's looked up
+   as a key inside whichever of the table's columns hold a JSON *object*
+   (`event_data`, `extra`, `fields`, ...). Which columns those are comes
+   from this project's own schema modules (`schema.py`'s `CORE_COLUMNS`,
+   `logsources/schema.py`'s `TABLES`) -- their declared JSON-type
+   annotations -- rather than DuckDB's catalog, because every JSON-bearing
+   column here is physically stored as VARCHAR (see schema.py's
+   `event_data` comment), so asking DuckDB "is this column's type JSON"
+   always says no. Content-sniffing the catalog instead (sample a value,
+   check it looks like `{...}`) was the first approach tried and it broke
+   silently whenever a JSON-object column was all-NULL in a given case;
+   reading the declared type doesn't have that failure mode. JSON *array*
+   columns (`scheduled_tasks.actions`/`triggers`) are excluded from this
+   even though they're declared JSON too -- keyed extraction doesn't
+   apply to a list the same way. An unresolvable field raises
+   `UnknownFieldError` listing the table's actual columns, rather than a
+   raw "column not found" from DuckDB.
+2. **Operator compilation** (`_condition_sql`): `equals` casts both sides
+   to VARCHAR and compares (optionally via `LOWER()` for the default
+   case-insensitive behavior) -- deliberately always a text comparison so
+   an analyst doesn't need to know or care whether the underlying column
+   is numeric; `contains` is `LIKE`/`ILIKE` with the literal value's `%`/
+   `_`/`\` escaped (it's a literal substring search, not a wildcard
+   pattern); `regex` is `regexp_matches(expr, pattern, options)`, with
+   `options='i'` for case-insensitive (DuckDB's regex case-insensitivity
+   flag). Multiple values on one condition combine with OR (`status`
+   equals 404 or 500); multiple conditions combine with AND by default,
+   OR if `match="any"`.
+3. **Memory-safety check** (reusing `CaseDB.estimate()`): `search()`
+   estimates the result size before fetching and raises
+   `ResultTooLargeError` -- naming `search_chunks()`/`search_to_csv()` as
+   the alternatives -- rather than materializing a result too large for
+   the machine's available memory. `search_chunks()`/`search_to_csv()`
+   skip the check entirely, since they're memory-safe at any result size
+   regardless (same `sql_chunks()`/`export_chunks_to_csv()` as the rest of
+   the bounded-memory delivery story above).
+
+`query.py`'s `ResultSizeEstimate`/`CaseDB.estimate()` and
+`memcheck.available_memory_bytes()` (best-effort, no new dependency:
+`/proc/meminfo` on Linux, `os.sysconf` as a coarser POSIX fallback,
+`GlobalMemoryStatusEx` via `ctypes` on Windows, `None` -- treated as
+"unknown, be conservative" -- if none of those work) aren't
+search-specific; anything wanting a "is this safe to fetch eagerly"
+answer can reuse them the same way.
+
 `detect/` compiles Sigma rules to DuckDB SQL via a custom pySigma backend
 (`detect/backend.py`) and a field-mapping pipeline (`detect/pipeline.py`)
 -- see `docs/sigma_backend.md` for how that works and how to extend it.

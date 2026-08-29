@@ -159,7 +159,9 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 
 无论下表中的表是否拥有专属接口，都始终可以用完全通用的方式访问：命令行的
 `seclogx query <case> "<SQL>"` / `seclogx table <case> <name>`，以及 Python 中的
-`Case.query()`/`Case.db.table(name)`（连同它们的 `_chunks` 同名方法）。下表列出的是每张表在此基础之上*额外*拥有的专属接口。
+`Case.query()`/`Case.db.table(name)`（连同它们的 `_chunks`
+同名方法）——如果你完全不想写 SQL，还可以用 `seclogx search <case> <table>` /
+`Case.search()`（纯字段/取值条件：精确匹配、模糊匹配或正则匹配——完整讲解见本表后面的专门小节）。下表列出的是每张表在此基础之上*额外*拥有的专属接口。
 
 | 日志类型 | 表 | 专属命令行 | 专属 Python（一次性 / 分块） | Sigma 狩猎 |
 |---|---|---|---|---|
@@ -188,6 +190,66 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 - **`exchange_logs`**——Exchange 基于 HTTP 的入侵（例如 ProxyShell 类攻击），此时相关活动体现在
   HttpProxy/OWA/ECP 的访问模式中，而不是邮件流转记录里——在不清楚具体字段结构时，可按内容对
   `fields` 做全文排查。
+
+### 不写 SQL 也能查询
+
+本指南其他地方的每一个 SQL 示例都有对应的免 SQL 写法：命令行用
+`seclogx search <case> <table>`，Python 用 `Case.search()`。条件就是普通的字段/取值对，分三种：
+
+| 条件 | 含义 | 命令行参数 | Python |
+|---|---|---|---|
+| 精确匹配 | 字段与某个值完全相等 | `--eq FIELD=VALUE` | `eq={"field": "value"}` |
+| 模糊匹配 | 字段包含某个值（子串） | `--contains FIELD=VALUE` | `contains={"field": "value"}` |
+| 正则匹配 | 字段匹配某个正则表达式 | `--regex FIELD=PATTERN` | `regex={"field": "pattern"}` |
+
+```bash
+# 查找疑似 webshell：uri_stem 中含 "shell"，状态码恰好是 200
+seclogx search incident42 web_logs --contains uri_stem=shell --eq status=200
+```
+```python
+from seclogx import Case
+c = Case.open("incident42")
+c.search("web_logs", contains={"uri_stem": "shell"}, eq={"status": 200})
+```
+
+有几点让它不只是"多敲几个字的 LIKE"：
+
+- **默认大小写不敏感**（用 `--case-sensitive` / `case_sensitive=True` 切换为区分大小写的精确匹配）。
+- **同一条件里的多个取值按 OR 组合**：`--eq status=404,500`（命令行，逗号分隔）或
+  `eq={"status": ["404", "500"]}`（Python）表示匹配其中任意一个值。
+- **不同条件之间默认按 AND 组合**（必须每个条件都满足），加上 `--match-any` /
+  `match="any"` 则改为按 OR 组合（满足其中任意一个条件即可）。
+- **字段名无论是不是"真正的"列都能用。** 只要不是该表自身的列（`status`、`uri_stem`
+  等），就会自动到该表特定 provider 的 JSON 兜底字段中按 key 查找（`events` 对应
+  `event_data`，`web_logs`/`web_error_logs` 对应 `extra`，`exchange_logs` 对应
+  `fields`）——`Image`、`CommandLine`、`TargetUserName`，不管底层 provider 实际怎么命名，直接用就行：
+
+  ```bash
+  seclogx search incident42 events --contains Image=mimikatz --eq channel="Microsoft-Windows-Sysmon/Operational"
+  seclogx search incident42 events --regex CommandLine=".*-enc.*"
+  ```
+
+  如果一个字段名既不是真正的列，也无法在任何 JSON 兜底字段中找到（`scheduled_tasks`
+  就是这种情况，它没有任何 JSON 对象兜底字段），会得到一个清晰的提示，列出该表实际拥有的列，而不是数据库层面难以理解的报错。
+- **`--regex` 使用正则表达式**（DuckDB 基于 RE2 的正则引擎——和大多数日志分析工具用的语法一样，不支持前瞻/后顾断言，而日志匹配场景基本用不到这些）。`--contains`
+  永远是字面子串匹配，绝不是通配符模式——需要真正的模式匹配时请用 `--regex`。
+- **内存安全是设计使然。** `search()` 会在真正取回结果之前先估算结果规模，如果估算结果太大就会拒绝执行——并直接告诉你该用哪种替代方案——而不是冒着让机器耗尽内存的风险硬取：
+
+  ```python
+  from seclogx.errors import ResultTooLargeError
+  try:
+      df = c.search("web_logs", contains={"uri_stem": "shell"})
+  except ResultTooLargeError as e:
+      print(e)  # 会告诉你结果大致有多大、该怎么办
+      for chunk in c.search_chunks("web_logs", contains={"uri_stem": "shell"}):
+          ...                                    # 分批处理，绝不会一次性全部装入内存
+      c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # 或者直接流式写入文件
+  ```
+
+  在命令行中这永远不会变成一个错误——`seclogx search`
+  总是会展示一个有界大小的预览，并告诉你估算的行数/大小；`--out`
+  则始终会把所有匹配行流式导出到 CSV，无论结果有多大（这个估算本身是怎么工作的，见[第
+  9 节](#9-性能与规模说明)）。
 
 ## 4. 命令行参考
 
@@ -339,6 +401,36 @@ seclogx table incident42 web_error_logs
 seclogx table incident42 exchange_message_tracking --out mailflow.csv
 ```
 
+### `seclogx search <case> <table>`
+
+不写 SQL 也能查询任意一张表——条件和匹配方式的完整讲解见[第 3
+节](#3-核心概念)中的“不写 SQL 也能查询”。命令执行前总会先展示估算的行数/大小；`--out`
+无论结果多大都会流式导出全部匹配行，控制台预览则始终只拉取有界数量的行。
+
+| 参数 | 含义 |
+|---|---|
+| `--eq FIELD=VALUE` | 精确匹配。多个取值用逗号分隔表示 OR（`status=404,500`）。可重复。 |
+| `--contains FIELD=VALUE` | 模糊/子串匹配。逗号分隔表示 OR。可重复。 |
+| `--regex FIELD=PATTERN` | 正则匹配（不按逗号拆分——每个参数就是一个完整模式）。可重复。 |
+| `--match-any` | 所有条件按 OR 组合，而不是默认的 AND |
+| `--case-sensitive` | 区分大小写匹配（默认不区分大小写） |
+| `--out FILE.csv` | 将所有匹配行流式写入 CSV，而不是打印预览 |
+| `--limit N` | 限制返回行数（下推到查询中） |
+
+```bash
+# 疑似 webshell：不常见的扩展名、状态码 200
+seclogx search incident42 web_logs --contains uri_stem=.aspx --eq status=200
+
+# 编码后的 PowerShell，默认不区分大小写
+seclogx search incident42 events --regex CommandLine=".*-enc.*"
+
+# 持久化排查：被隐藏的任务，或者调用了 LOLBin 的任务
+seclogx search incident42 scheduled_tasks --eq hidden=true --match-any --contains actions=powershell
+
+# 无论有多少行，把所有匹配结果都导出到 CSV
+seclogx search incident42 web_error_logs --eq severity=error,SEVERE --out errors.csv
+```
+
 ### `seclogx tasks <case> [--suspicious]`
 
 列出已导入的 `scheduled_tasks` 计划任务定义。
@@ -447,6 +539,23 @@ df = c.query("""
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
 
+# ……或者不写 SQL 做同样的事：针对任意表的纯字段/取值条件。
+# eq= 精确匹配，contains= 模糊/子串匹配，regex= 正则匹配；默认不区分大小写；
+# 不同条件之间默认按 AND 组合（match="any" 表示 OR）；同一字段的多个取值按 OR 组合。
+# 字段名无论是不是"真正的"列都能用——Image/CommandLine 等会自动到
+# event_data 里查找。完整讲解见第 3 节的“不写 SQL 也能查询”。
+df = c.search(
+    "events",
+    contains={"Image": "mimikatz"},
+    eq={"channel": "Microsoft-Windows-Sysmon/Operational"},
+)
+c.search("web_logs", contains={"uri_stem": "admin"}, eq={"status": [401, 403]})
+c.search("events", regex={"CommandLine": r".*-enc.*"})
+
+# 如果估算结果太大、装不进内存，search() 会拒绝执行（抛出
+# ResultTooLargeError），而不是冒着耗尽内存的风险硬取——见下文
+# “大表的有界内存访问”中 search_chunks()/search_to_csv() 这两种替代方案。
+
 # 每一类日志都有对应的一等 DataFrame 访问器——与 events 待遇完全相同，
 # 无需借助原生 SQL 就能拿到 DataFrame。案例中若还没有该表的数据，
 # 会返回一个空 DataFrame，而不是报错。在真实规模的 Web 日志案例上不加过滤地调用这些方法之前，
@@ -530,6 +639,35 @@ DataFrame 保持一致。
 在 `--out` 时会将分块直接流式写入 CSV，控制台预览也只会拉取足够填满表格的行数（绝不会拉取完整结果）——见[第
 4 节](#4-命令行参考)。你不需要任何 `--chunks` 之类的参数；这就是这些命令本来的工作方式。
 
+### `.search()` 的主动内存安全检查
+
+`.search()` 比上面的 `_chunks` 模式更进一步：它会在真正取回结果*之前*先估算结果规模（精确的
+`count(*)`，乘以一个从小样本得出的单行字节数），并与机器当前实际可用的内存做比较。如果把整个结果物化成一个
+DataFrame 会用掉超过四分之一的可用内存，它就会拒绝执行——抛出
+`ResultTooLargeError`——而不是硬取一把、冒着耗尽内存崩溃的风险：
+
+```python
+from seclogx.errors import ResultTooLargeError
+
+try:
+    df = c.search("web_logs", contains={"uri_stem": "shell"})
+except ResultTooLargeError as e:
+    print(e)
+    # "this search matches an estimated 8,400,000 rows (~1200 MB) -- too
+    #  large to safely hold in memory as one DataFrame. Use search_chunks()
+    #  ... or search_to_csv() ..."
+
+# 它提示的两种替代方案，无论结果多大都是内存安全的：
+for chunk in c.search_chunks("web_logs", contains={"uri_stem": "shell"}):
+    ...                                                          # 逐块迭代
+c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # 或流式写入文件
+```
+
+`query()`/`table()` 等方法本身并不做这种"先估算再决定"的检查（只有
+`.search()` 会做）——对于那些方法，只要你不确定结果大小，就自己主动改用
+`_chunks` 同名方法。如果你已经知道某个 `.search()` 查询的结果很小（比如条件已经收得很窄），也不需要做任何特殊处理——这个检查只会拦截真正被估算为过大的取回操作；能装得下的结果会像上面的一次性方法一样，正常返回一个
+DataFrame。
+
 `Case` 支持上下文管理器协议，便于干净地关闭其 DuckDB 连接：
 
 ```python
@@ -540,7 +678,9 @@ with Case.open("incident42") as c:
 ## 6. 分析师工作流 / 常用查询
 
 以下是一些具体、可直接复制使用的起点。它们既可以通过
-`seclogx query <case> "<SQL>"`，也可以在 Python 中通过 `c.query("<SQL>")` 以完全相同的方式运行。
+`seclogx query <case> "<SQL>"`，也可以在 Python 中通过 `c.query("<SQL>")` 以完全相同的方式运行。如果你不想写
+SQL，前两个查询同时给出了 `seclogx search` / `Case.search()` 的对应写法——下面每一个查询都可以照这个模式（用条件字典代替
+`WHERE` 子句）改写，不限于 `events` 表。
 
 **发现 LOLBin 滥用（由异常父进程启动的进程）：**
 
@@ -554,6 +694,15 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 ORDER BY time_created
 ```
 
+不写 SQL 的等价写法：
+
+```bash
+seclogx search incident42 events --eq channel="Microsoft-Windows-Sysmon/Operational" --eq event_id=1 --contains Image=rundll32.exe
+```
+```python
+c.search("events", eq={"channel": "Microsoft-Windows-Sysmon/Operational", "event_id": "1"}, contains={"Image": "rundll32.exe"})
+```
+
 **编码后的 PowerShell 命令：**
 
 ```sql
@@ -562,6 +711,15 @@ FROM events
 WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
   AND ((event_data ->> 'CommandLine') ILIKE '%-enc%' OR (event_data ->> 'CommandLine') ILIKE '%-encodedcommand%')
 ORDER BY time_created
+```
+
+不写 SQL 的等价写法（一个 `regex` 条件同时覆盖 `-enc` 和 `-encodedcommand`）：
+
+```bash
+seclogx search incident42 events --eq channel="Microsoft-Windows-Sysmon/Operational" --eq event_id=1 --regex CommandLine="-enc(odedcommand)?"
+```
+```python
+c.search("events", eq={"channel": "Microsoft-Windows-Sysmon/Operational", "event_id": "1"}, regex={"CommandLine": "-enc(odedcommand)?"})
 ```
 
 **跨所有主机按登录类型查看成功登录（排查可疑的 RDP/网络登录）：**
@@ -742,6 +900,10 @@ seclogx rules validate --rules /path/to/your/rules
   同名方法（`.query_chunks()`、`.web_logs_chunks()`、`.timeline_chunks()` 等），其内存占用由
   `chunksize` 决定，而非结果总量。完整说明与示例见[第 5 节](#5-python--notebook-api)中的“大表的有界内存访问”；命令行（`query`/`table`/`tasks`/`timeline`）在
   `--out` 导出和控制台预览时都会自动使用这一机制，无需任何额外参数即可获得有界内存的行为。
+- `.search()` 会在取回结果之前先估算其规模（精确的 `count(*)`，乘以从一个
+  `LIMIT` 有界样本得出的单行字节数，再外推到全部行数——两步的开销都与表的总大小无关，因此这个估算过程本身不会耗尽它原本想要保护的内存），并与机器当前实际可用内存的四分之一做比较，超出就拒绝取回而不是硬取。可用内存的检测是尽力而为的（Linux
+  上读 `/proc/meminfo`，其他平台用更粗略的兜底方式），如果完全无法确定，则回退为固定假设
+  200MB 可用，而不是假设机器内存无限。
 - `--keep-raw` 会使被应用文件的导入耗时与峰值内存大致翻倍——建议只在需要完整 XML
   保真度的特定证据上选择性使用，而不要对整个大型案例默认开启。
 - 计划任务/IIS/Web 访问/Exchange 日志按文件直接解析为 Python 字典（没有中间 NDJSON
@@ -798,6 +960,22 @@ DataFrame。改用对应的 `_chunks` 方法（`c.query_chunks()`、`c.web_logs_
 `WHERE` 子句是否真的具有选择性（一个未加过滤的 `SELECT * FROM web_logs`
 无论是否分块，都需要扫描整张表——分块限制的是*内存*，而不是需要扫描的数据量）。
 
+**`Case.search()` 抛出了 `ResultTooLargeError`**
+这不是 bug——估算的结果被判定为超出了这台机器可用内存能安全容纳一个
+DataFrame 的范围。错误信息里会给出估算的行数/大小；用 `search_chunks()`
+以有界大小分批迭代同一个查询，或用 `search_to_csv()` 把所有匹配行流式写入文件。在命令行中，`seclogx
+search` 永远不会因此报错——遇到同样的情况，它只会展示一个有界预览并给出提示，告诉你改用
+`--out`。
+
+**`seclogx search` / `Case.search()` 提示某个字段"不是……的列，而且这张表也没有可供查找的
+JSON 字段"**
+说明这个字段名既不是该表的真实列，这张表也没有 JSON 对象类型的兜底字段可供按
+key 查找（在内置的表里，只有 `scheduled_tasks` 会遇到这种情况——见[第 3
+节](#3-核心概念)中的“不写 SQL 也能查询”）。错误信息会列出该表实际拥有的列名。如果你是想查
+`actions`/`triggers` 内部的某个字段，请直接用 `--contains`/`--regex`
+对这一整列做文本匹配，而不要尝试按字段名深入到其中某一项——它们是 JSON
+*数组*，不是对象，按 key 提取不适用。
+
 ## 11. 已知限制
 
 详情见 `docs/known_limitations.md`（英文）。简要概括：
@@ -829,6 +1007,13 @@ DataFrame。改用对应的 `_chunks` 方法（`c.query_chunks()`、`c.web_logs_
   导入以及查询/取回环节同等程度的有界内存：单次导入运行会在整个批次范围内把某张表的所有已解析行都保存在内存中，之后才写入
   Parquet。以目前实际验证过的规模而言没有问题；但如果单次导入的文件多到在一个批次内就达到 TB
   级别，即便之后生成的数据湖能正常查询，导入过程本身也可能耗尽内存。
+- `seclogx search`/`Case.search()` 的 `equals` 始终比较取值的*文本*表示（因此不用关心底层列是不是数值类型）；`contains`
+  永远是字面、经过转义的子串匹配，绝不是通配符模式（需要通配符效果请用
+  `regex`）；`regex` 使用 DuckDB 基于 RE2 的正则引擎（不支持前瞻/后顾断言）。
+- 解析到 JSON *数组*列（`scheduled_tasks.actions`/`triggers`）的字段无法按
+  key 查找——请直接对该列做整列文本匹配。
+- `.search()` 拒绝执行所依据的内存安全估算是外推得出的（`count(*)`
+  精确，但单行字节数来自采样，是外推值，并非精确值）——如果结果集中各行大小差异异常悬殊，估算可能会有一定偏差；默认的安全余量（可用内存的四分之一）刻意留得比较保守，以吸收这种偏差。
 
 ## 12. 许可证与规则来源
 

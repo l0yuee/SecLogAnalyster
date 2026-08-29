@@ -212,7 +212,10 @@ A few things worth knowing before you query these:
 Every table below is always reachable the fully generic way regardless of
 whether it has a dedicated interface: `seclogx query <case> "<SQL>"` /
 `seclogx table <case> <name>` on the CLI, and `Case.query()`/
-`Case.db.table(name)` (plus their `_chunks` siblings) in Python. The
+`Case.db.table(name)` (plus their `_chunks` siblings) in Python -- or,
+if you'd rather not write SQL at all, `seclogx search <case> <table>` /
+`Case.search()` (plain field/value conditions: exact, fuzzy, or regex
+matching -- see the dedicated walkthrough right after this table). The
 columns below are the *additional*, purpose-built interfaces each table
 gets on top of that.
 
@@ -255,6 +258,83 @@ What to actually look for in each, at a glance (full recipes in
   ProxyShell-style attacks) where the relevant activity is in
   HttpProxy/OWA/ECP access patterns rather than mail flow -- sweep
   `fields` by content when you don't know the exact schema.
+
+### Searching without SQL
+
+Every SQL example elsewhere in this guide has a no-SQL equivalent:
+`seclogx search <case> <table>` on the CLI, `Case.search()` in Python.
+Conditions are plain field/value pairs, one of three kinds:
+
+| Condition | Meaning | CLI flag | Python |
+|---|---|---|---|
+| Exact match | field equals a value exactly | `--eq FIELD=VALUE` | `eq={"field": "value"}` |
+| Fuzzy match | field contains a value as a substring | `--contains FIELD=VALUE` | `contains={"field": "value"}` |
+| Regular expression | field matches a regex pattern | `--regex FIELD=PATTERN` | `regex={"field": "pattern"}` |
+
+```bash
+# Find webshell-like hits: uri_stem contains "shell", status exactly 200
+seclogx search incident42 web_logs --contains uri_stem=shell --eq status=200
+
+# Same thing in Python
+```
+```python
+from seclogx import Case
+c = Case.open("incident42")
+c.search("web_logs", contains={"uri_stem": "shell"}, eq={"status": 200})
+```
+
+A few things that make this more than "LIKE with extra steps":
+
+- **Matching is case-insensitive by default** (`--case-sensitive` / 
+  `case_sensitive=True` to opt into exact-case matching).
+- **Multiple values on one condition combine with OR**: `--eq
+  status=404,500` (CLI, comma-separated) or `eq={"status": ["404",
+  "500"]}` (Python) matches either value.
+- **Multiple different conditions combine with AND by default** (every
+  condition must match), or OR with `--match-any` / `match="any"` (any
+  one condition matching is enough).
+- **Field names work whether or not they're a "real" column.** A field
+  that isn't one of the table's own columns (`status`, `uri_stem`, ...) is
+  looked up as a key inside the table's provider-specific JSON catchall
+  (`event_data` for `events`, `extra` for `web_logs`/`web_error_logs`,
+  `fields` for `exchange_logs`) automatically -- `Image`, `CommandLine`,
+  `TargetUserName`, whatever the underlying provider actually calls it,
+  just works:
+
+  ```bash
+  seclogx search incident42 events --contains Image=mimikatz --eq channel="Microsoft-Windows-Sysmon/Operational"
+  seclogx search incident42 events --regex CommandLine=".*-enc.*"
+  ```
+
+  A field name that isn't a real column *and* doesn't resolve inside any
+  JSON catchall (most fields on `scheduled_tasks`, which has none) is
+  reported clearly, listing the table's actual columns, rather than a
+  cryptic database error.
+- **`--regex` uses regular expressions** (DuckDB's RE2-based engine --
+  the same syntax most log-analysis tools use, no
+  lookahead/lookbehind support, which log patterns rarely need anyway).
+  `--contains` is always a literal substring, never a wildcard pattern --
+  reach for `--regex` if you need real pattern matching.
+- **It's memory-safe by design.** `search()` estimates the result size
+  before fetching and refuses -- pointing you at the alternatives below --
+  rather than risking your machine running out of memory:
+
+  ```python
+  from seclogx.errors import ResultTooLargeError
+  try:
+      df = c.search("web_logs", contains={"uri_stem": "shell"})
+  except ResultTooLargeError as e:
+      print(e)  # tells you roughly how big the result is and what to do instead
+      for chunk in c.search_chunks("web_logs", contains={"uri_stem": "shell"}):
+          ...                                    # process piece by piece, never all at once
+      c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # or just stream it to a file
+  ```
+
+  On the CLI this never turns into an error -- `seclogx search` always
+  shows a bounded preview and tells you the estimated row/size count, and
+  `--out` always streams every matching row to CSV regardless of size
+  (see [section 9](#9-performance-and-scale-notes) for how the estimate
+  itself works).
 
 ## 4. Command-line reference
 
@@ -435,6 +515,38 @@ seclogx table incident42 web_error_logs
 seclogx table incident42 exchange_message_tracking --out mailflow.csv
 ```
 
+### `seclogx search <case> <table>`
+
+Query any table without writing SQL -- see "Searching without SQL" in
+[section 3](#3-core-concepts) for the full explanation of how conditions
+and matching work. Always shows an estimated row/size count before
+results; `--out` streams every matching row regardless of size, the
+console preview only ever pulls a bounded number of rows.
+
+| Option | Meaning |
+|---|---|
+| `--eq FIELD=VALUE` | Exact match. Comma-separate multiple values for OR (`status=404,500`). Repeatable. |
+| `--contains FIELD=VALUE` | Fuzzy/substring match. Comma-separate for OR. Repeatable. |
+| `--regex FIELD=PATTERN` | Regular-expression match (not comma-split -- one pattern per flag). Repeatable. |
+| `--match-any` | Combine all conditions with OR instead of the default AND |
+| `--case-sensitive` | Case-sensitive matching (default: case-insensitive) |
+| `--out FILE.csv` | Stream every matching row to CSV instead of a preview |
+| `--limit N` | Cap the number of rows (pushed into the query) |
+
+```bash
+# Possible webshell: uncommon extension, 200 status
+seclogx search incident42 web_logs --contains uri_stem=.aspx --eq status=200
+
+# Encoded PowerShell, case-insensitive by default
+seclogx search incident42 events --regex CommandLine=".*-enc.*"
+
+# Persistence hunting: hidden tasks OR ones invoking a LOLBin
+seclogx search incident42 scheduled_tasks --eq hidden=true --match-any --contains actions=powershell
+
+# Export every match to CSV regardless of how many rows that is
+seclogx search incident42 web_error_logs --eq severity=error,SEVERE --out errors.csv
+```
+
 ### `seclogx tasks <case> [--suspicious]`
 
 Lists ingested Scheduled Task definitions from `scheduled_tasks`.
@@ -553,6 +665,26 @@ df = c.query("""
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
 
+# ...or the same thing without SQL: plain field/value conditions against
+# any table. eq= exact, contains= fuzzy/substring, regex= regular
+# expression; case-insensitive by default; different conditions combine
+# with AND (match="any" for OR); multiple values for one field combine
+# with OR. Field names work whether or not they're a "real" column --
+# Image/CommandLine/etc. are looked up inside event_data automatically.
+# See "Searching without SQL" in section 3 for the full explanation.
+df = c.search(
+    "events",
+    contains={"Image": "mimikatz"},
+    eq={"channel": "Microsoft-Windows-Sysmon/Operational"},
+)
+c.search("web_logs", contains={"uri_stem": "admin"}, eq={"status": [401, 403]})
+c.search("events", regex={"CommandLine": r".*-enc.*"})
+
+# search() refuses (raising ResultTooLargeError) rather than risking an
+# out-of-memory crash if the estimated result is too large -- see
+# "Bounded-memory access for large tables" below for search_chunks()/
+# search_to_csv(), the alternatives it points you at.
+
 # Every log family is a first-class, DataFrame-returning accessor -- the
 # same treatment `events` gets, so nothing requires raw SQL just to get a
 # DataFrame. Each returns an empty (not erroring) DataFrame if the case
@@ -645,6 +777,42 @@ preview only pulls enough rows to fill the table (never the whole
 result) -- see [section 4](#4-command-line-reference). You don't need
 `--chunks` or any equivalent flag; it's just how those commands work.
 
+### `.search()`'s proactive memory-safety check
+
+`.search()` goes one step further than the `_chunks` pattern above: it
+estimates the result size *before* fetching (an exact `count(*)` times a
+bytes-per-row figure from a small sample) and compares it against the
+machine's actual currently-available memory. If materializing the whole
+result as one DataFrame would use more than a quarter of that, it refuses
+-- raising `ResultTooLargeError` -- instead of trying and risking an
+out-of-memory crash:
+
+```python
+from seclogx.errors import ResultTooLargeError
+
+try:
+    df = c.search("web_logs", contains={"uri_stem": "shell"})
+except ResultTooLargeError as e:
+    print(e)
+    # "this search matches an estimated 8,400,000 rows (~1200 MB) -- too
+    #  large to safely hold in memory as one DataFrame. Use search_chunks()
+    #  ... or search_to_csv() ..."
+
+# The two alternatives it names, both memory-safe at any result size:
+for chunk in c.search_chunks("web_logs", contains={"uri_stem": "shell"}):
+    ...                                                          # iterate
+c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # or stream to a file
+```
+
+`query()`/`table()`/etc. don't do this estimate-and-refuse check
+themselves (only `.search()` does) -- for those, reach for the `_chunks`
+sibling yourself whenever you're not sure a result is small. If you
+already know a `.search()` result will be small (a tightly-scoped
+condition, say), you don't need to do anything differently -- the check
+only ever blocks a fetch that's actually estimated too large; anything
+that fits returns a normal DataFrame exactly like the eager accessors
+above.
+
 `Case` supports the context manager protocol to close its DuckDB
 connection cleanly:
 
@@ -657,7 +825,10 @@ with Case.open("incident42") as c:
 
 A handful of concrete, copy-pasteable starting points. All of these work
 identically via `seclogx query <case> "<SQL>"` or `c.query("<SQL>")` in
-Python.
+Python. If you'd rather not write SQL at all, the first two are also
+shown as `seclogx search` / `Case.search()` equivalents -- the same
+pattern (condition dicts instead of a `WHERE` clause) applies to every
+recipe below, and to every table, not just `events`.
 
 **Find LOLBin abuse (process spawned by an unusual parent):**
 
@@ -671,6 +842,15 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 ORDER BY time_created
 ```
 
+No-SQL equivalent:
+
+```bash
+seclogx search incident42 events --eq channel="Microsoft-Windows-Sysmon/Operational" --eq event_id=1 --contains Image=rundll32.exe
+```
+```python
+c.search("events", eq={"channel": "Microsoft-Windows-Sysmon/Operational", "event_id": "1"}, contains={"Image": "rundll32.exe"})
+```
+
 **Encoded PowerShell:**
 
 ```sql
@@ -679,6 +859,15 @@ FROM events
 WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
   AND ((event_data ->> 'CommandLine') ILIKE '%-enc%' OR (event_data ->> 'CommandLine') ILIKE '%-encodedcommand%')
 ORDER BY time_created
+```
+
+No-SQL equivalent (`regex` covers both `-enc` and `-encodedcommand` in one condition):
+
+```bash
+seclogx search incident42 events --eq channel="Microsoft-Windows-Sysmon/Operational" --eq event_id=1 --regex CommandLine="-enc(odedcommand)?"
+```
+```python
+c.search("events", eq={"channel": "Microsoft-Windows-Sysmon/Operational", "event_id": "1"}, regex={"CommandLine": "-enc(odedcommand)?"})
 ```
 
 **Successful logons by type, across all hosts (spot RDP/network logons of interest):**
@@ -899,6 +1088,16 @@ a case with data you expect to match, to confirm end to end.
   worked example; the CLI (`query`/`table`/`tasks`/`timeline`) uses this
   automatically for both `--out` and the console preview, so no CLI flag
   is needed to get the bounded-memory behavior there.
+- `.search()` estimates a result's size before fetching it (`count(*)`,
+  exact, plus a bytes-per-row figure from a small `LIMIT`-bounded sample,
+  extrapolated to the full row count -- both steps bounded regardless of
+  the table's total size, so the estimate itself never risks the memory
+  it's trying to protect) and compares it against a quarter of the
+  machine's actual currently-available memory, refusing rather than
+  fetching if that's exceeded. Available memory is detected best-effort
+  (`/proc/meminfo` on Linux, coarser fallbacks elsewhere) and falls back
+  to a fixed 200MB assumption if it can't be determined at all, rather
+  than assuming the machine has unlimited memory.
 - `--keep-raw` roughly doubles ingest cost (time and peak memory) for
   the files it's applied to -- use it selectively on evidence that
   needs full XML fidelity, not by default on an entire large case.
@@ -980,6 +1179,26 @@ clause is actually selective (an unfiltered `SELECT * FROM web_logs`
 still has to read the whole table, chunked or not -- chunking bounds
 *memory*, not the amount of data scanned).
 
+**`Case.search()` raised `ResultTooLargeError`**
+Not a bug -- the estimated result was judged too large for this
+machine's available memory to safely hold as one DataFrame. The error
+message names the estimated row count/size; use `search_chunks()` to
+iterate the same search in bounded-size pieces, or `search_to_csv()` to
+stream every matching row straight to a file. On the CLI, `seclogx
+search` never raises this -- it always shows a bounded preview and warns
+in the same situation, telling you to add `--out` instead.
+
+**`seclogx search` / `Case.search()` says a field "is not a column ... and this table has no JSON field to search inside either"**
+The field name isn't one of the table's real columns, and the table has
+no JSON-object catchall to look inside either (this only happens on
+`scheduled_tasks` among the bundled tables -- see "Searching without
+SQL" in [section 3](#3-core-concepts)). The error message lists the
+table's actual column names. If you're trying to search inside
+`actions`/`triggers` specifically, search that column directly with
+`--contains`/`--regex` (whole-column text match) rather than a field name
+nested inside it -- those are JSON *arrays*, not objects, so keyed
+extraction doesn't apply.
+
 ## 11. Known limitations
 
 Full details in `docs/known_limitations.md`. In short:
@@ -1030,6 +1249,20 @@ Full details in `docs/known_limitations.md`. In short:
   so far; a batch large enough to reach terabyte scale in one run could
   exhaust memory during ingest even though the resulting lake would query
   fine afterward.
+- `seclogx search`/`Case.search()`'s `equals` always compares a value's
+  *text* representation (so it doesn't matter whether the underlying
+  column is numeric); `contains` is a literal, escaped substring search,
+  never a wildcard pattern (use `regex` for that); `regex` uses DuckDB's
+  RE2-based engine (no lookahead/lookbehind).
+- A field that resolves into a JSON *array* column
+  (`scheduled_tasks.actions`/`triggers`) can't be searched by key --
+  search that column directly (whole-column text match) instead.
+- The memory-safety estimate behind `.search()`'s refusal is a
+  `count(*)` (exact) times a sampled bytes-per-row figure (extrapolated,
+  not exact) -- a result with unusually wide row-to-row size variance can
+  be estimated somewhat off in either direction; the default safety
+  margin (a quarter of available memory) is deliberately conservative to
+  absorb this.
 
 ## 12. License and rule attribution
 

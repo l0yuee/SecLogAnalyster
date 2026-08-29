@@ -1,0 +1,2 @@
+2026/01/02 03:04:05 [error] 12345#0: *1 open() "/usr/share/nginx/html/shell.php" failed (2: No such file or directory), client: 203.0.113.9, server: example.com, request: "GET /shell.php HTTP/1.1", host: "example.com"
+2026/01/02 03:04:06 [warn] 12345#0: *2 a client request body is buffered to a temporary file, client: 203.0.113.10, server: example.com

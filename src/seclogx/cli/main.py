@@ -6,7 +6,7 @@ from .. import __version__
 from .case_cmds import case_app
 from .hunt_cmd import hunt_command
 from .ingest_cmd import ingest_command
-from .query_cmd import channels_command, query_command, sources_command, summary_command
+from .query_cmd import channels_command, query_command, sources_command, summary_command, table_command
 from .rules_cmd import rules_app
 from .tasks_cmd import tasks_command
 from .timeline_cmd import timeline_command
@@ -23,6 +23,7 @@ app.command("query")(query_command)
 app.command("summary")(summary_command)
 app.command("channels")(channels_command)
 app.command("sources")(sources_command)
+app.command("table")(table_command)
 app.command("hunt")(hunt_command)
 app.command("timeline")(timeline_command)
 app.command("tasks")(tasks_command)

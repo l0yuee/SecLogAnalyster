@@ -73,7 +73,8 @@ cases/<name>/
   logs/ingest_<batch_id>.log    # 每次导入的核对报告
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows 事件日志
-    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat
+    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat 访问日志
+    web_error_logs/host=<h>/log_type=<t>/*.parquet               # nginx/Apache/Tomcat/IIS HTTPERR 错误日志
     scheduled_tasks/host=<h>/*.parquet                           # 计划任务定义
     exchange_message_tracking/host=<h>/*.parquet                 # Exchange 邮件流转
     exchange_logs/host=<h>/log_type=<t>/*.parquet                # 其他 Exchange CSV 日志
@@ -123,14 +124,18 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 如果你不确定某个信息具体在哪个字段里，可以用 `CaseDB.search()` /
 `seclogx query ... event_data::VARCHAR ILIKE '%...%'` 对其做全文检索（见[第 6 节](#6-分析师工作流--常用查询)）。
 
-### 其他表：`web_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`
+### 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`
 
 Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每一类数据的形态都与事件日志本质不同，因此各自拥有独立的表，而不是硬塞进
-`events` 里——完整列参考见 `docs/schema.md`。
+`events` 里——完整列参考见 `docs/schema.md`。其中每一张表也都有对应的 `Case`
+访问器，直接返回 `pandas.DataFrame`（`c.web_logs()`、`c.scheduled_tasks()` 等），与
+`events` 通过 `summary()`/`hosts()`/`channels()` 获得的一等待遇完全相同——见[第 5
+节](#5-python--notebook-api)。
 
 | 表 | 存放内容 | 关键列 |
 |---|---|---|
-| `web_logs` | IIS、nginx、Apache、Tomcat 的 HTTP 访问日志，统一存放 | `log_type`、`client_ip`、`method`、`uri_stem`、`uri_query`、`status`、`user_agent`、`referer` |
+| `web_logs` | **访问日志**：IIS、nginx、Apache、Tomcat 的 HTTP 访问日志，统一存放 | `log_type`、`client_ip`、`method`、`uri_stem`、`uri_query`、`status`、`user_agent`、`referer` |
+| `web_error_logs` | **错误/诊断日志**：nginx、Apache、Tomcat 以及 IIS HTTP.sys（HTTPERR）——Web 应用另一大类日志，统一存放 | `log_type`、`severity`、`client_ip`、`message`，以及 IIS HTTPERR 特有的 `method`/`uri`/`status` |
 | `scheduled_tasks` | 磁盘上的计划任务定义（`System32\Tasks\**`）——一种持久化痕迹，区别于计划任务的*事件日志*（已在 `events` 中覆盖） | `task_path`、`author`、`enabled`、`hidden`、`actions`（JSON）、`triggers`（JSON） |
 | `exchange_message_tracking` | Exchange 邮件流转记录（谁给谁发了什么） | `sender_address`、`recipient_address`、`message_subject`、`event_id`（Exchange 自身的事件标识，**不是** Windows 事件 ID） |
 | `exchange_logs` | 其他所有 Exchange CSV 日志类型（HttpProxy、ActiveSync、EWS 等），字段原样保留 | `log_type`、`fields`（JSON，用 `fields ->> 'field-name'` 查询） |
@@ -138,9 +143,14 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 在查询这些表之前，有几点需要了解：
 
 - **格式判定基于文件内容，而非文件名或扩展名**——活跃系统上的计划任务文件根本没有扩展名，取证工具也经常重命名导出的日志。任何不匹配已支持格式的文件都会在导入摘要中被报告为“无法识别”，绝不会被静默跳过。
-- **nginx、Apache、Tomcat 之间的区分是尽力而为的标签，并非确切检测**——三者默认使用的
+- **`web_logs` 覆盖访问日志类别，`web_error_logs` 覆盖错误/诊断日志类别**——这是每个
+  Web 应用都会产生的两大日志类别。二者被拆成两张独立的表，因为它们在结构上完全不相关（访问日志有请求/响应的形态；错误日志只是严重级别加自由文本）。
+- **在 `web_logs` 中，nginx、Apache、Tomcat 之间的区分是尽力而为的标签，并非确切检测**——三者默认使用的
   Common/Combined 日志格式在字节层面完全一致；当没有路径/文件名线索时，`log_type` 会回退为
   `web_access`。IIS 总能被可靠识别（其头部自描述）。
+- **在 `web_error_logs` 中，引擎标签才是真正的检测结果**——与访问日志不同，每种引擎的错误日志格式各不相同且互不歧义。只有各引擎的默认/标准格式会被识别（自定义的
+  `log_format`/`ErrorLogFormat`，或混入 Tomcat `catalina.out`
+  中的原始未结构化标准输出，会导致这些行被报告为解析错误，而不是被错误解析）。
 - **Exchange 支持范围以邮件跟踪日志为一等列**；其余十余种 Exchange 日志类型都进入
   `exchange_logs`，所有字段都保存在 `fields` 中，虽未提升为真正的列，但依然完全可查询。
 - 常用查询见[第 6 节](#6-分析师工作流--常用查询)，完整的取舍决定见 `docs/known_limitations.md`。
@@ -222,19 +232,23 @@ Ingest batch 66777433-... for case 'incident42'
 紧接着 EVTX 的核对报告之后，还会打印第二份针对非 EVTX 数据的核对报告，遵循同样“绝不静默丢弃”的原则——完全无法识别的文件会被明确列出，而不是被跳过：
 
 ```
-Auxiliary log ingest (Scheduled Tasks / IIS / web access / Exchange):
-  files discovered : 6
-  files ok         : 5
+Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange):
+  files discovered : 7
+  files ok         : 6
   files partial    : 0
   files failed     : 0
   files unrecognized: 1  <-- content didn't match any supported format, not ingested
   rows written per table:
     exchange_message_tracking: 1
     scheduled_tasks: 1
+    web_error_logs: 2
     web_logs: 4
   sample unrecognized files:
     /evidence/wks01/notes.txt
 ```
+
+与 EVTX 一侧的 `IngestReport.to_dataframe()` 相对应，`IngestReport.aux.to_dataframe()`（或直接使用
+`run_aux_ingest` 返回的 `AuxIngestReport`）同样能得到一份按文件维度的 DataFrame——每个被发现的文件一行，包含其状态、目标表、记录数/错误数。
 
 ### `seclogx query <case> "<SQL>"`
 
@@ -264,10 +278,25 @@ seclogx query incident42 "
 
 ### `seclogx sources <case>`
 
-列出案例当前拥有的每张表（`events`、`web_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
+列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
 
 ```bash
 seclogx sources incident42
+```
+
+### `seclogx table <case> <name>`
+
+以 DataFrame 形式返回案例中任意一张表的完整内容——是 `Case.web_logs()`/`Case.scheduled_tasks()`
+等方法在命令行侧的对应物，适合那些还没有专属命令的表。
+
+| 参数 | 含义 |
+|---|---|
+| `--out FILE.csv` | 导出完整结果 |
+| `--limit N` | 限制返回行数 |
+
+```bash
+seclogx table incident42 web_error_logs
+seclogx table incident42 exchange_message_tracking --out mailflow.csv
 ```
 
 ### `seclogx tasks <case> [--suspicious]`
@@ -361,7 +390,8 @@ report = c.ingest(
     workers=8,
 )
 print(report.summary_text())
-report.to_dataframe()                  # 每个文件的暂存详情，以 DataFrame 形式返回
+report.to_dataframe()                  # 每个文件的暂存详情，以 DataFrame 形式返回（EVTX 一侧）
+report.aux.to_dataframe()              # 计划任务/IIS/Web/Exchange 一侧的同等信息
 
 # 探索
 c.summary()
@@ -375,13 +405,24 @@ df = c.query("""
     FROM events
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
-web = c.query("SELECT * FROM web_logs WHERE status >= 400 ORDER BY time_created")
+
+# 每一类日志都有对应的一等 DataFrame 访问器——与 events 待遇完全相同，
+# 无需借助原生 SQL 就能拿到 DataFrame。案例中若还没有该表的数据，
+# 会返回一个空 DataFrame，而不是报错。
+c.web_logs()                           # 访问日志：IIS/nginx/Apache/Tomcat/Exchange-HttpProxy
+c.web_logs(log_type="nginx")           # 只看某一种引擎
+c.web_error_logs()                     # 错误日志：nginx/Apache/Tomcat/IIS HTTPERR
+c.web_error_logs(log_type="apache")
+c.scheduled_tasks()
+c.exchange_message_tracking()
+c.exchange_logs(log_type="HttpProxy")
 
 # CaseDB 的便捷方法可通过 c.db 访问
 c.db.by_event_id([4624, 4625])
 c.db.by_host("WKS01")
 c.db.search("mimikatz")                # 对 event_data/provider/computer 做全文检索
 c.db.tables                            # list[str]：该案例实际拥有的表
+c.db.table("web_error_logs")           # 通用兜底方法：按名称取任意表，返回 DataFrame
 
 # 计划任务排查（启发式规则，非 Sigma——见第 7 节）
 c.suspicious_tasks()
@@ -502,6 +543,27 @@ WHERE status = 200
 ORDER BY time_created
 ```
 
+**一次性汇总所有 Web 应用错误日志中的高严重级别条目（nginx 的 `error`、Apache 的
+`error`、Tomcat 的 `SEVERE` 等）：**
+
+```sql
+SELECT host, log_type, time_created, severity, message
+FROM web_error_logs
+WHERE severity IN ('error', 'SEVERE', 'crit', 'alert', 'emerg')
+ORDER BY time_created
+```
+
+**IIS HTTP.sys（HTTPERR）拒绝的请求——这些请求在到达 IIS 工作进程之前就被
+HTTP.sys 本身拒绝（畸形请求、队列上限、应用程序池问题等），它们根本不会出现在
+`web_logs` 中，这正是为什么需要单独检查 `web_error_logs`：**
+
+```sql
+SELECT host, time_created, client_ip, client_port, method, uri, status, message AS reason
+FROM web_error_logs
+WHERE log_type = 'iis_httperr'
+ORDER BY time_created
+```
+
 **Exchange 邮件流转：查找与某个可疑地址相关的所有邮件：**
 
 ```sql
@@ -549,11 +611,11 @@ ATT&CK 技术名称/战术信息来自一个内置的小型查询表（`data/att
 内置规则集（37 条规则，位于 `data/sigma_rules/`）专门针对 **Sysmon** 事件字段（进程创建、网络连接、文件事件、注册表变更、镜像加载、DNS
 查询、命名管道、PowerShell 脚本块、进程访问）——只有当 Sysmon 确实在运行且其日志被导入时，这些规则才可能命中。它是一个精选的起点，而非详尽覆盖；如需添加更多规则，请参见[第 8 节](#8-扩展检测能力自定义规则与字段映射)。
 
-`hunt` 同样支持 Sigma 的 `category: webserver` 规则（针对 `web_logs` 运行），方便你自行提供
-IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。目前没有针对磁盘上计划任务定义或
-Exchange 邮件跟踪日志的 Sigma 日志来源类别，因此这两类数据不属于 Sigma 狩猎的范围；请改用
-`Case.suspicious_tasks()` / `seclogx tasks --suspicious` 排查计划任务，Exchange 数据则使用第 6 节中的原生
-SQL 查询。
+`hunt` 同样支持 Sigma 的 `category: webserver` 规则（针对 `web_logs`，即**访问日志**运行），方便你自行提供
+IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。目前没有针对磁盘上计划任务定义、Web
+应用**错误日志**（`web_error_logs`）或 Exchange 邮件跟踪日志的 Sigma 日志来源类别，因此这些数据不属于 Sigma
+狩猎的范围；请改用 `Case.suspicious_tasks()` / `seclogx tasks --suspicious`
+排查计划任务，`web_error_logs` 与 Exchange 数据则使用第 6 节中的原生 SQL 查询。
 
 ## 8. 扩展检测能力：自定义规则与字段映射
 
@@ -644,11 +706,18 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
 - 除 Sysmon 外的其他 Sysinternals 工具（Procmon、Autoruns 等）在 v1 中尚未支持导入。
 - 非 EVTX 格式的判定基于内容而非绝对保证——不规范的日志头部可能被误判为无法识别（会被报告，绝不会静默丢弃）。
 - 不支持旧版二进制格式的计划任务（`.job`，Vista 之前使用），仅支持现代 Task Scheduler 2.0 的 XML 格式。
-- 仅凭日志行本身无法可靠区分 nginx、Apache、Tomcat（三者的 Common/Combined
-  日志格式字节完全一致）；该标签是路径/文件名启发式结果。
+- 在 `web_logs` 中，仅凭日志行本身无法可靠区分 nginx、Apache、Tomcat（三者的
+  Common/Combined 日志格式字节完全一致）；该标签是路径/文件名启发式结果。（在
+  `web_error_logs` 中，引擎标签是真正的检测结果——错误日志格式本身就是引擎特有的。）
+- `web_error_logs` 只能识别各 Web 应用的默认/标准错误日志格式；自定义格式，或混入
+  Tomcat `catalina.out` 中的原始未结构化标准输出，会被报告为解析错误，而不是被错误解析。单条
+  Tomcat 记录附带的堆栈跟踪最多保留 200 行续行。
+- FREB（IIS 基于 XML 的单请求诊断跟踪）以及 Apache 的 `mod_rewrite`/SSL 请求日志在
+  v1 中尚未支持导入——只覆盖标准的访问日志与错误日志两大类别。
 - 只有 Exchange 邮件跟踪日志拥有一等列；其他所有 Exchange CSV 日志类型都进入通用的
   `exchange_logs` 兜底表，字段被保留但未提升为真正的列。
-- 目前没有针对磁盘上计划任务定义或 Exchange 日志的 Sigma 日志来源类别，因此狩猎功能不覆盖这两张表。
+- 目前没有针对磁盘上计划任务定义、Web 应用错误日志（`web_error_logs`）或 Exchange
+  日志的 Sigma 日志来源类别，因此狩猎功能不覆盖这些表。
 
 ## 12. 许可证与规则来源
 

@@ -87,6 +87,36 @@ Partition columns: `host, log_type`.
 | `extra` | `JSON` | Any W3C field beyond the fixed set above (IIS logs are admin-customizable) |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance, same convention as `events` |
 
+This covers the **access log** category. See `web_error_logs` below for
+the other major web-application log category, **error/diagnostic logs**.
+
+## `web_error_logs`
+
+The error/diagnostic log category of nginx, Apache, Tomcat, and IIS --
+structurally different from access logs (no request/response shape for
+the first three, just severity + free-text message), so it's a separate
+table. Unlike access-log format, error-log format is engine-specific and
+unambiguous, so `log_type` here is a real detection, not a path/filename
+heuristic. Partition columns: `host, log_type`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `log_type` | `VARCHAR` | `nginx` \| `apache` \| `tomcat` \| `iis_httperr` (partition key) |
+| `time_created` | `TIMESTAMP` | Log entry timestamp |
+| `severity` | `VARCHAR` | nginx: `emerg`/`alert`/`crit`/`error`/`warn`/`notice`/`info`/`debug`; Tomcat: `SEVERE`/`WARNING`/`INFO`/... ; NULL for IIS HTTPERR |
+| `pid_or_thread` | `VARCHAR` | nginx `pid#tid`; Apache `pid`; Tomcat thread name; NULL for IIS HTTPERR |
+| `client_ip` / `client_port` | `VARCHAR` | Client endpoint, where the format carries one |
+| `server_ip` / `server_port` | `VARCHAR` | IIS HTTPERR-only (`s-ip`/`s-port`), NULL elsewhere |
+| `protocol_version` | `VARCHAR` | IIS HTTPERR-only (`cs-version`), NULL elsewhere |
+| `method` | `VARCHAR` | IIS HTTPERR-only (`cs-method`), NULL elsewhere |
+| `uri` | `VARCHAR` | IIS HTTPERR-only (`cs-uri`), NULL elsewhere |
+| `status` | `INTEGER` | IIS HTTPERR-only (`sc-status`), NULL elsewhere |
+| `logger` | `VARCHAR` | Tomcat-only (java.util.logging logger name), NULL elsewhere |
+| `message` | `VARCHAR` | nginx/Apache free text; Tomcat's message plus any attached stack trace lines; IIS HTTPERR's `s-reason` |
+| `extra` | `JSON` | Catchall (e.g. IIS HTTPERR's `s-siteid`/`s-queue`) |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
 ## `scheduled_tasks`
 
 On-disk Task Scheduler task definitions (`C:\Windows\System32\Tasks\**`) --

@@ -11,17 +11,22 @@ workspace instead of raw XML and inconsistent text logs.
 - **Scheduled Tasks**: on-disk Task Scheduler XML definitions
   (`System32\Tasks\**`), a persistence artifact distinct from the Task
   Scheduler event log channel (also covered, via `.evtx`).
-- **IIS logs**: W3C Extended Log Format access logs.
-- **Cross-platform web access logs**: nginx, Apache, and Tomcat
-  (Common/Combined Log Format), unified with IIS into one queryable table.
+- **IIS logs**: W3C Extended Log Format access logs, plus HTTP.sys
+  (HTTPERR) error logs.
+- **Cross-platform web logs**: nginx, Apache, and Tomcat -- both major log
+  categories: access logs (Common/Combined Log Format, unified with IIS
+  into one queryable table) and error/diagnostic logs (each engine's
+  native error-log format, unified into a second table).
 - **Exchange logs**: Message Tracking (mail flow, first-class columns) plus
   every other Exchange CSV log type via a generic, nothing-dropped catchall.
 - **Threat hunting built in**: Sigma rules (a curated bundled starter set,
   or your own) compiled to DuckDB SQL and run against the case, with
   MITRE ATT&CK tags surfaced on every match -- covers Windows Event Log
   and web access logs (`category: webserver`).
-- **pandas-native**: every query, hunt, and timeline result is a
-  `pandas.DataFrame`, ready for a notebook.
+- **pandas-native**: every log family -- events, web access/error logs,
+  Scheduled Tasks, Exchange logs -- is reachable as a `pandas.DataFrame`
+  through a named accessor (`c.web_logs()`, `c.scheduled_tasks()`, ...),
+  the same first-class treatment `events` gets, ready for a notebook.
 - **Handles realistic case volumes (<100GB) on a single workstation**,
   lazily -- DuckDB + Parquet, no cluster required.
 - **Never silently drops data.** Every parse error, partial file read,
@@ -88,12 +93,19 @@ c = Case.open("incident42")
 
 c.summary()                       # pandas.DataFrame
 c.query("SELECT * FROM events WHERE event_id = 4688 LIMIT 10")
-c.query("SELECT * FROM web_logs WHERE status >= 400 ORDER BY time_created")
 c.hunt().matches                  # matched events/web_logs, tagged with rule + ATT&CK ids
 c.hunt().rule_summary             # one row per rule evaluated, with match counts
 c.timeline(host="WKS01", event_id=[4624, 4625])
 c.table_counts()                  # what log families this case has
+
+# Every log family is a first-class, DataFrame-returning accessor -- same as events
+c.web_logs(log_type="nginx")             # access logs: IIS/nginx/Apache/Tomcat/Exchange-HttpProxy
+c.web_error_logs(log_type="apache")      # error logs: nginx/Apache/Tomcat/IIS HTTPERR
+c.scheduled_tasks()
+c.exchange_message_tracking()
+c.exchange_logs(log_type="HttpProxy")
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
+c.db.table("web_logs")            # generic escape hatch: any table this case has, by name
 ```
 
 ## CLI reference
@@ -104,7 +116,8 @@ c.suspicious_tasks()              # heuristic triage over scheduled_tasks
 | `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against the case's `events` view |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
-| `seclogx sources <case>` | Row count per table (events, web_logs, scheduled_tasks, exchange_message_tracking, exchange_logs) |
+| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs) |
+| `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |
 | `seclogx tasks <case> [--suspicious]` | List ingested Scheduled Task definitions, optionally filtered by a built-in heuristic |
 | `seclogx hunt <case> [--rules DIR] [--min-level LEVEL]` | Run Sigma rules, report matches + ATT&CK tags |
 | `seclogx rules validate [--rules DIR]` | Check which rules convert vs are unsupported |

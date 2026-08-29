@@ -1,0 +1,5 @@
+#Software: Microsoft HTTP API 2.0
+#Version: 1.0
+#Date: 2026-01-02 03:04:05
+#Fields: date time c-ip c-port s-ip s-port cs-version cs-method cs-uri sc-status s-siteid s-reason s-queue
+2026-01-02 03:04:05 203.0.113.9 5678 10.0.0.5 443 HTTP/1.1 GET /shell.aspx 400 1 BadRequest AppPoolQueue

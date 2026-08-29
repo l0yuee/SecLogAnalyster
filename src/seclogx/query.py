@@ -61,6 +61,18 @@ class CaseDB:
         self._require_data()
         return self._con.execute(query, params or []).fetchdf()
 
+    def table(self, name: str, order_by: str | None = None) -> pd.DataFrame:
+        """Full contents of any table this case has (see `.tables`) as a
+        DataFrame -- the same uniform escape hatch `events` gets via
+        `summary()`/`by_host()`/etc., generalized to every log family so a
+        new one never needs a CaseDB change to become DataFrame-accessible.
+        Returns an empty DataFrame (not an error) if the case has no data
+        for this table -- consistent with `hosts()`/`channels()`."""
+        if name not in self.tables:
+            return pd.DataFrame()
+        order = f" ORDER BY {order_by}" if order_by else ""
+        return self.sql(f"SELECT * FROM {name}{order}")
+
     def by_time(self, start=None, end=None, host: str | None = None, channel: str | None = None) -> pd.DataFrame:
         conds, params = [], []
         if start is not None:

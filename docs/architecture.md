@@ -70,9 +70,15 @@ transparently on read -- verified empirically.
 `query.py`'s `CaseDB` registers one view per table subdirectory found
 under `lake/` (`read_parquet(..., hive_partitioning=true,
 union_by_name=true)` each) -- `events` for Windows Event Log, plus
-whichever of `web_logs`/`scheduled_tasks`/`exchange_message_tracking`/
-`exchange_logs` the case has data for -- and exposes `.sql()` plus a
-handful of convenience filters, always returning pandas DataFrames.
+whichever of `web_logs`/`web_error_logs`/`scheduled_tasks`/
+`exchange_message_tracking`/`exchange_logs` the case has data for -- and
+exposes `.sql()`, a generic `.table(name)` (full contents of any table as
+a DataFrame), and a handful of convenience filters, always returning
+pandas DataFrames. `Case` mirrors this with a named, DataFrame-returning
+accessor per log family (`web_logs()`, `web_error_logs()`,
+`scheduled_tasks()`, `exchange_message_tracking()`, `exchange_logs()`) --
+the same first-class treatment `events` gets via `summary()`/`hosts()`/
+`channels()`, so no log family requires raw SQL just to get a DataFrame.
 
 `detect/` compiles Sigma rules to DuckDB SQL via a custom pySigma backend
 (`detect/backend.py`) and a field-mapping pipeline (`detect/pipeline.py`)
@@ -91,11 +97,12 @@ same `events` table.
 
 Every `--source` also gets a second discovery/staging/flatten pass, for
 artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
-IIS/nginx/Apache/Tomcat HTTP access logs, and Exchange's self-describing
-CSV logs (`logsources/discovery.py`, `logsources/stage.py`,
-`logsources/ingest.py`, orchestrated from `Case.ingest()` alongside the
-EVTX pipeline; see `docs/known_limitations.md` for what happens when a
-source has one but not the other).
+IIS/nginx/Apache/Tomcat HTTP access **and** error/diagnostic logs, IIS
+HTTP.sys (HTTPERR) logs, and Exchange's self-describing CSV logs
+(`logsources/discovery.py`, `logsources/stage.py`, `logsources/ingest.py`,
+orchestrated from `Case.ingest()` alongside the EVTX pipeline; see
+`docs/known_limitations.md` for what happens when a source has one but
+not the other).
 
 ```
  same --source PATH[:HOST] inputs
@@ -105,10 +112,11 @@ source has one but not the other).
         |  content-sniffed, not trusted from filename/extension --
         |  forensic exports routinely rename/relocate files
         v
- scheduled_task | iis | web_access | exchange_message_tracking | exchange_generic | unknown
+ scheduled_task | iis | web_access | web_error_{nginx,apache,tomcat} | iis_httperr
+   | exchange_message_tracking | exchange_generic | unknown
         |
         v
- [2] parse      (logsources/{scheduled_tasks,iis,webaccess,exchange}.py)
+ [2] parse      (logsources/{scheduled_tasks,iis,webaccess,weberror,exchange}.py)
         |  ProcessPoolExecutor, one worker per file -- straight to Python
         |  dicts (these formats are already line/element-oriented text,
         |  unlike EVTX, so no NDJSON staging step is needed)
@@ -117,8 +125,16 @@ source has one but not the other).
         |  explicit TRY_CAST per column per table -- same union_by_name
         |  stable-typing discipline as schema.py's event_data fix
         v
- cases/<name>/lake/{web_logs,scheduled_tasks,exchange_message_tracking,exchange_logs}/host=<h>/[log_type=<t>/]*.parquet
+ cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs}/host=<h>/[log_type=<t>/]*.parquet
 ```
+
+Access logs (`web_logs`) and error/diagnostic logs (`web_error_logs`) are
+each web applications' two major log categories, and are kept as
+separate tables since they're structurally unrelated (access logs have a
+request/response shape; error logs are severity + free text). Unlike
+access-log format, nginx/Apache/Tomcat error-log format *is*
+engine-specific and unambiguous, so classification for those is a real
+detection, not the path/filename heuristic access logs need.
 
 Unlike EVTX, classification never trusts a file's name or extension --
 only content (see `sniff.classify_file`) -- because these artifacts are
@@ -144,6 +160,7 @@ cases/<case_name>/
   lake/
     events/host=<h>/channel=<c>/*.parquet
     web_logs/host=<h>/log_type=<t>/*.parquet
+    web_error_logs/host=<h>/log_type=<t>/*.parquet
     scheduled_tasks/host=<h>/*.parquet
     exchange_message_tracking/host=<h>/*.parquet
     exchange_logs/host=<h>/log_type=<t>/*.parquet

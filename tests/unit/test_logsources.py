@@ -13,12 +13,22 @@ from seclogx.logsources.scheduled_tasks import parse_task_xml
 from seclogx.logsources.sniff import (
     KIND_EXCHANGE_MESSAGE_TRACKING,
     KIND_IIS,
+    KIND_IIS_HTTPERR,
     KIND_SCHEDULED_TASK,
     KIND_WEB_ACCESS,
+    KIND_WEB_ERROR_APACHE,
+    KIND_WEB_ERROR_NGINX,
+    KIND_WEB_ERROR_TOMCAT,
     classify_file,
     guess_web_log_type,
 )
 from seclogx.logsources.webaccess import parse_web_access_file
+from seclogx.logsources.weberror import (
+    parse_apache_error_file,
+    parse_iis_httperr_file,
+    parse_nginx_error_file,
+    parse_tomcat_error_file,
+)
 from seclogx.discovery import SourceSpec
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources"
@@ -47,6 +57,13 @@ def test_classify_exchange_generic():
     from seclogx.logsources.sniff import KIND_EXCHANGE_GENERIC
 
     assert classify_file(FIXTURES / "sample_httpproxy.csv") == KIND_EXCHANGE_GENERIC
+
+
+def test_classify_web_error_logs():
+    assert classify_file(FIXTURES / "sample_nginx_error.log") == KIND_WEB_ERROR_NGINX
+    assert classify_file(FIXTURES / "sample_apache_error.log") == KIND_WEB_ERROR_APACHE
+    assert classify_file(FIXTURES / "sample_tomcat_error.log") == KIND_WEB_ERROR_TOMCAT
+    assert classify_file(FIXTURES / "sample_iis_httperr.log") == KIND_IIS_HTTPERR
 
 
 def test_classify_unknown_returns_none(tmp_path: Path):
@@ -142,6 +159,56 @@ def test_parse_exchange_generic_catchall():
     assert fields["UrlStem"] == "/owa/"
 
 
+def test_parse_nginx_error_file():
+    rows, ok, err = parse_nginx_error_file(FIXTURES / "sample_nginx_error.log", host="WEB01")
+    assert ok == 2
+    assert err == 0
+    assert rows[0]["log_type"] == "nginx"
+    assert rows[0]["severity"] == "error"
+    assert rows[0]["pid_or_thread"] == "12345#0"
+    assert rows[0]["client_ip"] == "203.0.113.9"
+    assert "shell.php" in rows[0]["message"]
+    assert rows[1]["severity"] == "warn"
+
+
+def test_parse_apache_error_file():
+    rows, ok, err = parse_apache_error_file(FIXTURES / "sample_apache_error.log", host="WEB01")
+    assert ok == 2
+    assert err == 0
+    assert rows[0]["log_type"] == "apache"
+    assert rows[0]["severity"] == "error"
+    assert rows[0]["pid_or_thread"] == "12345"
+    assert rows[0]["client_ip"] == "203.0.113.9"
+    assert rows[0]["client_port"] == "5678"
+    assert "Invalid URI" in rows[0]["message"]
+
+
+def test_parse_tomcat_error_file():
+    rows, ok, err = parse_tomcat_error_file(FIXTURES / "sample_tomcat_error.log", host="WEB01")
+    assert ok == 2
+    assert err == 0
+    assert rows[0]["log_type"] == "tomcat"
+    assert rows[0]["severity"] == "SEVERE"
+    assert rows[0]["logger"] == "org.apache.catalina.core.StandardWrapperValve.invoke"
+    assert "NullPointerException" in rows[0]["message"]
+    assert "com.evil.Shell" in rows[0]["message"]
+    assert rows[1]["severity"] == "INFO"
+
+
+def test_parse_iis_httperr_file():
+    rows, ok, err = parse_iis_httperr_file(FIXTURES / "sample_iis_httperr.log", host="EXCH01")
+    assert ok == 1
+    assert err == 0
+    row = rows[0]
+    assert row["log_type"] == "iis_httperr"
+    assert row["client_ip"] == "203.0.113.9"
+    assert row["client_port"] == "5678"
+    assert row["method"] == "GET"
+    assert row["uri"] == "/shell.aspx"
+    assert row["status"] == 400
+    assert row["message"] == "BadRequest"
+
+
 # -- end-to-end aux ingest --------------------------------------------------------
 
 
@@ -151,13 +218,19 @@ def test_run_aux_ingest_writes_all_tables(tmp_path: Path):
 
     report = run_aux_ingest(case_dir, [SourceSpec(path=FIXTURES, host="LAB01")], workers=1)
 
-    assert report.files_discovered == 6
-    assert report.files_ok == 6
+    assert report.files_discovered == 10
+    assert report.files_ok == 10
     assert report.files_failed == 0
     assert report.rows_written.get("scheduled_tasks") == 2  # sample_task.xml + benign_task.xml
     assert report.rows_written.get("web_logs") == 4  # 2 IIS + 2 nginx rows
+    assert report.rows_written.get("web_error_logs") == 7  # 2 nginx + 2 apache + 2 tomcat + 1 IIS HTTPERR
     assert report.rows_written.get("exchange_message_tracking") == 1
     assert report.rows_written.get("exchange_logs") == 1
+
+    df = report.to_dataframe()
+    assert len(df) == 10
+    assert set(df["status"]) == {"ok"}
+    assert "rows" not in df.columns
 
     import duckdb
 
@@ -187,3 +260,34 @@ def test_case_suspicious_tasks_filters_benign(tmp_path: Path):
 
     suspicious = case.suspicious_tasks()
     assert set(suspicious["task_name"]) == {"sample_task.xml"}
+
+
+def test_case_table_accessors_return_dataframes(tmp_path: Path):
+    """Every log family should be reachable as a plain DataFrame, the same
+    way `events` is via summary()/hosts()/etc."""
+    import pandas as pd
+
+    from seclogx.case import Case
+
+    case = Case.create("dfparity", case_root=tmp_path / "cases")
+    case.ingest([f"{FIXTURES}:LAB01"])
+
+    for df in (
+        case.scheduled_tasks(),
+        case.web_logs(),
+        case.web_error_logs(),
+        case.exchange_message_tracking(),
+        case.exchange_logs(),
+        case.db.table("web_logs"),
+    ):
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty
+
+    assert set(case.web_logs(log_type="nginx")["log_type"]) == {"nginx"}
+    assert set(case.web_error_logs(log_type="apache")["log_type"]) == {"apache"}
+    assert set(case.exchange_logs(log_type="HttpProxy")["log_type"]) == {"HttpProxy"}
+
+    # a table the case genuinely has no data for returns an empty DataFrame, not an error
+    empty_case = Case.create("emptydf", case_root=tmp_path / "cases")
+    assert case.db.table("nonexistent_table").empty
+    assert isinstance(empty_case.web_logs(), pd.DataFrame)

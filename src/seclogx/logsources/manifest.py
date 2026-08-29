@@ -5,8 +5,11 @@ accounted for as ok/partial/failed/unrecognized, with a reason.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+import pandas as pd
 
 
 class StageStatus:
@@ -48,10 +51,20 @@ class AuxIngestReport:
     unknown_samples: list[str]
     rows_written: dict[str, int]
     problem_files: list[tuple[str, str, str]]  # (path, status, error_message)
+    staged_files: list[AuxStagedFile] = field(default_factory=list)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Per-file staging detail as a DataFrame -- one row per discovered
+        file (ok/partial/failed/unknown), mirroring `IngestReport.to_dataframe()`
+        for the EVTX pipeline. Excludes the parsed `rows` payload itself
+        (that's what the lake tables are for)."""
+        cols = [f.name for f in dataclasses.fields(AuxStagedFile) if f.name != "rows"]
+        records = [{col: getattr(f, col) for col in cols} for f in self.staged_files]
+        return pd.DataFrame(records, columns=cols)
 
     def summary_text(self) -> str:
         lines = [
-            "Auxiliary log ingest (Scheduled Tasks / IIS / web access / Exchange):",
+            "Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange):",
             f"  files discovered : {self.files_discovered}",
             f"  files ok         : {self.files_ok}",
             f"  files partial    : {self.files_partial}"

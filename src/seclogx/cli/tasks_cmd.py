@@ -20,7 +20,7 @@ def tasks_command(
         console.print("[yellow]no scheduled task definitions ingested for this case[/yellow]")
         raise typer.Exit(1)
 
-    df = c.suspicious_tasks() if suspicious else c.query("SELECT * FROM scheduled_tasks ORDER BY task_path")
+    df = c.suspicious_tasks() if suspicious else c.scheduled_tasks()
     if out:
         df.to_csv(out, index=False)
         console.print(f"[green]wrote {len(df)} rows to {out}[/green]")

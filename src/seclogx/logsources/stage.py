@@ -15,11 +15,16 @@ from .sniff import (
     KIND_EXCHANGE_GENERIC,
     KIND_EXCHANGE_MESSAGE_TRACKING,
     KIND_IIS,
+    KIND_IIS_HTTPERR,
     KIND_SCHEDULED_TASK,
     KIND_WEB_ACCESS,
+    KIND_WEB_ERROR_APACHE,
+    KIND_WEB_ERROR_NGINX,
+    KIND_WEB_ERROR_TOMCAT,
     guess_web_log_type,
 )
 from .webaccess import parse_web_access_file
+from .weberror import parse_apache_error_file, parse_iis_httperr_file, parse_nginx_error_file, parse_tomcat_error_file
 
 
 def stage_aux_file(cf: ClassifiedFile) -> AuxStagedFile:
@@ -118,4 +123,16 @@ def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
     if cf.kind in (KIND_EXCHANGE_MESSAGE_TRACKING, KIND_EXCHANGE_GENERIC):
         table, rows, ok, err = parse_exchange_csv(cf.path, cf.host, cf.kind)
         return rows, table, ok, err
+    if cf.kind == KIND_WEB_ERROR_NGINX:
+        rows, ok, err = parse_nginx_error_file(cf.path, cf.host)
+        return rows, "web_error_logs", ok, err
+    if cf.kind == KIND_WEB_ERROR_APACHE:
+        rows, ok, err = parse_apache_error_file(cf.path, cf.host)
+        return rows, "web_error_logs", ok, err
+    if cf.kind == KIND_WEB_ERROR_TOMCAT:
+        rows, ok, err = parse_tomcat_error_file(cf.path, cf.host)
+        return rows, "web_error_logs", ok, err
+    if cf.kind == KIND_IIS_HTTPERR:
+        rows, ok, err = parse_iis_httperr_file(cf.path, cf.host)
+        return rows, "web_error_logs", ok, err
     raise ValueError(f"no parser registered for kind {cf.kind!r}")

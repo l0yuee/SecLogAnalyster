@@ -1,7 +1,7 @@
 """Orchestrates discovery, parallel staging, and Parquet-lake flattening for
-the non-EVTX log families (Scheduled Tasks, IIS, nginx/Apache/Tomcat web
-access logs, Exchange CSV logs). Runs as a second pass alongside the
-existing EVTX ingest (see case.py), over the same `--source` inputs.
+the non-EVTX log families (Scheduled Tasks, IIS/nginx/Apache/Tomcat web
+access AND error logs, Exchange CSV logs). Runs as a second pass alongside
+the existing EVTX ingest (see case.py), over the same `--source` inputs.
 
 Unlike the EVTX pipeline (NDJSON staging + one bulk DuckDB flatten, chosen
 because per-record Python marshaling was the bottleneck at EVTX's typical
@@ -80,6 +80,7 @@ def run_aux_ingest(case_dir: Path, sources: list[SourceSpec], workers: int | Non
         unknown_samples=[f.source_path for f in unknown_files],
         rows_written=rows_written,
         problem_files=problem_files,
+        staged_files=staged,
     )
 
 

@@ -187,15 +187,50 @@ class Case:
     def table_counts(self) -> pd.DataFrame:
         return self.db.table_counts()
 
+    # -- non-EVTX log tables ----------------------------------------------------
+    # Every log family gets a DataFrame-returning accessor, same as `events`
+    # does via summary()/hosts()/channels() -- each returns an empty
+    # DataFrame (not an error) if the case has no data for that table yet.
+    def web_logs(self, log_type: str | None = None) -> pd.DataFrame:
+        """IIS / nginx / Apache / Tomcat / Exchange-HttpProxy access logs."""
+        if log_type is None:
+            return self.db.table("web_logs", order_by="time_created")
+        if "web_logs" not in self.db.tables:
+            return pd.DataFrame()
+        return self.db.sql("SELECT * FROM web_logs WHERE log_type = ? ORDER BY time_created", [log_type])
+
+    def web_error_logs(self, log_type: str | None = None) -> pd.DataFrame:
+        """nginx / Apache / Tomcat / IIS HTTP.sys (HTTPERR) error logs --
+        the other major web-application log category besides access logs."""
+        if log_type is None:
+            return self.db.table("web_error_logs", order_by="time_created")
+        if "web_error_logs" not in self.db.tables:
+            return pd.DataFrame()
+        return self.db.sql("SELECT * FROM web_error_logs WHERE log_type = ? ORDER BY time_created", [log_type])
+
+    def scheduled_tasks(self) -> pd.DataFrame:
+        """On-disk Task Scheduler task definitions."""
+        return self.db.table("scheduled_tasks", order_by="task_path")
+
+    def exchange_message_tracking(self) -> pd.DataFrame:
+        """Exchange mail flow (Message Tracking) logs."""
+        return self.db.table("exchange_message_tracking", order_by="time_created")
+
+    def exchange_logs(self, log_type: str | None = None) -> pd.DataFrame:
+        """Every other Exchange CSV log type (HttpProxy, EAS, EWS, ...)."""
+        if log_type is None:
+            return self.db.table("exchange_logs", order_by="time_created")
+        if "exchange_logs" not in self.db.tables:
+            return pd.DataFrame()
+        return self.db.sql("SELECT * FROM exchange_logs WHERE log_type = ? ORDER BY time_created", [log_type])
+
     def suspicious_tasks(self) -> pd.DataFrame:
         """Lightweight heuristic triage over `scheduled_tasks` -- flags tasks
         whose action executable lives under a user-writable/temp-like path,
         or whose action invokes a common LOLBin (powershell/cmd/wscript/...).
         Not a Sigma rule (Sigma has no logsource for on-disk task
         definitions); a lower-effort convenience for a first pass."""
-        if "scheduled_tasks" not in self.db.tables:
-            return pd.DataFrame()
-        df = self.db.sql("SELECT * FROM scheduled_tasks")
+        df = self.scheduled_tasks()
         if df.empty:
             return df
 

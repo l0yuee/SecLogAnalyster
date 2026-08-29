@@ -16,13 +16,22 @@ from pathlib import Path
 
 KIND_SCHEDULED_TASK = "scheduled_task"
 KIND_IIS = "iis"
+KIND_IIS_HTTPERR = "iis_httperr"
 KIND_EXCHANGE_MESSAGE_TRACKING = "exchange_message_tracking"
 KIND_EXCHANGE_GENERIC = "exchange_generic"
 KIND_WEB_ACCESS = "web_access"
+KIND_WEB_ERROR_NGINX = "web_error_nginx"
+KIND_WEB_ERROR_APACHE = "web_error_apache"
+KIND_WEB_ERROR_TOMCAT = "web_error_tomcat"
+
+WEB_ERROR_KINDS = {KIND_WEB_ERROR_NGINX: "nginx", KIND_WEB_ERROR_APACHE: "apache", KIND_WEB_ERROR_TOMCAT: "tomcat"}
 
 _PEEK_BYTES = 16 * 1024
 _TASK_XMLNS_RE = re.compile(rb"xmlns\s*=\s*[\"']http://schemas\.microsoft\.com/windows/\d{4}/\d{2}/mit/task[\"']")
 _CLF_RE = re.compile(rb'^\S+ \S+ \S+ \[[^\]]+\] "[^"]*" \d{3} (?:\d+|-)')
+_NGINX_ERROR_RE = re.compile(rb"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \[(?:emerg|alert|crit|error|warn|notice|info|debug)\] \d+#\d+:")
+_APACHE_ERROR_RE = re.compile(rb"^\[\w{3} \w{3} [ \d]\d \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4}\] \[")
+_TOMCAT_ERROR_RE = re.compile(rb"^\d{2}-\w{3}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3} (?:SEVERE|WARNING|INFO|CONFIG|FINE|FINER|FINEST|ALL)\b")
 
 _MESSAGE_TRACKING_FIELDS = {"message-id", "recipient-address"}
 
@@ -77,6 +86,9 @@ def classify_file(path: Path) -> str | None:
         first_data_line = line
         break
 
+    if software_line and "HTTP API" in software_line:
+        return KIND_IIS_HTTPERR
+
     if software_line and "Exchange" in software_line:
         if fields_line:
             tokens = {t.strip() for t in fields_line.split(",")}
@@ -89,6 +101,8 @@ def classify_file(path: Path) -> str | None:
 
     if fields_line:
         tokens = set(fields_line.split())
+        if {"c-ip", "c-port", "s-reason"}.issubset(tokens):
+            return KIND_IIS_HTTPERR
         if {"s-ip", "cs-method", "cs-uri-stem"}.issubset(tokens):
             return KIND_IIS
         comma_tokens = {t.strip() for t in fields_line.split(",")}
@@ -97,8 +111,16 @@ def classify_file(path: Path) -> str | None:
         if "cs-uri-stem" in comma_tokens or "client-ip" in comma_tokens:
             return KIND_EXCHANGE_GENERIC
 
-    if first_data_line and _CLF_RE.match(first_data_line.encode("utf-8", errors="replace")):
-        return KIND_WEB_ACCESS
+    if first_data_line:
+        encoded = first_data_line.encode("utf-8", errors="replace")
+        if _NGINX_ERROR_RE.match(encoded):
+            return KIND_WEB_ERROR_NGINX
+        if _APACHE_ERROR_RE.match(encoded):
+            return KIND_WEB_ERROR_APACHE
+        if _TOMCAT_ERROR_RE.match(encoded):
+            return KIND_WEB_ERROR_TOMCAT
+        if _CLF_RE.match(encoded):
+            return KIND_WEB_ACCESS
 
     return None
 

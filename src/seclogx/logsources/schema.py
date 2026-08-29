@@ -1,6 +1,6 @@
 """Canonical schemas for the non-EVTX log families: on-disk Scheduled Task
-definitions, IIS/nginx/Apache/Tomcat HTTP access logs, and Exchange's
-self-describing CSV logs.
+definitions, IIS/nginx/Apache/Tomcat HTTP access AND error logs, and
+Exchange's self-describing CSV logs.
 
 Each of these is fundamentally a different shape than a Windows Event Log
 record (no channel/event_id/event_data triad), so each gets its own
@@ -57,6 +57,36 @@ WEB_LOGS_COLUMNS: list[tuple[str, str]] = [
     ("schema_version", "UTINYINT"),
 ]
 WEB_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
+
+# The other major web-application log category besides access logs: error/
+# diagnostic logs. Structurally unlike access logs (no request/response
+# shape in the nginx/Apache/Tomcat case, just severity + free-text message),
+# so it's a separate table rather than forced into WEB_LOGS_COLUMNS.
+WEB_ERROR_LOGS_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("log_type", "VARCHAR"),  # 'nginx' | 'apache' | 'tomcat' | 'iis_httperr'
+    ("time_created", "TIMESTAMP"),
+    ("severity", "VARCHAR"),  # nginx: emerg/alert/crit/error/warn/notice/info/debug; Tomcat: SEVERE/WARNING/...
+    ("pid_or_thread", "VARCHAR"),  # nginx pid#tid; Apache pid[:tid]; Tomcat thread name
+    ("client_ip", "VARCHAR"),
+    ("client_port", "VARCHAR"),
+    ("server_ip", "VARCHAR"),  # IIS HTTPERR only (s-ip), NULL elsewhere
+    ("server_port", "VARCHAR"),  # IIS HTTPERR only (s-port), NULL elsewhere
+    ("protocol_version", "VARCHAR"),  # IIS HTTPERR only (cs-version), NULL elsewhere
+    ("method", "VARCHAR"),  # IIS HTTPERR only (cs-method), NULL elsewhere
+    ("uri", "VARCHAR"),  # IIS HTTPERR only (cs-uri), NULL elsewhere
+    ("status", "INTEGER"),  # IIS HTTPERR only (sc-status), NULL elsewhere
+    ("logger", "VARCHAR"),  # Tomcat only (java.util.logging logger name), NULL elsewhere
+    ("message", "VARCHAR"),  # nginx/Apache/Tomcat free-text message; IIS HTTPERR's s-reason
+    ("extra", "JSON"),  # catchall (e.g. IIS HTTPERR s-siteid/s-queue)
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+WEB_ERROR_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
 
 SCHEDULED_TASKS_COLUMNS: list[tuple[str, str]] = [
     ("host", "VARCHAR"),
@@ -138,6 +168,7 @@ EXCHANGE_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
 
 TABLES: dict[str, dict] = {
     "web_logs": {"columns": WEB_LOGS_COLUMNS, "partition_by": WEB_LOGS_PARTITION_COLUMNS},
+    "web_error_logs": {"columns": WEB_ERROR_LOGS_COLUMNS, "partition_by": WEB_ERROR_LOGS_PARTITION_COLUMNS},
     "scheduled_tasks": {"columns": SCHEDULED_TASKS_COLUMNS, "partition_by": SCHEDULED_TASKS_PARTITION_COLUMNS},
     "exchange_message_tracking": {
         "columns": EXCHANGE_MESSAGE_TRACKING_COLUMNS,

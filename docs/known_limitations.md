@@ -69,7 +69,7 @@ not oversights -- documented so they're easy to revisit later.
   bundled Sigma rules -- not the full ATT&CK framework, and not fetched
   live. It needs manual updates if the bundled rule set changes.
 
-## Non-EVTX log ingestion (Scheduled Tasks / IIS / web access / Exchange)
+## Non-EVTX log ingestion (Scheduled Tasks / IIS / web access & error / Exchange)
 
 - **Format is detected by content, not filename or extension.** Forensic
   acquisitions routinely rename or relocate files (a live Task Scheduler
@@ -116,6 +116,28 @@ not oversights -- documented so they're easy to revisit later.
   it has at least one supported non-EVTX artifact (or vice versa) --
   `Case.ingest()` only raises `NoSourcesFoundError` if *both* passes find
   nothing.
+- **Web-application error/diagnostic logs (`web_error_logs`) only
+  recognize each engine's default log format.** nginx's default `error_log`
+  format, Apache's traditional and 2.4+ `ErrorLogFormat`, Tomcat's default
+  `java.util.logging` `SimpleFormatter` output (`catalina.<date>.log` /
+  `localhost.<date>.log`), and IIS's documented HTTPERR field set are what
+  `logsources/weberror.py` matches. A customized error-log format, or raw
+  unstructured stdout mixed into `catalina.out` (common in practice,
+  since Tomcat redirects raw `System.out`/`System.err` there too),
+  produces parse errors for those lines (reported, not silently dropped)
+  rather than a misparse.
+- **A Tomcat log entry's attached stack trace is capped at 200 continuation
+  lines** (`weberror._TOMCAT_MAX_CONTINUATION_LINES`) to bound memory on a
+  pathological case; lines beyond the cap are counted as parse errors for
+  that file rather than silently appended or dropped.
+- **Unlike access logs, nginx/Apache/Tomcat error-log format is
+  engine-specific and unambiguous** -- `log_type` in `web_error_logs` is a
+  real detection (a distinct regex per engine in `sniff.py`), not the
+  path/filename heuristic access logs need.
+- **FREB (Failed Request Event Buffering), IIS's XML-based per-request
+  diagnostic trace, and Apache's `mod_rewrite`/SSL request logs are out of
+  scope in v1** -- only the standard access (W3C/CLF/Combined) and error
+  (HTTPERR / `error_log` / catalina) log categories are covered.
 
 ## Scale
 

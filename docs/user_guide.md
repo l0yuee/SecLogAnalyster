@@ -95,7 +95,8 @@ cases/<name>/
   logs/ingest_<batch_id>.log    # reconciliation report per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows Event Log
-    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat
+    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat access logs
+    web_error_logs/host=<h>/log_type=<t>/*.parquet               # nginx/Apache/Tomcat/IIS HTTPERR error logs
     scheduled_tasks/host=<h>/*.parquet                           # Task Scheduler definitions
     exchange_message_tracking/host=<h>/*.parquet                 # Exchange mail flow
     exchange_logs/host=<h>/log_type=<t>/*.parquet                # other Exchange CSV logs
@@ -157,16 +158,21 @@ If you don't know the exact field name for something, `CaseDB.search()`
 / `seclogx query ... event_data::VARCHAR ILIKE '%...%'` does a full-text
 search across it (see [section 6](#6-analyst-workflows--recipes)).
 
-### The other tables: `web_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`
+### The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`
 
 Windows Event Log isn't the only artifact `ingest` normalizes. Each of
 these is fundamentally a different shape, so each gets its own table
 rather than being crammed into `events` -- full column reference in
-`docs/schema.md`.
+`docs/schema.md`. Every one of them is also reachable as a plain
+`pandas.DataFrame` through a named `Case` accessor (`c.web_logs()`,
+`c.scheduled_tasks()`, ...), the same first-class treatment `events` gets
+via `summary()`/`hosts()`/`channels()` -- see
+[section 5](#5-python--notebook-api).
 
 | Table | What it holds | Key columns |
 |---|---|---|
-| `web_logs` | IIS, nginx, Apache, and Tomcat HTTP access logs, unified | `log_type`, `client_ip`, `method`, `uri_stem`, `uri_query`, `status`, `user_agent`, `referer` |
+| `web_logs` | **Access logs**: IIS, nginx, Apache, and Tomcat HTTP access logs, unified | `log_type`, `client_ip`, `method`, `uri_stem`, `uri_query`, `status`, `user_agent`, `referer` |
+| `web_error_logs` | **Error/diagnostic logs**: nginx, Apache, Tomcat, and IIS HTTP.sys (HTTPERR) -- the other major web-application log category, unified | `log_type`, `severity`, `client_ip`, `message`, plus IIS HTTPERR's `method`/`uri`/`status` |
 | `scheduled_tasks` | On-disk Task Scheduler task definitions (`System32\Tasks\**`) -- a persistence artifact, distinct from the Task Scheduler *event log* (already in `events`) | `task_path`, `author`, `enabled`, `hidden`, `actions` (JSON), `triggers` (JSON) |
 | `exchange_message_tracking` | Exchange mail flow (who sent what to whom) | `sender_address`, `recipient_address`, `message_subject`, `event_id` (Exchange's own, not a Windows Event ID) |
 | `exchange_logs` | Every other Exchange CSV log type (HttpProxy, ActiveSync, EWS, ...), fields preserved verbatim | `log_type`, `fields` (JSON, query with `fields ->> 'field-name'`) |
@@ -178,10 +184,22 @@ A few things worth knowing before you query these:
   routinely rename exported logs. A file matching none of the supported
   formats is reported as unrecognized in the ingest summary, never
   silently skipped.
-- **nginx vs. Apache vs. Tomcat is a best-effort label**, not a hard
-  detection -- Common/Combined Log Format is byte-identical across all
-  three; `log_type` falls back to `web_access` when no path/filename hint
-  is available. IIS is always detected reliably (self-describing header).
+- **`web_logs` covers the access-log category; `web_error_logs` covers the
+  error/diagnostic-log category** -- the two major log categories every
+  web application produces. They're separate tables because they're
+  structurally unrelated (access logs have a request/response shape;
+  error logs are just severity + free text).
+- **In `web_logs`, nginx vs. Apache vs. Tomcat is a best-effort label**,
+  not a hard detection -- Common/Combined Log Format is byte-identical
+  across all three; `log_type` falls back to `web_access` when no
+  path/filename hint is available. IIS is always detected reliably
+  (self-describing header).
+- **In `web_error_logs`, the engine label *is* a real detection** -- each
+  engine's error-log format is distinct and unambiguous, unlike access
+  logs. Only each engine's default/standard format is recognized (a
+  customized `log_format`/`ErrorLogFormat`, or raw unstructured stdout
+  mixed into Tomcat's `catalina.out`, produces reported parse errors for
+  those lines rather than a misparse).
 - **Exchange support is scoped to Message Tracking as first-class
   columns**; every other Exchange log type (there are over a dozen)
   lands in `exchange_logs` with all fields preserved in `fields`, still
@@ -281,19 +299,25 @@ non-EVTX pass, with the same never-silently-drop philosophy -- files it
 couldn't classify at all are called out explicitly rather than skipped:
 
 ```
-Auxiliary log ingest (Scheduled Tasks / IIS / web access / Exchange):
-  files discovered : 6
-  files ok         : 5
+Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange):
+  files discovered : 7
+  files ok         : 6
   files partial    : 0
   files failed     : 0
   files unrecognized: 1  <-- content didn't match any supported format, not ingested
   rows written per table:
     exchange_message_tracking: 1
     scheduled_tasks: 1
+    web_error_logs: 2
     web_logs: 4
   sample unrecognized files:
     /evidence/wks01/notes.txt
 ```
+
+Also mirrored by `IngestReport.aux.to_dataframe()` (or `AuxIngestReport`
+returned directly from `run_aux_ingest`), a per-file DataFrame just like
+`IngestReport.to_dataframe()` gives you for the EVTX pass -- one row per
+discovered file with its status, table, record/error counts.
 
 ### `seclogx query <case> "<SQL>"`
 
@@ -329,12 +353,28 @@ Sysmon was running).
 ### `seclogx sources <case>`
 
 Row count per table currently in the case -- `events`, `web_logs`,
-`scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`,
-whichever are present. The quickest way to see what log families a case
-actually has before writing queries against them.
+`web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`,
+`exchange_logs`, whichever are present. The quickest way to see what log
+families a case actually has before writing queries against them.
 
 ```bash
 seclogx sources incident42
+```
+
+### `seclogx table <case> <name>`
+
+Full contents of any table this case has, as a DataFrame -- the CLI
+counterpart to `Case.web_logs()`/`Case.scheduled_tasks()`/etc., useful for
+tables that don't have their own dedicated command.
+
+| Option | Meaning |
+|---|---|
+| `--out FILE.csv` | Export the full result |
+| `--limit N` | Cap the number of rows |
+
+```bash
+seclogx table incident42 web_error_logs
+seclogx table incident42 exchange_message_tracking --out mailflow.csv
 ```
 
 ### `seclogx tasks <case> [--suspicious]`
@@ -436,7 +476,8 @@ report = c.ingest(
     workers=8,
 )
 print(report.summary_text())
-report.to_dataframe()                  # per-file staging detail as a DataFrame
+report.to_dataframe()                  # per-file staging detail as a DataFrame (EVTX pass)
+report.aux.to_dataframe()              # same, for the Scheduled Tasks/IIS/web/Exchange pass
 
 # Explore
 c.summary()
@@ -450,13 +491,25 @@ df = c.query("""
     FROM events
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
-web = c.query("SELECT * FROM web_logs WHERE status >= 400 ORDER BY time_created")
+
+# Every log family is a first-class, DataFrame-returning accessor -- the
+# same treatment `events` gets, so nothing requires raw SQL just to get a
+# DataFrame. Each returns an empty (not erroring) DataFrame if the case
+# has no data for it yet.
+c.web_logs()                           # access logs: IIS/nginx/Apache/Tomcat/Exchange-HttpProxy
+c.web_logs(log_type="nginx")           # filtered to one engine
+c.web_error_logs()                     # error logs: nginx/Apache/Tomcat/IIS HTTPERR
+c.web_error_logs(log_type="apache")
+c.scheduled_tasks()
+c.exchange_message_tracking()
+c.exchange_logs(log_type="HttpProxy")
 
 # The CaseDB convenience methods are available via c.db
 c.db.by_event_id([4624, 4625])
 c.db.by_host("WKS01")
 c.db.search("mimikatz")                # full-text across event_data/provider/computer
 c.db.tables                            # list[str]: which tables this case actually has
+c.db.table("web_error_logs")           # generic escape hatch: any table by name, as a DataFrame
 
 # Scheduled Task triage (heuristic, not Sigma -- see section 7)
 c.suspicious_tasks()
@@ -582,6 +635,28 @@ WHERE status = 200
 ORDER BY time_created
 ```
 
+**High-severity entries across every web application's error log at once
+(nginx `error`, Apache `error`, Tomcat `SEVERE`, ...):**
+
+```sql
+SELECT host, log_type, time_created, severity, message
+FROM web_error_logs
+WHERE severity IN ('error', 'SEVERE', 'crit', 'alert', 'emerg')
+ORDER BY time_created
+```
+
+**IIS HTTP.sys (HTTPERR) rejections -- requests HTTP.sys itself refused
+before they ever reached an IIS worker process (malformed requests,
+queue limits, app pool issues); these never show up in `web_logs` at
+all, which is exactly why `web_error_logs` is worth checking separately:**
+
+```sql
+SELECT host, time_created, client_ip, client_port, method, uri, status, message AS reason
+FROM web_error_logs
+WHERE log_type = 'iis_httperr'
+ORDER BY time_created
+```
+
 **Exchange mail flow: everything sent by or to a suspect address:**
 
 ```sql
@@ -646,12 +721,13 @@ starting point, not exhaustive; see [section 8](#8-extending-detection-custom-ru
 to add more.
 
 `hunt` also supports Sigma's `category: webserver` rules (against
-`web_logs`), for supplying your own IIS/nginx/Apache webshell or
-exploitation-pattern rules -- none are bundled by default in v1. There is
-no Sigma logsource category for on-disk Scheduled Task definitions or
+`web_logs`, i.e. **access** logs), for supplying your own IIS/nginx/Apache
+webshell or exploitation-pattern rules -- none are bundled by default in
+v1. There is no Sigma logsource category for on-disk Scheduled Task
+definitions, web application **error** logs (`web_error_logs`), or
 Exchange message tracking, so those aren't part of a Sigma hunt; use
 `Case.suspicious_tasks()` / `seclogx tasks --suspicious` for tasks, and
-plain SQL (section 6) for Exchange.
+plain SQL (section 6) for `web_error_logs` and Exchange.
 
 ## 8. Extending detection: custom rules and fields
 
@@ -777,13 +853,24 @@ Full details in `docs/known_limitations.md`. In short:
 - Legacy `.job` (pre-Vista binary) Scheduled Tasks aren't parsed, only the
   modern Task Scheduler 2.0 XML format.
 - nginx vs. Apache vs. Tomcat can't be reliably told apart from the log
-  line alone (byte-identical Common/Combined Log Format); the label is a
-  path/filename heuristic.
+  line alone in `web_logs` (byte-identical Common/Combined Log Format);
+  the label is a path/filename heuristic. (In `web_error_logs`, the
+  engine label *is* a real detection -- error-log format is
+  engine-specific.)
+- Only each web application's default/standard error-log format is
+  recognized in `web_error_logs`; a customized format, or raw
+  unstructured stdout mixed into Tomcat's `catalina.out`, produces
+  reported parse errors rather than a misparse. A Tomcat entry's attached
+  stack trace is capped at 200 continuation lines.
+- FREB (IIS's XML-based per-request diagnostic trace) and Apache's
+  `mod_rewrite`/SSL request logs aren't ingested in v1 -- only the
+  standard access and error log categories.
 - Only Exchange Message Tracking gets first-class columns; every other
   Exchange CSV log type lands in a generic `exchange_logs` catchall with
   fields preserved but not promoted to real columns.
 - No Sigma logsource category exists for on-disk Scheduled Task
-  definitions or Exchange logs, so hunting doesn't cover those tables.
+  definitions, web application error logs (`web_error_logs`), or Exchange
+  logs, so hunting doesn't cover those tables.
 
 ## 12. License and rule attribution
 

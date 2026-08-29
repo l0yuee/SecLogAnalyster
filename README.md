@@ -27,7 +27,10 @@ workspace instead of raw XML and inconsistent text logs.
   with plain field/value conditions -- exact match, fuzzy/substring
   match, or regular expressions, case-insensitive by default, any number
   of conditions combined with AND/OR -- for analysts who'd rather not
-  write SQL by hand.
+  write SQL by hand. Not sure what fields exist or which one to search
+  on? `seclogx fields` / `Case.fields()` lists every field a table
+  actually has in this case's real data -- columns and JSON-catchall keys
+  alike -- with a popularity count and a real example value.
 - **pandas-native**: every log family -- events, web access/error logs,
   Scheduled Tasks, Exchange logs -- is reachable as a `pandas.DataFrame`
   through a named accessor (`c.web_logs()`, `c.scheduled_tasks()`, ...),
@@ -92,6 +95,9 @@ seclogx query incident42 "
   LIMIT 20
 "
 
+# Not sure what fields exist? List them from the real ingested data
+seclogx fields incident42 events
+
 # Or the same thing without writing SQL: plain field/value conditions,
 # fuzzy/exact/regex, case-insensitive by default
 seclogx search incident42 events --contains Image=mimikatz --eq host=WKS01
@@ -126,6 +132,11 @@ c.exchange_logs(log_type="HttpProxy")
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
 c.db.table("web_logs")            # generic escape hatch: any table this case has, by name
 
+# Not sure what fields a table has, or which one to search on? fields()
+# lists them all from this case's real data (columns + JSON-catchall
+# keys), with a popularity count and a real example value.
+c.fields("events")       # -> Image, CommandLine, TargetUserName, ... (from event_data)
+
 # No SQL required: exact/fuzzy/regex conditions against any table, AND/OR,
 # case-insensitive by default. Refuses (pointing at the alternatives below)
 # rather than risking an out-of-memory crash if the estimated result is
@@ -156,6 +167,7 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
 | `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs) |
 | `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |
+| `seclogx fields <case> <table>` | List every field a table actually has in this case's real data (columns + JSON-catchall keys), with a popularity count and example value |
 | `seclogx search <case> <table> [--eq/--contains/--regex FIELD=VALUE]...` | Query any table without writing SQL: exact/fuzzy/regex conditions, case-insensitive by default, combined with AND (or `--match-any` for OR) |
 | `seclogx tasks <case> [--suspicious]` | List ingested Scheduled Task definitions, optionally filtered by a built-in heuristic |
 | `seclogx hunt <case> [--rules DIR] [--min-level LEVEL]` | Run Sigma rules, report matches + ATT&CK tags |

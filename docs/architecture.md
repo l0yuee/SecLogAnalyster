@@ -160,6 +160,18 @@ run, in three steps:
    regardless (same `sql_chunks()`/`export_chunks_to_csv()` as the rest of
    the bounded-memory delivery story above).
 
+`discover_fields()` (`seclogx fields` / `Case.fields()`) answers "what
+can I even search on" by reading real data rather than documentation: it
+fetches one bounded sample (`LIMIT sample_size`, default 5000 -- a single
+query, safe at any table size) as a DataFrame, then for each column
+either reports it directly (a real column) or, for whichever columns
+`_json_object_columns` says hold a JSON object, `json.loads()`s every
+sampled value in Python and aggregates the union of keys with a
+popularity count and one example value per key. This is deliberately
+plain Python over the sample rather than a SQL-side aggregation (e.g.
+`json_keys()` + `unnest()`) -- simpler to get right, and the sample is
+already bounded so there's no performance case for pushing it into SQL.
+
 `query.py`'s `ResultSizeEstimate`/`CaseDB.estimate()` and
 `memcheck.available_memory_bytes()` (best-effort, no new dependency:
 `/proc/meminfo` on Linux, `os.sysconf` as a coarser POSIX fallback,

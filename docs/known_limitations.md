@@ -141,6 +141,15 @@ not oversights -- documented so they're easy to revisit later.
 
 ## Plain-language search (`search.py` / `seclogx search` / `Case.search()`)
 
+- **`seclogx fields` / `Case.fields()` / `discover_fields()` is
+  sample-based (`LIMIT sample_size`, default 5000 rows), not an
+  exhaustive scan.** A genuinely rare field/JSON key present in fewer
+  than roughly 1-in-`sample_size` rows can be missed. Increase
+  `--sample-size`/`sample_size` if you suspect this, or just try the
+  field with `search()` directly -- an unknown key inside a table that
+  has a JSON catchall returns zero matches rather than an error either
+  way (see below), so there's no harm in trying a field `fields` didn't
+  surface.
 - **`equals` always compares the text representation of a value**, not
   its native type -- deliberate, so an analyst doesn't need to know or
   care whether `status` is stored as an integer: `eq={"status": "404"}`

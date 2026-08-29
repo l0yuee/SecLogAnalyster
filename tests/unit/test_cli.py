@@ -122,6 +122,16 @@ def test_search_command_unknown_field_reports_cleanly(tmp_path: Path):
     assert "not a column" in result.output
 
 
+def test_fields_command(synth_case: Case):
+    case_root = synth_case.case_dir.parent
+    result = runner.invoke(app, ["fields", synth_case.name, "events", "--case-root", str(case_root)])
+    assert result.exit_code == 0, result.output
+    assert "Image" in result.output
+
+    result = runner.invoke(app, ["fields", synth_case.name, "no_such_table", "--case-root", str(case_root)])
+    assert result.exit_code != 0
+
+
 def test_search_command_no_matches(synth_case: Case):
     case_root = synth_case.case_dir.parent
     result = runner.invoke(

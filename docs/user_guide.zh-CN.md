@@ -201,6 +201,63 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   HttpProxy/OWA/ECP 的访问模式中，而不是邮件流转记录里——在不清楚具体字段结构时，可按内容对
   `fields` 做全文排查。
 
+### 我能查询哪些字段？
+
+写任何搜索之前，有两个问题要先弄清楚：*这张表到底有哪些字段*，以及*要找到我想要的结果，该查哪一个字段*。`seclogx
+fields <case> <table>` / `Case.fields()` 直接从这个案例真实的、已导入的数据中回答第一个问题（不是一份静态列表——`web_logs`
+的字段有哪些，取决于这个站点的 IIS 管理员选择记录了什么；`event_data`
+里有哪些 key 则完全由 provider 决定，因此不存在一份对所有案例都准确的固定列表）：
+
+```bash
+seclogx fields incident42 events
+```
+```
+                    Fields in events (sampled)
+  field          where              seen_in_sample  example
+  channel        column             102451          Microsoft-Windows-Sysmon/Operational
+  event_id       column             102451          1
+  host           column             102451          WKS01
+  ...
+  Image          inside event_data  41200           C:\Windows\System32\cmd.exe
+  CommandLine    inside event_data  41200           cmd.exe /c whoami
+  TargetUserName inside event_data  8310            alice
+  ...
+```
+
+每一行都是一个可以传给 `eq=`/`contains=`/`regex=` 的字段名，同时给出它来自哪里（真正的列，还是
+`event_data` 这类 JSON 兜底字段里的某个 key）、在采样中出现了多少次，以及一个真实的示例值——这样你在针对它写条件之前，就能先看清数据的实际形态（`CommandLine`
+是不是带引号？`status` 是字符串还是数字？）。这是基于一个有界样本计算的（`--sample-size`，默认
+5000 行），绝不是全表扫描，因此无论表有多大都能安全运行；代价是一个真正罕见的字段，如果在少于大约
+1/`sample-size` 的行中才出现，偶尔可能会被漏掉。
+
+```python
+c.fields("events")     # -> Image、CommandLine、TargetUserName 等（来自 event_data）
+c.fields("web_logs")   # -> status、uri_stem、client_ip 等（真实列）
+```
+
+至于第二个问题——到底该查哪个字段才能找到你想要的结果——这里是一份起步用的速查表（在你自己的案例上运行
+`seclogx fields` 可以拿到完整、真实的列表；provider/站点特有的字段尤其会有差异）：
+
+| 表 | 优先尝试这些字段 |
+|---|---|
+| `events`（进程创建，Sysmon 事件 ID 1） | `Image`、`CommandLine`、`ParentImage`、`ParentCommandLine`、`User`、`Hashes` |
+| `events`（网络连接，Sysmon 事件 ID 3） | `Image`、`DestinationIp`、`DestinationPort`、`DestinationHostname` |
+| `events`（文件/注册表，Sysmon 事件 ID 11/13） | `Image`、`TargetFilename` / `TargetObject`、`Details` |
+| `events`（PowerShell，事件 ID 4104） | `ScriptBlockText` |
+| `events`（登录，Security 事件 ID 4624/4625） | `TargetUserName`、`LogonType`、`IpAddress` |
+| `events`（任意通道都有） | `channel`、`event_id`、`host`、`computer`、`time_created`、`user_sid` |
+| `web_logs` | `uri_stem`、`uri_query`、`status`、`method`、`client_ip`、`user_agent`、`referer`、`log_type` |
+| `web_error_logs` | `severity`、`message`、`client_ip`；仅 IIS HTTPERR 有：`method`、`uri`、`status` |
+| `scheduled_tasks` | `author`、`hidden`、`enabled`、`actions`、`triggers`、`task_path`、`principal_user_id` |
+| `exchange_message_tracking` | `sender_address`、`recipient_address`、`message_subject`、`recipient_status`、`event_id` |
+| `exchange_logs` | 先看 `log_type`（弄清楚这具体是哪一种 Exchange 日志），再用 `seclogx fields` 查该日志类型的真实字段名 |
+
+特别是对 `events` 而言，注意有哪些字段存在取决于具体的*通道（channel）*——`Image`/`CommandLine`
+是 Sysmon 的字段，不会出现在 Security 通道的登录事件里，反过来
+`TargetUserName`/`LogonType` 也不会出现在 Sysmon 事件里。`seclogx fields`
+是对整张表采样的，如果你想看某一个具体通道的字段，请先做过滤（见[第 6
+节](#6-分析师工作流--常用查询)中的常用查询，其中大多数都是从 `channel = '...'` 开始的）。
+
 ### 不写 SQL 也能查询
 
 本指南其他地方的每一个 SQL 示例都有对应的免 SQL 写法：命令行用
@@ -411,6 +468,20 @@ seclogx table incident42 web_error_logs
 seclogx table incident42 exchange_message_tracking --out mailflow.csv
 ```
 
+### `seclogx fields <case> <table>`
+
+我能查询哪些字段？列出这个案例真实、已导入的数据中，某张表实际拥有的每一个字段——见[第 3
+节](#3-核心概念)中的“我能查询哪些字段？”。基于一个有界样本计算，因此无论表有多大都能安全运行。
+
+| 参数 | 含义 |
+|---|---|
+| `--sample-size N` | 采样的行数（默认 5000） |
+
+```bash
+seclogx fields incident42 events
+seclogx fields incident42 web_logs --sample-size 20000
+```
+
 ### `seclogx search <case> <table>`
 
 不写 SQL 也能查询任意一张表——条件和匹配方式的完整讲解见[第 3
@@ -548,6 +619,12 @@ df = c.query("""
     FROM events
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
+
+# 不确定某张表里到底有什么字段，或者该查哪一个？fields() 能从这个案例的真实数据中给出答案——
+# 每一行是一个字段（真实列，或者 event_data 这类 JSON 兜底字段里找到的某个 key），
+# 附带出现频率和一个真实的示例值。完整讲解与速查表见第 3 节的“我能查询哪些字段？”。
+c.fields("events")       # -> Image、CommandLine、TargetUserName 等（来自 event_data）+ 真实列
+c.fields("web_logs")     # -> status、uri_stem、client_ip 等（真实列）
 
 # ……或者不写 SQL 做同样的事：针对任意表的纯字段/取值条件。
 # eq= 精确匹配，contains= 模糊/子串匹配，regex= 正则匹配；默认不区分大小写；

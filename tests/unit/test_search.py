@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from seclogx.case import Case
 from seclogx.errors import ResultTooLargeError, UnknownFieldError
 from seclogx.query import ResultSizeEstimate
-from seclogx.search import Condition, build_search_sql
+from seclogx.search import Condition, build_search_sql, discover_fields
 
 
 # -- Condition --------------------------------------------------------------------
@@ -122,6 +123,69 @@ def test_search_to_csv_streams_all_rows(synth_case: Case, tmp_path: Path):
 def test_search_no_conditions_returns_everything(synth_case: Case):
     df = synth_case.search("events")
     assert len(df) == 2
+
+
+# -- field discovery ("what can I search on?") -------------------------------------
+
+
+def test_fields_lists_columns_and_json_keys(synth_case: Case):
+    df = synth_case.fields("events")
+    by_field = {row["field"]: row for _, row in df.iterrows()}
+
+    # a real column
+    assert by_field["host"]["where"] == "column"
+    assert by_field["host"]["seen_in_sample"] == 2
+    assert by_field["host"]["example"] == "TESTHOST"
+
+    # a key inside event_data, not a real column
+    assert by_field["Image"]["where"] == "inside event_data"
+    assert by_field["Image"]["seen_in_sample"] == 2
+    assert "exe" in by_field["Image"]["example"]
+
+    # a real column that's NULL for every row still shows up, with a zero count
+    assert by_field["activity_id"]["where"] == "column"
+    assert by_field["activity_id"]["seen_in_sample"] == 0
+    assert pd.isna(by_field["activity_id"]["example"])
+
+    # columns are listed before JSON-catchall keys
+    where_order = list(df["where"])
+    last_column_idx = max(i for i, w in enumerate(where_order) if w == "column")
+    first_json_idx = min(i for i, w in enumerate(where_order) if w != "column")
+    assert last_column_idx < first_json_idx
+
+
+def test_fields_discovered_name_works_in_search(synth_case: Case):
+    df = synth_case.fields("events")
+    assert "Image" in set(df["field"])
+    hits = synth_case.search("events", contains={"Image": "mimikatz"})
+    assert len(hits) == 1
+
+
+def test_fields_unknown_table_raises(synth_case: Case):
+    with pytest.raises(ValueError):
+        synth_case.fields("no_such_table")
+
+
+def test_fields_on_logsources_table(tmp_path: Path):
+    from seclogx.discovery import SourceSpec
+    from seclogx.logsources.ingest import run_aux_ingest
+
+    fixtures = Path(__file__).parent.parent / "fixtures" / "logsources"
+    case = Case.create("fieldslogsources", case_root=tmp_path / "cases")
+    run_aux_ingest(case.case_dir, [SourceSpec(path=fixtures, host="LAB01")], workers=1)
+
+    df = case.fields("web_logs")
+    fields = set(df["field"])
+    assert {"status", "uri_stem", "client_ip", "log_type"} <= fields
+    # extra is a JSON catchall column but empty for these fixtures, so it
+    # contributes no keys -- it shouldn't appear as a searchable field itself
+    assert "extra" not in fields
+
+
+def test_discover_fields_module_function_matches_case_method(synth_case: Case):
+    via_case = synth_case.fields("events")
+    via_module = discover_fields(synth_case.db, "events")
+    pd.testing.assert_frame_equal(via_case, via_module)
 
 
 # -- memory-safety refusal -----------------------------------------------------------

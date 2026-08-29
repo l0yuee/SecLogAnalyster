@@ -37,6 +37,8 @@ out-of-memory crash.
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
@@ -174,6 +176,89 @@ def resolve_field(db: CaseDB, table: str, field_name: str) -> str:
     if len(json_columns) == 1:
         return f"({_quote_ident(json_columns[0])} ->> '{escaped}')"
     return "COALESCE(" + ", ".join(f"({_quote_ident(c)} ->> '{escaped}')" for c in json_columns) + ")"
+
+
+DEFAULT_FIELD_SAMPLE_SIZE = 5000
+
+
+def discover_fields(db: CaseDB, table: str, sample_size: int = DEFAULT_FIELD_SAMPLE_SIZE) -> pd.DataFrame:
+    """What can I actually search on? Answers it from this case's real
+    ingested data rather than static documentation -- a `web_logs` field
+    list looks different depending on what a site's IIS admin chose to
+    log, and `event_data`'s keys are entirely provider-specific, so no
+    fixed list would be accurate for every case anyway.
+
+    Returns one row per field: `field` (the name to pass to
+    eq=/contains=/regex=), `where` ('column' for a real table column, or
+    'inside <json column>' for a key found inside a JSON catchall),
+    `seen_in_sample` (how many of the sampled rows had a non-NULL/present
+    value for it -- a rough popularity signal, not exact), and `example`
+    (one real, truncated value, so you can see the shape of the data
+    before writing a condition against it).
+
+    Sampled (`LIMIT sample_size`, one query), not an exhaustive scan --
+    memory- and time-bounded regardless of the table's total size, at the
+    cost of a rare field present in fewer than 1-in-`sample_size` rows
+    potentially not showing up. Rows are ordered most-common-first within
+    'column' fields and within JSON-catchall fields separately, columns
+    listed before catchall keys, since a real column is always a safe,
+    fast condition while a catchall key search has to fall back to a
+    slower per-row JSON extraction (see `resolve_field`)."""
+    if table not in db.tables:
+        raise ValueError(f"case has no '{table}' table (see `seclogx sources` / Case.table_counts())")
+
+    json_columns = set(_json_object_columns(db, table))
+    sample = db.connection.execute(f"SELECT * FROM {_quote_ident(table)} LIMIT {int(sample_size)}").fetchdf()
+
+    rows: list[dict] = []
+    for col in sample.columns:
+        non_null = sample[col].notna()
+        if col in json_columns:
+            key_counts: Counter = Counter()
+            key_examples: dict[str, str] = {}
+            for raw in sample.loc[non_null, col]:
+                try:
+                    obj = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                for key, value in obj.items():
+                    if value in (None, ""):
+                        continue
+                    key_counts[key] += 1
+                    key_examples.setdefault(key, str(value))
+            for key, count in key_counts.items():
+                rows.append(
+                    {
+                        "field": key,
+                        "where": f"inside {col}",
+                        "seen_in_sample": count,
+                        "example": key_examples[key][:80],
+                    }
+                )
+        else:
+            count = int(non_null.sum())
+            example = sample.loc[non_null, col].iloc[0] if count else None
+            rows.append(
+                {
+                    "field": col,
+                    "where": "column",
+                    "seen_in_sample": count,
+                    "example": None if example is None else str(example)[:80],
+                }
+            )
+
+    result = pd.DataFrame(rows, columns=["field", "where", "seen_in_sample", "example"])
+    if result.empty:
+        return result
+    is_column = (result["where"] == "column").astype(int)
+    return (
+        result.assign(_is_column=is_column)
+        .sort_values(["_is_column", "seen_in_sample"], ascending=[False, False])
+        .drop(columns="_is_column")
+        .reset_index(drop=True)
+    )
 
 
 def _escape_like_literal(value: str) -> str:

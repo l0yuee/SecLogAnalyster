@@ -12,8 +12,8 @@ import typer
 from ..case import Case
 from ..config import DEFAULT_CASE_ROOT
 from ..errors import UnknownFieldError
-from ..search import Condition, build_search_sql
-from ._render import console, export_chunks_to_csv, print_df_chunks
+from ..search import DEFAULT_FIELD_SAMPLE_SIZE, Condition, build_search_sql
+from ._render import console, export_chunks_to_csv, print_df, print_df_chunks
 
 
 def _parse_field_value(raw: str) -> tuple[str, str]:
@@ -106,3 +106,29 @@ def search_command(
         else:
             console.print(f"[dim]{size_note}[/dim]")
         print_df_chunks(chunks, title=table_name)
+
+
+def fields_command(
+    case_name: str = typer.Argument(...),
+    table_name: str = typer.Argument(..., help="Table to inspect, e.g. web_logs, events (see `seclogx sources`)"),
+    sample_size: int = typer.Option(
+        DEFAULT_FIELD_SAMPLE_SIZE, "--sample-size", help="How many rows to sample when discovering fields"
+    ),
+    case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
+) -> None:
+    """What can I search on? Lists every field this case's real, ingested
+    data has for a table -- both its columns and every key found inside
+    its JSON catchall (event_data/extra/fields) -- with a popularity
+    count and a real example value, computed from a sample so this is
+    safe to run against a table of any size.
+
+    \b
+    seclogx fields incident42 events        # -> Image, CommandLine, TargetUserName, ... from event_data
+    seclogx fields incident42 web_logs      # -> status, uri_stem, client_ip, ... real columns
+    """
+    c = Case.open(case_name, case_root=case_root)
+    if table_name not in c.db.tables:
+        console.print(f"[yellow]case has no '{table_name}' table (see `seclogx sources`)[/yellow]")
+        raise typer.Exit(1)
+    df = c.fields(table_name, sample_size=sample_size)
+    print_df(df, title=f"Fields in {table_name} (sampled)", max_rows=200)

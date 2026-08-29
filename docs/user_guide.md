@@ -275,6 +275,75 @@ What to actually look for in each, at a glance (full recipes in
   HttpProxy/OWA/ECP access patterns rather than mail flow -- sweep
   `fields` by content when you don't know the exact schema.
 
+### Which fields can I search on?
+
+Two questions come before writing any search: *what fields does this
+table actually have*, and *which one is the right one for what I'm
+trying to find*. `seclogx fields <case> <table>` / `Case.fields()`
+answers the first directly from this case's real, ingested data (not a
+static list -- a `web_logs` field list looks different depending on what
+a site's IIS admin chose to log, and `event_data`'s keys are entirely
+provider-specific, so no fixed list would be accurate for every case
+anyway):
+
+```bash
+seclogx fields incident42 events
+```
+```
+                    Fields in events (sampled)
+  field          where              seen_in_sample  example
+  channel        column             102451          Microsoft-Windows-Sysmon/Operational
+  event_id       column             102451          1
+  host           column             102451          WKS01
+  ...
+  Image          inside event_data  41200           C:\Windows\System32\cmd.exe
+  CommandLine    inside event_data  41200           cmd.exe /c whoami
+  TargetUserName inside event_data  8310            alice
+  ...
+```
+
+Each row is a field name you can pass to `eq=`/`contains=`/`regex=`,
+where it comes from (a real column, or a key found inside a JSON
+catchall like `event_data`), how many of a sample of rows had it, and one
+real example value -- so you can see the shape of the data (is
+`CommandLine` quoted? is `status` a string or a number?) before writing a
+condition against it. It's computed from a bounded sample (`--sample-size`,
+default 5000 rows), never a full table scan, so it's safe to run against
+a table of any size; a genuinely rare field can occasionally be missed if
+it shows up in fewer than 1-in-`sample-size` rows.
+
+```python
+c.fields("events")     # -> Image, CommandLine, TargetUserName, ... (from event_data)
+c.fields("web_logs")   # -> status, uri_stem, client_ip, ... (real columns)
+```
+
+For the second question -- which field actually gets you what you want --
+a starting cheat sheet per log type (run `seclogx fields` on your own
+case for the full, real list; provider/site-specific fields especially
+vary):
+
+| Table | Start with these fields |
+|---|---|
+| `events` (process creation, Sysmon EventID 1) | `Image`, `CommandLine`, `ParentImage`, `ParentCommandLine`, `User`, `Hashes` |
+| `events` (network connection, Sysmon EventID 3) | `Image`, `DestinationIp`, `DestinationPort`, `DestinationHostname` |
+| `events` (file/registry, Sysmon EventID 11/13) | `Image`, `TargetFilename` / `TargetObject`, `Details` |
+| `events` (PowerShell, EventID 4104) | `ScriptBlockText` |
+| `events` (logon, Security EventID 4624/4625) | `TargetUserName`, `LogonType`, `IpAddress` |
+| `events` (always available, any channel) | `channel`, `event_id`, `host`, `computer`, `time_created`, `user_sid` |
+| `web_logs` | `uri_stem`, `uri_query`, `status`, `method`, `client_ip`, `user_agent`, `referer`, `log_type` |
+| `web_error_logs` | `severity`, `message`, `client_ip`; IIS HTTPERR only: `method`, `uri`, `status` |
+| `scheduled_tasks` | `author`, `hidden`, `enabled`, `actions`, `triggers`, `task_path`, `principal_user_id` |
+| `exchange_message_tracking` | `sender_address`, `recipient_address`, `message_subject`, `recipient_status`, `event_id` |
+| `exchange_logs` | `log_type` first (to see what kind of Exchange log you actually have), then `seclogx fields` for that log type's real field names |
+
+For `events` specifically, note that which fields exist depends on the
+*channel* -- `Image`/`CommandLine` are Sysmon fields and won't appear on
+a Security-channel logon event, and vice versa for `TargetUserName`/
+`LogonType`. `seclogx fields` samples across the whole table, so if you
+want the fields for one specific channel, filter first (see
+[section 6](#6-analyst-workflows--recipes)'s recipes, most of which
+start with `channel = '...'`).
+
 ### Searching without SQL
 
 Every SQL example elsewhere in this guide has a no-SQL equivalent:
@@ -531,6 +600,22 @@ seclogx table incident42 web_error_logs
 seclogx table incident42 exchange_message_tracking --out mailflow.csv
 ```
 
+### `seclogx fields <case> <table>`
+
+What can I search on? Lists every field this case's real, ingested data
+has for a table -- see "Which fields can I search on?" in
+[section 3](#3-core-concepts). Computed from a bounded sample, so it's
+safe to run against a table of any size.
+
+| Option | Meaning |
+|---|---|
+| `--sample-size N` | How many rows to sample (default 5000) |
+
+```bash
+seclogx fields incident42 events
+seclogx fields incident42 web_logs --sample-size 20000
+```
+
 ### `seclogx search <case> <table>`
 
 Query any table without writing SQL -- see "Searching without SQL" in
@@ -680,6 +765,14 @@ df = c.query("""
     FROM events
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
+
+# Not sure what's actually in a table, or which field to search on?
+# fields() answers both from this case's real data -- one row per field
+# (real column or a key found inside a JSON catchall like event_data),
+# how common it is, and a real example value. See "Which fields can I
+# search on?" in section 3 for the full explanation and a cheat sheet.
+c.fields("events")       # -> Image, CommandLine, TargetUserName, ... (from event_data) + real columns
+c.fields("web_logs")     # -> status, uri_stem, client_ip, ... (real columns)
 
 # ...or the same thing without SQL: plain field/value conditions against
 # any table. eq= exact, contains= fuzzy/substring, regex= regular

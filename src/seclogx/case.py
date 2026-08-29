@@ -25,7 +25,7 @@ from .ingest.manifest import IngestReport
 from .logsources import run_aux_ingest
 from .logsources.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .query import DEFAULT_CHUNKSIZE, CaseDB
-from .search import Match, conditions_from_dicts
+from .search import Match, conditions_from_dicts, discover_fields
 from .search import search as _search
 from .search import search_chunks as _search_chunks
 from .search import search_to_csv as _search_to_csv
@@ -181,6 +181,23 @@ class Case:
         return self.db.sql(sql)
 
     # -- plain-language search (no SQL required) ---------------------------------
+    def fields(self, table: str, sample_size: int = 5000) -> pd.DataFrame:
+        """What can I search on, and what does the data actually look
+        like? One row per field this case's ingested data actually has
+        for `table` -- real columns plus every key found inside its JSON
+        catchall (`event_data`/`extra`/`fields`), each with a popularity
+        count and a real example value, computed from a bounded sample
+        (never a full table scan) so this is safe to run on a table of
+        any size. Run this before `search()` when you're not sure what to
+        search on, or when a field name you tried came back with no
+        matches and you want to check whether it's really absent or you
+        just got the name wrong.
+
+            c.fields("events")     # -> Image, CommandLine, TargetUserName, ... (from event_data)
+            c.fields("web_logs")   # -> status, uri_stem, client_ip, ... (real columns)
+        """
+        return discover_fields(self.db, table, sample_size=sample_size)
+
     def search(
         self,
         table: str,

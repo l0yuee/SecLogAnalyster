@@ -16,7 +16,7 @@ from ..attack import parse_attack_tags
 from ..config import BUNDLED_SIGMA_RULES_DIR
 from ..query import CaseDB
 from .backend import DuckDBBackend
-from .pipeline import seclogx_pipeline
+from .pipeline import LOGSOURCE_TABLE, seclogx_pipeline
 from .rules import load_rules
 
 LEVEL_ORDER = {"informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -86,6 +86,13 @@ def run_hunt(case_dir: Path, rules_dir: Path | None = None, min_level: str | Non
         rule_id = str(rule.id) if rule.id else rule.title
         tags = [str(t) for t in (rule.tags or [])]
         attack_ids = parse_attack_tags(tags)
+        table = LOGSOURCE_TABLE.get(rule.logsource.category, "events")
+
+        if table not in db.tables:
+            failures.append(
+                RuleFailure(rule_id=rule_id, title=rule.title, reason=f"case has no '{table}' table ingested")
+            )
+            continue
 
         try:
             fragments = backend.convert_rule(rule)
@@ -95,7 +102,7 @@ def run_hunt(case_dir: Path, rules_dir: Path | None = None, min_level: str | Non
             continue
 
         try:
-            df = db.sql(f"SELECT * FROM events WHERE {condition}")
+            df = db.sql(f"SELECT * FROM {table} WHERE {condition}")
         except Exception as e:
             failures.append(RuleFailure(rule_id=rule_id, title=rule.title, reason=f"execution failed: {e}"))
             continue

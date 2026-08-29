@@ -41,6 +41,14 @@ LOGSOURCE_ROUTES: dict[str, dict[str, object]] = {
     "process_access": {"channel": "Microsoft-Windows-Sysmon/Operational", "EventID": 10},
 }
 
+# category -> table to hunt against. Every category above targets `events`
+# (Windows Event Log); `webserver` is the one category routed to the
+# `web_logs` table (IIS/nginx/Apache/Tomcat/Exchange-HttpProxy access logs)
+# instead -- no channel/EventID condition applies there, so it deliberately
+# has no entry in LOGSOURCE_ROUTES, only here.
+LOGSOURCE_TABLE: dict[str, str] = {category: "events" for category in LOGSOURCE_ROUTES}
+LOGSOURCE_TABLE["webserver"] = "web_logs"
+
 # Sigma standard field name -> parenthesized SQL expression against our schema.
 # Parenthesized so every leaf template ({field} LIKE ..., {field} = ..., ...)
 # groups correctly regardless of DuckDB's ->/->> operator precedence
@@ -104,6 +112,17 @@ FIELD_MAPPING: dict[str, str] = {
     "EventID": "event_id",
     "channel": "channel",
     "Computer": "computer",
+    # webserver (web_logs: IIS / nginx / Apache / Tomcat / Exchange HttpProxy),
+    # field names matching the W3C literal names SigmaHQ's `webserver`-category
+    # rules are written against.
+    "c-ip": "client_ip",
+    "cs-method": "method",
+    "cs-uri-stem": "uri_stem",
+    "cs-uri-query": "uri_query",
+    "sc-status": "status",
+    "cs-username": "username",
+    "cs-useragent": "user_agent",
+    "cs-referrer": "referer",
 }
 
 

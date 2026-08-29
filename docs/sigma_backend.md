@@ -20,27 +20,47 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
    mapping can misparse and fail at execution time with a confusing
    type-cast error rather than a clear syntax error.
 
-2. **Logsource routing** (`detect/pipeline.py` `LOGSOURCE_ROUTES`): a
-   Sigma rule's `logsource.category` (e.g. `process_creation`) is turned
-   into an added `channel = '...' AND EventID = ...` condition via
-   pySigma's `AddConditionTransformation`, scoped to that category via
-   `LogsourceCondition`. v1 routes every category to its Sysmon
-   equivalent (see `docs/known_limitations.md` for why).
+2. **Logsource routing** (`detect/pipeline.py` `LOGSOURCE_ROUTES` +
+   `LOGSOURCE_TABLE`): a Sigma rule's `logsource.category` (e.g.
+   `process_creation`) is turned into an added `channel = '...' AND
+   EventID = ...` condition via pySigma's `AddConditionTransformation`,
+   scoped to that category via `LogsourceCondition`. v1 routes every
+   `events`-backed category to its Sysmon equivalent (see
+   `docs/known_limitations.md` for why). `LOGSOURCE_TABLE` separately
+   maps every supported category to the table it's hunted against --
+   `events` for all of them except `webserver`, which targets `web_logs`
+   (IIS/nginx/Apache/Tomcat/Exchange-HttpProxy access logs) and has no
+   `LOGSOURCE_ROUTES` entry, since there's no channel/EventID concept to
+   add a condition for.
 
 3. **Conversion** (`detect/backend.py` `DuckDBBackend`): the mapped,
    routed rule is converted to a bare boolean WHERE-clause fragment (not
-   a full `SELECT`, deliberately -- stays decoupled from the `events`
-   view name). `detect/hunt.py` wraps it as
-   `SELECT * FROM events WHERE <fragment>`.
+   a full `SELECT`, deliberately -- stays decoupled from any particular
+   view name). `detect/hunt.py` looks up the rule's target table via
+   `LOGSOURCE_TABLE` and wraps the fragment as
+   `SELECT * FROM <table> WHERE <fragment>`; if the case has no data in
+   that table yet, the rule is reported as a failure ("case has no
+   '<table>' table ingested"), not silently skipped.
 
 ## Adding support for a new field or category
 
 - New field used by a rule you want to run: add an entry to
   `FIELD_MAPPING` in `detect/pipeline.py`, parenthesized, pointing at the
-  right `event_data` key (or a top-level normalized column for
-  System-level fields, e.g. `Computer` -> `computer`).
-- New logsource category: add an entry to `LOGSOURCE_ROUTES` with its
-  `(channel, EventID)` target.
+  right column or JSON key for the table that rule's category targets
+  (`event_data ->> '...'` for `events`; a direct `web_logs` column, e.g.
+  `uri_stem`, for `webserver`).
+- New logsource category targeting `events`: add an entry to
+  `LOGSOURCE_ROUTES` with its `(channel, EventID)` target -- this also
+  adds it to `LOGSOURCE_TABLE` automatically.
+- New logsource category targeting a different table (`web_logs` or a
+  future one): add an entry directly to `LOGSOURCE_TABLE` (skip
+  `LOGSOURCE_ROUTES` unless that category also needs an added condition).
+- `seclogx hunt` only ever runs bundled + user-supplied Sigma rules
+  against `events` and `web_logs` in v1 -- `scheduled_tasks` and
+  `exchange_message_tracking`/`exchange_logs` have no Sigma logsource
+  category that fits (Sigma's scheduled-task detections target the event
+  log, not on-disk task definitions), so they're queried directly via SQL
+  or the lightweight `Case.suspicious_tasks()` heuristic instead.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
   `seclogx hunt <case> --rules <dir>` against a case with known-good data

@@ -2,7 +2,8 @@
 
 **语言：[English](user_guide.md) | 中文**
 
-本指南面向使用 seclogx 进行 Windows 事件日志分析与威胁狩猎的分析师，提供从安装到日常取证工作流的完整说明。内部设计细节请参阅同目录下的
+本指南面向使用 seclogx 进行取证日志分析与威胁狩猎的分析师：Windows 事件日志、磁盘上的计划任务（Scheduled Task）定义、IIS/nginx/Apache/Tomcat
+Web 访问日志，以及 Exchange 日志，提供从安装到日常取证工作流的完整说明。内部设计细节请参阅同目录下的
 `architecture.md`、`schema.md`、`sigma_backend.md` 和 `known_limitations.md`（目前为英文）。
 
 ## 目录
@@ -30,8 +31,12 @@ seclogx 的目标就是让排查的最初几个小时变得高效：
 
 - 指向一个或多个取证采集目录（它们不需要在同一个父目录下，也可以来自不同的主机）。
 - 它会**通用地**解析每一个 `.evtx` 通道（channel）——Security、System、Application、Sysmon Operational、PowerShell Operational、WMI-Activity 等等——统一归一化为一张可查询的表。
-- 你得到的是原生 `pandas.DataFrame` 接口（命令行表格/CSV 导出，或在 notebook 中使用的 Python `Case` 对象），并内置基于 Sigma 规则的威胁狩猎能力，自动打上 MITRE ATT&CK 标签。
-- 每一个解析错误和每一条不支持的规则都会被明确报告，绝不会被静默丢弃。
+- 同一次导入过程中，它还会发现并归一化：磁盘上的**计划任务**定义（一种持久化痕迹）、**IIS** W3C
+  访问日志、**nginx/Apache/Tomcat** 访问日志，以及 **Exchange** CSV 日志（邮件跟踪日志拥有一等列，其余
+  Exchange 日志类型进入一个不丢弃任何数据的兜底表）。每种格式都是根据内容而非文件名判断的，因此被重命名或迁移过的证据文件同样能被正确识别。
+- 你得到的是原生 `pandas.DataFrame` 接口（命令行表格/CSV 导出，或在 notebook 中使用的 Python `Case` 对象），并内置基于 Sigma 规则的威胁狩猎能力，自动打上 MITRE
+  ATT&CK 标签，覆盖 Windows 事件日志与 Web 访问日志两类数据。
+- 每一个解析错误、每一个无法识别的文件、以及每一条不支持的规则都会被明确报告，绝不会被静默丢弃。
 
 seclogx 面向单台工作站上、单个分析师处理的现实案例规模（远低于 100GB）设计——不需要集群，也不依赖外部服务。
 
@@ -64,12 +69,19 @@ seclogx --help
 ```
 cases/<name>/
   case.json                     # 已导入的主机列表、导入运行历史
-  staging/<host>/*.ndjson       # 中间解析结果（默认保留）
+  staging/<host>/*.ndjson       # 中间解析结果（仅 EVTX，默认保留）
   logs/ingest_<batch_id>.log    # 每次导入的核对报告
-  lake/host=<h>/channel=<c>/*.parquet   # 归一化后可查询的数据
+  lake/
+    events/host=<h>/channel=<c>/*.parquet                       # Windows 事件日志
+    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat
+    scheduled_tasks/host=<h>/*.parquet                           # 计划任务定义
+    exchange_message_tracking/host=<h>/*.parquet                 # Exchange 邮件流转
+    exchange_logs/host=<h>/log_type=<t>/*.parquet                # 其他 Exchange CSV 日志
 ```
 
-你只需创建一次案例（`seclogx case init`），之后可以对它执行任意多次 `ingest`（导入）——来自不同的来源路径、不同的主机，甚至相隔数周也没问题。每次导入都是增量追加，并记录在 `case.json` 中。
+你只需创建一次案例（`seclogx case init`），之后可以对它执行任意多次 `ingest`（导入）——来自不同的来源路径、不同的主机，甚至相隔数周也没问题。每次导入都是增量追加，并记录在
+`case.json` 中。一次 `ingest` 会在来源路径下一次性发现并导入所有支持的格式——不需要对每种日志类型分别导入。案例只会暴露它实际拥有数据的表；可用
+`seclogx sources <case>` / `Case.table_counts()` 查看。
 
 ### 归一化事件模式（Normalized event schema）
 
@@ -111,6 +123,28 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 如果你不确定某个信息具体在哪个字段里，可以用 `CaseDB.search()` /
 `seclogx query ... event_data::VARCHAR ILIKE '%...%'` 对其做全文检索（见[第 6 节](#6-分析师工作流--常用查询)）。
 
+### 其他表：`web_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`
+
+Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每一类数据的形态都与事件日志本质不同，因此各自拥有独立的表，而不是硬塞进
+`events` 里——完整列参考见 `docs/schema.md`。
+
+| 表 | 存放内容 | 关键列 |
+|---|---|---|
+| `web_logs` | IIS、nginx、Apache、Tomcat 的 HTTP 访问日志，统一存放 | `log_type`、`client_ip`、`method`、`uri_stem`、`uri_query`、`status`、`user_agent`、`referer` |
+| `scheduled_tasks` | 磁盘上的计划任务定义（`System32\Tasks\**`）——一种持久化痕迹，区别于计划任务的*事件日志*（已在 `events` 中覆盖） | `task_path`、`author`、`enabled`、`hidden`、`actions`（JSON）、`triggers`（JSON） |
+| `exchange_message_tracking` | Exchange 邮件流转记录（谁给谁发了什么） | `sender_address`、`recipient_address`、`message_subject`、`event_id`（Exchange 自身的事件标识，**不是** Windows 事件 ID） |
+| `exchange_logs` | 其他所有 Exchange CSV 日志类型（HttpProxy、ActiveSync、EWS 等），字段原样保留 | `log_type`、`fields`（JSON，用 `fields ->> 'field-name'` 查询） |
+
+在查询这些表之前，有几点需要了解：
+
+- **格式判定基于文件内容，而非文件名或扩展名**——活跃系统上的计划任务文件根本没有扩展名，取证工具也经常重命名导出的日志。任何不匹配已支持格式的文件都会在导入摘要中被报告为“无法识别”，绝不会被静默跳过。
+- **nginx、Apache、Tomcat 之间的区分是尽力而为的标签，并非确切检测**——三者默认使用的
+  Common/Combined 日志格式在字节层面完全一致；当没有路径/文件名线索时，`log_type` 会回退为
+  `web_access`。IIS 总能被可靠识别（其头部自描述）。
+- **Exchange 支持范围以邮件跟踪日志为一等列**；其余十余种 Exchange 日志类型都进入
+  `exchange_logs`，所有字段都保存在 `fields` 中，虽未提升为真正的列，但依然完全可查询。
+- 常用查询见[第 6 节](#6-分析师工作流--常用查询)，完整的取舍决定见 `docs/known_limitations.md`。
+
 ## 4. 命令行参考
 
 所有命令都支持 `--case-root <dir>` 参数（默认 `./cases`）以指向不同位置的案例工作区。执行任意命令加 `--help` 可查看最新、完整的参数列表。
@@ -137,17 +171,20 @@ seclogx case info incident42
 
 ### `seclogx ingest <case> --source PATH[:HOST] [--source ...]`
 
-解析并归一化 `.evtx` 文件，导入到案例中。这是核心命令。
+在来源路径下一次性发现、分类并归一化所有支持的文件，导入到案例中：`.evtx`、计划任务定义、IIS/nginx/Apache/Tomcat
+访问日志，以及 Exchange CSV 日志。这是核心命令。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描 `.evtx` 文件的文件或目录。可选地用 `PATH:HOST` 语法显式指定主机标签；若省略，则使用来源目录本身的名称作为主机标签。 |
+| `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。可选地用 `PATH:HOST` 语法显式指定主机标签；若省略，则使用来源目录本身的名称作为主机标签。 |
 | `--workers N` | CPU 核心数 | 并行处理文件的工作进程数。各文件相互独立解析，因此该参数随核心数线性扩展效果明显。 |
-| `--keep-raw` | 关闭 | 同时将每条记录的原始 XML 一并写入数据湖（`raw_xml` 列），适用于需要完整证据保真度的场景。会使被应用文件的导入耗时与内存占用大致翻倍。 |
-| `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留 `staging/` 下的中间 NDJSON 文件。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
+| `--keep-raw` | 关闭 | 仅对 `.evtx` 来源生效：同时将每条记录的原始 XML 一并写入数据湖（`raw_xml` 列），适用于需要完整证据保真度的场景。会使被应用文件的导入耗时与内存占用大致翻倍。 |
+| `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留 `staging/` 下的中间 NDJSON 文件（仅 EVTX——其他格式不会先落盘暂存）。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
 
-如果 `<case>` 尚不存在，`ingest` 会自动创建它。
+如果 `<case>` 尚不存在，`ingest` 会自动创建它。只要来源路径下至少有一种受支持的非
+EVTX 产物（反之亦然），即使没有任何 `.evtx` 文件也不算错误——只有当两条通路都一无所获时，`ingest`
+才会报错。
 
 示例：
 
@@ -182,6 +219,23 @@ Ingest batch 66777433-... for case 'incident42'
 
 出现 `partial`（部分恢复）状态的文件不需要惊慌——它准确地表示：在某个损坏的数据块导致解析中断之前，已经成功恢复了一定数量的记录。失败点之前的数据不会丢失。
 
+紧接着 EVTX 的核对报告之后，还会打印第二份针对非 EVTX 数据的核对报告，遵循同样“绝不静默丢弃”的原则——完全无法识别的文件会被明确列出，而不是被跳过：
+
+```
+Auxiliary log ingest (Scheduled Tasks / IIS / web access / Exchange):
+  files discovered : 6
+  files ok         : 5
+  files partial    : 0
+  files failed     : 0
+  files unrecognized: 1  <-- content didn't match any supported format, not ingested
+  rows written per table:
+    exchange_message_tracking: 1
+    scheduled_tasks: 1
+    web_logs: 4
+  sample unrecognized files:
+    /evidence/wks01/notes.txt
+```
+
 ### `seclogx query <case> "<SQL>"`
 
 对案例的 `events` 视图（即整个归一化数据湖）执行任意 SQL，并打印或导出结果。
@@ -202,15 +256,41 @@ seclogx query incident42 "
 
 ### `seclogx summary <case>`
 
-按 `(host, channel, event_id)` 分组统计，每组一行，附带计数与首次/最后一次出现时间——是快速了解案例中实际包含哪些内容的最快方式。
+按 `(host, channel, event_id)` 分组统计 `events`（Windows 事件日志）表，每组一行，附带计数与首次/最后一次出现时间——是快速了解案例中事件日志数据实际包含哪些内容的最快方式。
 
 ### `seclogx channels <case>`
 
-列出案例中出现的所有不同通道（用于确认实际采集到了哪些日志来源，例如确认 Sysmon 当时确实在运行）。
+列出 `events` 表中出现的所有不同通道（用于确认实际采集到了哪些日志来源，例如确认 Sysmon 当时确实在运行）。
+
+### `seclogx sources <case>`
+
+列出案例当前拥有的每张表（`events`、`web_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
+
+```bash
+seclogx sources incident42
+```
+
+### `seclogx tasks <case> [--suspicious]`
+
+列出已导入的 `scheduled_tasks` 计划任务定义。
+
+| 参数 | 含义 |
+|---|---|
+| `--suspicious` | 只显示内置启发式规则标记出的任务：动作可执行文件位于类似 Temp/AppData/Public
+  的路径下、命令类似 LOLBin（powershell/cmd/wscript/cscript/mshta/rundll32/regsvr32）、任务被隐藏，或任务未记录作者。这不是
+  Sigma 规则——参见[第 7 节](#7-理解狩猎结果与-attck-标签)。 |
+| `--out FILE.csv` | 导出完整结果 |
+
+```bash
+seclogx tasks incident42 --suspicious
+```
 
 ### `seclogx hunt <case>`
 
-对案例执行 Sigma 检测规则，报告匹配结果并附带 MITRE ATT&CK 标签。
+对案例执行 Sigma 检测规则，报告匹配结果并附带 MITRE ATT&CK 标签。`logsource.category` 为
+`process_creation`、`network_connection` 等的规则针对 `events` 运行；`category: webserver`
+的规则则针对 `web_logs` 运行。如果某条规则的目标表在该案例中还没有数据，会被报告为失败（“case has no
+'&lt;table&gt;' table ingested”），而不是被静默跳过。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
@@ -287,6 +367,7 @@ report.to_dataframe()                  # 每个文件的暂存详情，以 DataF
 c.summary()
 c.channels()
 c.hosts()
+c.table_counts()                       # DataFrame：每张表名称 -> 行数，覆盖该案例拥有的所有表
 
 # 任意 SQL -> DataFrame
 df = c.query("""
@@ -294,11 +375,16 @@ df = c.query("""
     FROM events
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
+web = c.query("SELECT * FROM web_logs WHERE status >= 400 ORDER BY time_created")
 
 # CaseDB 的便捷方法可通过 c.db 访问
 c.db.by_event_id([4624, 4625])
 c.db.by_host("WKS01")
 c.db.search("mimikatz")                # 对 event_data/provider/computer 做全文检索
+c.db.tables                            # list[str]：该案例实际拥有的表
+
+# 计划任务排查（启发式规则，非 Sigma——见第 7 节）
+c.suspicious_tasks()
 
 # 狩猎
 results = c.hunt()                      # 或 c.hunt(rules_dir=Path("..."), min_level="high")
@@ -396,6 +482,54 @@ r = c.hunt(min_level="high")
 r.matches[["time_created", "host", "sigma_rule_title", "sigma_attack_ids"]].sort_values("time_created")
 ```
 
+**一次性排查 IIS/nginx/Apache/Tomcat 的 4xx/5xx 状态码：**
+
+```sql
+SELECT host, log_type, time_created, client_ip, method, uri_stem, status
+FROM web_logs
+WHERE status >= 400
+ORDER BY time_created
+```
+
+**在 IIS/Web 日志中排查可能的 webshell 活动（对不常见扩展名的请求返回 200，或查询字符串可疑）：**
+
+```sql
+SELECT host, log_type, time_created, client_ip, uri_stem, uri_query, status
+FROM web_logs
+WHERE status = 200
+  AND ((uri_stem) ILIKE '%.aspx' OR (uri_stem) ILIKE '%.jsp' OR (uri_stem) ILIKE '%.php')
+  AND ((uri_query) ILIKE '%cmd=%' OR (uri_query) ILIKE '%eval%' OR (uri_query) ILIKE '%whoami%')
+ORDER BY time_created
+```
+
+**Exchange 邮件流转：查找与某个可疑地址相关的所有邮件：**
+
+```sql
+SELECT time_created, sender_address, recipient_address, message_subject, recipient_status
+FROM exchange_message_tracking
+WHERE (sender_address) ILIKE '%<可疑域名或地址>%'
+   OR (recipient_address) ILIKE '%<可疑域名或地址>%'
+ORDER BY time_created
+```
+
+**在不了解具体字段结构的情况下，按内容排查其他任意 Exchange 日志类型（HttpProxy、EWS、ActiveSync 等）：**
+
+```sql
+SELECT host, log_type, time_created, fields
+FROM exchange_logs
+WHERE CAST(fields AS VARCHAR) ILIKE '%<indicator>%'
+ORDER BY time_created
+```
+
+**计划任务：找出所有作者不明、被隐藏、或调用了 LOLBin 的任务——与 `--suspicious`
+使用的是同一套启发式规则：**
+
+```python
+from seclogx import Case
+c = Case.open("incident42")
+c.suspicious_tasks()[["host", "task_path", "author", "hidden", "actions"]]
+```
+
 ## 7. 理解狩猎结果与 ATT&CK 标签
 
 `seclogx hunt` 会运行所有能够加载并转换成功的 Sigma 规则，并报告三类信息：
@@ -415,6 +549,12 @@ ATT&CK 技术名称/战术信息来自一个内置的小型查询表（`data/att
 内置规则集（37 条规则，位于 `data/sigma_rules/`）专门针对 **Sysmon** 事件字段（进程创建、网络连接、文件事件、注册表变更、镜像加载、DNS
 查询、命名管道、PowerShell 脚本块、进程访问）——只有当 Sysmon 确实在运行且其日志被导入时，这些规则才可能命中。它是一个精选的起点，而非详尽覆盖；如需添加更多规则，请参见[第 8 节](#8-扩展检测能力自定义规则与字段映射)。
 
+`hunt` 同样支持 Sigma 的 `category: webserver` 规则（针对 `web_logs` 运行），方便你自行提供
+IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。目前没有针对磁盘上计划任务定义或
+Exchange 邮件跟踪日志的 Sigma 日志来源类别，因此这两类数据不属于 Sigma 狩猎的范围；请改用
+`Case.suspicious_tasks()` / `seclogx tasks --suspicious` 排查计划任务，Exchange 数据则使用第 6 节中的原生
+SQL 查询。
+
 ## 8. 扩展检测能力：自定义规则与字段映射
 
 `--rules` / `rules_dir=` 可以指向任意包含标准 Sigma YAML 规则的目录——不必局限于内置规则集。在正式依赖一套新规则之前，先运行：
@@ -428,8 +568,9 @@ seclogx rules validate --rules /path/to/your/rules
 - **使用了 seclogx 尚未映射的 Sigma 字段。** 在
   `src/seclogx/detect/pipeline.py` 的 `FIELD_MAPPING` 中添加对应条目（具体写法参见
   `docs/sigma_backend.md`——字段表达式必须加括号）。
-- **针对的日志来源类别（logsource category）尚未被路由。** 在同一文件的
-  `LOGSOURCE_ROUTES` 中添加对应条目。
+- **针对的日志来源类别（logsource category）尚未被路由。** 如果它针对 `events`，在同一文件的
+  `LOGSOURCE_ROUTES` 中添加对应条目；如果它针对其他表（例如新的、以 `web_logs`
+  为目标的类别），则添加到 `LOGSOURCE_TABLE` 中。
 - **使用了尚不支持的 Sigma 特性**（区分大小写的 `|cased` 匹配、数值比较修饰符、关联规则/correlation
   rules）——v1 版本暂不支持，详见 `docs/known_limitations.md`。
 
@@ -445,6 +586,9 @@ seclogx rules validate --rules /path/to/your/rules
   Parquet 行组，而不会把整个数据湖都载入内存。
 - `--keep-raw` 会使被应用文件的导入耗时与峰值内存大致翻倍——建议只在需要完整 XML
   保真度的特定证据上选择性使用，而不要对整个大型案例默认开启。
+- 计划任务/IIS/Web 访问/Exchange 日志按文件直接解析为 Python 字典（没有中间 NDJSON
+  暂存步骤）——这与它们典型的单文件记录量相匹配，通常远低于 EVTX。并行度同样由
+  `--workers` 按文件粒度控制。
 
 ## 10. 故障排查 / 常见问题
 
@@ -473,6 +617,20 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
 `src/seclogx/ingest/flatten.py`）在不重新解析源 `.evtx` 的情况下重新处理已有的 NDJSON——但对大多数用户来说，直接对相同来源重新执行
 `seclogx ingest` 即可。
 
+**某个原本期望被导入的文件出现在“无法识别”列表中**
+说明它的内容没有匹配任何已支持格式的检测规则（详见 `docs/known_limitations.md`）。常见原因包括：nginx/Apache
+使用了自定义的 `log_format`（不是 Common/Combined 日志格式）、IIS/Exchange 日志头部被截断导致缺少
+`#Fields:` 行，或来源路径下确实存在不受支持的文件。查看
+`AuxIngestReport.unknown_samples`（或导入摘要中的示例列表）以获取确切路径。
+
+**某条 Web 访问日志的 `log_type` 显示为 `web_access` 而不是 `nginx`/`apache`/`tomcat`**
+三者默认使用的 Common/Combined 日志格式在字节层面完全一致；该标签只是一个尽力而为的路径/文件名启发式结果，而非确切检测（详见
+`docs/known_limitations.md`）。`web_access` 只是意味着没有找到任何线索——数据本身不受影响。
+
+**`seclogx hunt` 报告某条规则“case has no '&lt;table&gt;' table ingested”**
+说明该规则对应的日志来源类别所针对的表（`events` 或 `web_logs`）在这个案例里还没有任何数据，这不是转换错误。用
+`seclogx sources <case>` 查看案例实际拥有哪些数据。
+
 ## 11. 已知限制
 
 详情见 `docs/known_limitations.md`（英文）。简要概括：
@@ -484,6 +642,13 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
   通道的等价事件（例如进程创建 -> Sysmon 事件 ID 1，而非 Security 4688）。
 - 不支持区分大小写的 Sigma 匹配、数值比较修饰符，以及关联规则（correlation rules）。
 - 除 Sysmon 外的其他 Sysinternals 工具（Procmon、Autoruns 等）在 v1 中尚未支持导入。
+- 非 EVTX 格式的判定基于内容而非绝对保证——不规范的日志头部可能被误判为无法识别（会被报告，绝不会静默丢弃）。
+- 不支持旧版二进制格式的计划任务（`.job`，Vista 之前使用），仅支持现代 Task Scheduler 2.0 的 XML 格式。
+- 仅凭日志行本身无法可靠区分 nginx、Apache、Tomcat（三者的 Common/Combined
+  日志格式字节完全一致）；该标签是路径/文件名启发式结果。
+- 只有 Exchange 邮件跟踪日志拥有一等列；其他所有 Exchange CSV 日志类型都进入通用的
+  `exchange_logs` 兜底表，字段被保留但未提升为真正的列。
+- 目前没有针对磁盘上计划任务定义或 Exchange 日志的 Sigma 日志来源类别，因此狩猎功能不覆盖这两张表。
 
 ## 12. 许可证与规则来源
 

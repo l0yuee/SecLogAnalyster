@@ -67,20 +67,72 @@ transparently on read -- verified empirically.
 
 ## Stage 3: query + detection
 
-`query.py`'s `CaseDB` registers a `events` view over the whole lake
-(`read_parquet(..., hive_partitioning=true, union_by_name=true)`) and
-exposes `.sql()` plus a handful of convenience filters, always returning
-pandas DataFrames.
+`query.py`'s `CaseDB` registers one view per table subdirectory found
+under `lake/` (`read_parquet(..., hive_partitioning=true,
+union_by_name=true)` each) -- `events` for Windows Event Log, plus
+whichever of `web_logs`/`scheduled_tasks`/`exchange_message_tracking`/
+`exchange_logs` the case has data for -- and exposes `.sql()` plus a
+handful of convenience filters, always returning pandas DataFrames.
 
 `detect/` compiles Sigma rules to DuckDB SQL via a custom pySigma backend
 (`detect/backend.py`) and a field-mapping pipeline (`detect/pipeline.py`)
 -- see `docs/sigma_backend.md` for how that works and how to extend it.
-`detect/hunt.py` runs each rule, attaches ATT&CK tags (`attack.py`), and
-reports rules that failed to convert or execute rather than dropping them
-silently.
+Most Sigma logsource categories target `events`; `category: webserver`
+rules target `web_logs` instead (`LOGSOURCE_TABLE` in `pipeline.py`).
+`detect/hunt.py` runs each rule against the right table, attaches ATT&CK
+tags (`attack.py`), and reports rules that failed to convert or execute
+(including "this case has no `<table>` table ingested") rather than
+dropping them silently.
 
 `timeline.py` is a thin cross-host, filterable time-sorted view over the
 same `events` table.
+
+## Non-EVTX log families
+
+Every `--source` also gets a second discovery/staging/flatten pass, for
+artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
+IIS/nginx/Apache/Tomcat HTTP access logs, and Exchange's self-describing
+CSV logs (`logsources/discovery.py`, `logsources/stage.py`,
+`logsources/ingest.py`, orchestrated from `Case.ingest()` alongside the
+EVTX pipeline; see `docs/known_limitations.md` for what happens when a
+source has one but not the other).
+
+```
+ same --source PATH[:HOST] inputs
+        |
+        v
+ [1] classify   (logsources/sniff.py)
+        |  content-sniffed, not trusted from filename/extension --
+        |  forensic exports routinely rename/relocate files
+        v
+ scheduled_task | iis | web_access | exchange_message_tracking | exchange_generic | unknown
+        |
+        v
+ [2] parse      (logsources/{scheduled_tasks,iis,webaccess,exchange}.py)
+        |  ProcessPoolExecutor, one worker per file -- straight to Python
+        |  dicts (these formats are already line/element-oriented text,
+        |  unlike EVTX, so no NDJSON staging step is needed)
+        v
+ [3] flatten    (logsources/ingest.py, logsources/schema.py)
+        |  explicit TRY_CAST per column per table -- same union_by_name
+        |  stable-typing discipline as schema.py's event_data fix
+        v
+ cases/<name>/lake/{web_logs,scheduled_tasks,exchange_message_tracking,exchange_logs}/host=<h>/[log_type=<t>/]*.parquet
+```
+
+Unlike EVTX, classification never trusts a file's name or extension --
+only content (see `sniff.classify_file`) -- because these artifacts are
+routinely renamed or relocated during acquisition (a live Task Scheduler
+task file has *no* extension at all). A file matching none of the
+supported formats is reported as `unrecognized`, never silently dropped
+(`AuxIngestReport.unknown_samples`).
+
+IIS and Exchange logs are both self-describing (`#Fields:` header naming
+the columns actually enabled for that site/log), so the parsers read the
+header rather than assuming a fixed field set. nginx/Apache/Tomcat
+Combined/Common Log Format is not self-describing and is
+byte-identical across all three servers, so the specific server label is
+a path/filename heuristic (`sniff.guess_web_log_type`), not a detection.
 
 ## Case workspace layout
 
@@ -89,8 +141,19 @@ cases/<case_name>/
   case.json                     # hosts, source paths, ingest run history
   staging/<host>/*.ndjson       # raw records_json() output, one file per source .evtx
   logs/ingest_<batch_id>.log    # reconciliation summary per ingest run
-  lake/host=<h>/channel=<c>/*.parquet
+  lake/
+    events/host=<h>/channel=<c>/*.parquet
+    web_logs/host=<h>/log_type=<t>/*.parquet
+    scheduled_tasks/host=<h>/*.parquet
+    exchange_message_tracking/host=<h>/*.parquet
+    exchange_logs/host=<h>/log_type=<t>/*.parquet
 ```
+
+`query.py`'s `CaseDB` creates a view per subdirectory of `lake/` that
+actually contains Parquet files (named after the subdirectory), so a case
+only ever exposes tables it has ingested data for, and a future log
+family only needs a lake subdirectory to become queryable -- no changes
+to `query.py` itself.
 
 ## Why not Dask / a distributed engine
 

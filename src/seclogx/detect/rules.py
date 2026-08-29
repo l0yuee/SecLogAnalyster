@@ -11,7 +11,7 @@ from sigma.collection import SigmaCollection
 from sigma.exceptions import SigmaError
 from sigma.rule import SigmaRule
 
-from .pipeline import LOGSOURCE_ROUTES
+from .pipeline import LOGSOURCE_TABLE
 
 
 @dataclass
@@ -34,7 +34,7 @@ def load_rules(rules_dir: Path) -> RuleLoadResult:
 
         for rule in collection.rules:
             category = rule.logsource.category
-            if category not in LOGSOURCE_ROUTES:
+            if category not in LOGSOURCE_TABLE:
                 result.skipped.append(
                     (str(path), f"unsupported logsource category '{category}' (rule '{rule.title}')")
                 )

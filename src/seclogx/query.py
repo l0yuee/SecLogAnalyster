@@ -6,6 +6,13 @@ handles the lazy/out-of-core execution and predicate pushdown over the
 Hive-partitioned Parquet lake; every method here returns a pandas
 DataFrame, since that's the point of integration with the analyst's
 existing pandas workflow.
+
+The lake is organized as one table per log family under `lake/<table>/`
+(`events` for Windows Event Log; `web_logs`, `scheduled_tasks`,
+`exchange_message_tracking`, `exchange_logs` for the other artifact types
+-- see logsources/schema.py). A view is created per subdirectory found, so
+a case only ever exposes tables it actually has data for, and a new log
+family only needs a lake subdirectory to become queryable here.
 """
 
 from __future__ import annotations
@@ -21,12 +28,18 @@ class CaseDB:
         self.case_dir = Path(case_dir)
         self.lake_dir = self.case_dir / "lake"
         self._con = duckdb.connect()
-        self._has_data = any(self.lake_dir.rglob("*.parquet")) if self.lake_dir.exists() else False
-        if self._has_data:
-            glob = str(self.lake_dir / "**" / "*.parquet")
-            self._con.execute(
-                f"CREATE VIEW events AS SELECT * FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)"
-            )
+        self.tables: list[str] = []
+        if self.lake_dir.exists():
+            for table_dir in sorted(p for p in self.lake_dir.iterdir() if p.is_dir()):
+                if not any(table_dir.rglob("*.parquet")):
+                    continue
+                glob = str(table_dir / "**" / "*.parquet")
+                self._con.execute(
+                    f"CREATE VIEW {table_dir.name} AS "
+                    f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)"
+                )
+                self.tables.append(table_dir.name)
+        self._has_data = "events" in self.tables
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
@@ -34,8 +47,15 @@ class CaseDB:
         return self._con
 
     def _require_data(self) -> None:
-        if not self._has_data:
+        if not self.tables:
             raise RuntimeError(f"case at {self.case_dir} has no ingested data yet -- run `ingest` first")
+
+    def _require_events(self) -> None:
+        if not self._has_data:
+            raise RuntimeError(
+                f"case at {self.case_dir} has no ingested Windows Event Log data "
+                "(other tables may still be queryable via .sql(), see .tables)"
+            )
 
     def sql(self, query: str, params: list | None = None) -> pd.DataFrame:
         self._require_data()
@@ -89,6 +109,17 @@ class CaseDB:
             "min(time_created) AS first_seen, max(time_created) AS last_seen "
             "FROM events GROUP BY host, channel, event_id ORDER BY count DESC"
         )
+
+    def table_counts(self) -> pd.DataFrame:
+        """Row count per table currently in the case (events, web_logs,
+        scheduled_tasks, exchange_message_tracking, exchange_logs -- whichever
+        are present). Use to see at a glance what log families a case has."""
+        if not self.tables:
+            return pd.DataFrame(columns=["table", "rows"])
+        rows = [
+            {"table": t, "rows": self._con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]} for t in self.tables
+        ]
+        return pd.DataFrame(rows)
 
     def hosts(self) -> list[str]:
         if not self._has_data:

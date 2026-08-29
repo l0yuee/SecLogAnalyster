@@ -32,7 +32,7 @@ def flatten_case(case_dir: Path, staged_files: list[StagedFile], batch_id: str, 
     if not ok_files:
         return 0
 
-    lake_dir = case_dir / "lake"
+    lake_dir = case_dir / "lake" / "events"
     lake_dir.mkdir(parents=True, exist_ok=True)
 
     ingested_at = datetime.now(timezone.utc)

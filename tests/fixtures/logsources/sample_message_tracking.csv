@@ -1,0 +1,5 @@
+#Software: Microsoft Exchange Server
+#Version: 15.02.0000.000
+#Log-type: Message Tracking Log
+#Fields: date-time,client-ip,client-hostname,server-ip,server-hostname,source-context,connector-id,source,event-id,internal-message-id,message-id,network-message-id,recipient-address,recipient-status,total-bytes,recipient-count,related-recipient-address,reference,message-subject,sender-address,return-path,message-info,directionality,tenant-id,original-client-ip,original-server-ip,custom-data,transport-traffic-type,log-id,schema-version
+2026-01-02T03:04:05.000Z,203.0.113.20,mail.evil.example,10.0.0.6,MBX01,,,SMTP,RECEIVE,12345,<abc123@evil.example>,net-1,victim@corp.example,,4096,1,,,Invoice overdue,attacker@evil.example,attacker@evil.example,,Incoming,,,,,,MessageTracking,15.2

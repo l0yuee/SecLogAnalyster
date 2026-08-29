@@ -1,0 +1,5 @@
+#Software: Microsoft Exchange Server
+#Version: 15.02.0000.000
+#Log-type: HttpProxy
+#Fields: DateTime,RequestId,ClientRequestId,AuthenticatedUser,Organization,AnchorMailbox,UrlHost,UrlStem,ClientIpAddress,ServerHostName,HttpStatus
+2026-01-02T03:04:07.000Z,req-1,,attacker@evil.example,,,mail.corp.example,/owa/,203.0.113.20,MBX01,200

@@ -13,10 +13,17 @@ from ._render import console
 def ingest_command(
     case_name: str = typer.Argument(..., help="Case name (created if it doesn't exist)"),
     source: list[str] = typer.Option(
-        ..., "--source", help="Source path to scan for .evtx, optionally PATH:HOST. Repeatable."
+        ...,
+        "--source",
+        help=(
+            "Source path to scan for .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat "
+            "access logs, and Exchange CSV logs, optionally PATH:HOST. Repeatable."
+        ),
     ),
     workers: int | None = typer.Option(None, "--workers", help="Parallel staging workers (default: CPU count)"),
-    keep_raw: bool = typer.Option(False, "--keep-raw", help="Also capture raw record XML (slower, ~2x cost)"),
+    keep_raw: bool = typer.Option(
+        False, "--keep-raw", help="Also capture raw EVTX record XML (slower, ~2x cost; .evtx sources only)"
+    ),
     keep_staging: bool = typer.Option(
         True, "--keep-staging/--no-keep-staging", help="Keep staged NDJSON after flattening (cheap reprocessing)"
     ),

@@ -69,6 +69,54 @@ not oversights -- documented so they're easy to revisit later.
   bundled Sigma rules -- not the full ATT&CK framework, and not fetched
   live. It needs manual updates if the bundled rule set changes.
 
+## Non-EVTX log ingestion (Scheduled Tasks / IIS / web access / Exchange)
+
+- **Format is detected by content, not filename or extension.** Forensic
+  acquisitions routinely rename or relocate files (a live Task Scheduler
+  task has no extension at all), so `logsources/sniff.py` peeks at file
+  content. This is a heuristic classifier, not a guarantee -- an
+  unusually-truncated or nonstandard log header can be misclassified as
+  `unknown` and reported as unrecognized rather than ingested (see
+  `AuxIngestReport.unknown_samples` / the ingest summary's "files
+  unrecognized" count -- never silent).
+- **Legacy `.job` Scheduled Tasks (pre-Vista binary format) are not
+  parsed.** Only the modern Task Scheduler 2.0 XML format
+  (`C:\Windows\System32\Tasks\**`) is supported.
+- **A task XML file containing a `<!DOCTYPE` declaration is rejected
+  outright** (reported as a failed file, not silently skipped) as a
+  defense-in-depth XXE guard, rather than attempting to sanitize or
+  safely parse it -- legitimate Task Scheduler exports never contain one.
+- **nginx vs. Apache vs. Tomcat cannot be reliably told apart from the log
+  line alone.** Common/Combined Log Format is byte-identical across all
+  three servers' default configurations; `log_type` for these is a
+  path/filename heuristic (`sniff.guess_web_log_type`), falling back to
+  the generic label `web_access` when no hint is available. IIS is
+  detected reliably (its `#Software:`/`#Fields:` header is
+  self-describing).
+- **Only Common/Combined Log Format is supported for nginx/Apache/Tomcat.**
+  A custom `log_format` (nginx) or `LogFormat` (Apache) directive
+  producing a different field order/set will not match and those lines
+  are counted as parse errors for that file (reported, not silently
+  dropped) rather than misparsed.
+- **Exchange support is scoped to Message Tracking (first-class columns)
+  plus a generic catchall for every other Exchange CSV log type**
+  (HttpProxy, ActiveSync/Eas, Ews, Imap, Pop, RpcHttp, ...). Exchange
+  ships over a dozen such self-describing log formats; rather than
+  hand-modeling each, non-message-tracking logs land in `exchange_logs`
+  with every field preserved verbatim in `fields` (still fully queryable,
+  just not promoted to first-class columns).
+- **`recipient_address` in `exchange_message_tracking` is stored raw**,
+  which can be a `;`-separated list for a single message sent to multiple
+  recipients in one transport hop -- not split into multiple rows.
+- **IIS's `extra` JSON catchall only fires for fields beyond the fixed
+  set `iis.py` maps to real columns** -- if a site logs a custom W3C
+  field, it lands there rather than as a first-class column, same
+  principle as `event_data` for EVTX.
+- **A source directory with no `.evtx` files is not an error** as long as
+  it has at least one supported non-EVTX artifact (or vice versa) --
+  `Case.ingest()` only raises `NoSourcesFoundError` if *both* passes find
+  nothing.
+
 ## Scale
 
 - Designed and tested for realistic single-case volumes (**<100GB**) on a

@@ -12,8 +12,12 @@ import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from ..logsources.manifest import AuxIngestReport
 
 
 class StageStatus:
@@ -54,6 +58,7 @@ class IngestReport:
     records_staged: int
     records_flattened: int
     staged_files: list[StagedFile] = field(default_factory=list)
+    aux: "AuxIngestReport | None" = None
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame([dataclasses.asdict(f) for f in self.staged_files])
@@ -83,4 +88,7 @@ class IngestReport:
             lines.append("  files with issues:")
             for f in problems:
                 lines.append(f"    [{f.status}] {f.source_path} -- {f.error_message} ({f.record_count} recovered)")
+        if self.aux is not None:
+            lines.append("")
+            lines.append(self.aux.summary_text())
         return "\n".join(lines)

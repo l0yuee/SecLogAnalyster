@@ -46,3 +46,13 @@ def channels_command(
     c = Case.open(case_name, case_root=case_root)
     for ch in c.channels():
         console.print(ch)
+
+
+def sources_command(
+    case_name: str = typer.Argument(...),
+    case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
+) -> None:
+    """Row count per table (events, web_logs, scheduled_tasks,
+    exchange_message_tracking, exchange_logs) currently in the case."""
+    c = Case.open(case_name, case_root=case_root)
+    print_df(c.table_counts(), title="Tables in case")

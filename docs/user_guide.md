@@ -321,13 +321,17 @@ discovered file with its status, table, record/error counts.
 
 ### `seclogx query <case> "<SQL>"`
 
-Runs arbitrary SQL against the case's `events` view (the whole
-normalized lake) and prints/exports the result.
+Runs arbitrary SQL against any table in the case (`events` or any of the
+other log tables) and prints/exports the result. Results are streamed in
+bounded-size chunks rather than fetched as one DataFrame first -- neither
+the console preview nor `--out` requires the whole result to fit in
+memory, which matters once you're querying a table at real-world web-log
+volume (see [section 9](#9-performance-and-scale-notes)).
 
 | Option | Meaning |
 |---|---|
-| `--out FILE.csv` | Write the full result to CSV instead of printing a table |
-| `--limit N` | Cap the number of rows |
+| `--out FILE.csv` | Stream the full result to CSV instead of printing a preview |
+| `--limit N` | Cap the number of rows -- pushed into the query itself (`LIMIT`), not applied after fetching, so a limited query on a huge table doesn't pay to read more than it asked for |
 
 ```bash
 seclogx query incident42 "
@@ -336,6 +340,10 @@ seclogx query incident42 "
   WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
   ORDER BY time_created
 " --out process_creations.csv
+
+# Export every 4xx/5xx web access log hit, however large the table --
+# never held in memory as one DataFrame
+seclogx query incident42 "SELECT * FROM web_logs WHERE status >= 400" --out web_errors.csv
 ```
 
 ### `seclogx summary <case>`
@@ -365,12 +373,13 @@ seclogx sources incident42
 
 Full contents of any table this case has, as a DataFrame -- the CLI
 counterpart to `Case.web_logs()`/`Case.scheduled_tasks()`/etc., useful for
-tables that don't have their own dedicated command.
+tables that don't have their own dedicated command. Streamed in
+bounded-size chunks, same as `query` above.
 
 | Option | Meaning |
 |---|---|
-| `--out FILE.csv` | Export the full result |
-| `--limit N` | Cap the number of rows |
+| `--out FILE.csv` | Stream the full result to CSV |
+| `--limit N` | Cap the number of rows (pushed into the query) |
 
 ```bash
 seclogx table incident42 web_error_logs
@@ -440,6 +449,9 @@ seclogx rules validate --rules ~/my-sigma-rules/
 
 A cross-host, time-sorted, filterable view -- the classic DFIR
 "supertimeline", scoped to what you actually care about right now.
+Streamed in bounded-size chunks, same as `query` above -- an unfiltered
+or lightly-filtered timeline over a large case can still be far bigger
+than comfortably fits in memory.
 
 | Option | Meaning |
 |---|---|
@@ -447,7 +459,7 @@ A cross-host, time-sorted, filterable view -- the classic DFIR
 | `--host` | Restrict to one host |
 | `--channel` | Restrict to one channel |
 | `--event-id` | Restrict to one or more event IDs (repeatable) |
-| `--out FILE.csv` | Export the full timeline |
+| `--out FILE.csv` | Stream the full timeline to CSV |
 
 ```bash
 # All 4624 (successful logon) events for one host, exported
@@ -495,7 +507,9 @@ df = c.query("""
 # Every log family is a first-class, DataFrame-returning accessor -- the
 # same treatment `events` gets, so nothing requires raw SQL just to get a
 # DataFrame. Each returns an empty (not erroring) DataFrame if the case
-# has no data for it yet.
+# has no data for it yet. See "Bounded-memory access for large tables"
+# below before calling one of these unfiltered on a case with real-world
+# web-log volume.
 c.web_logs()                           # access logs: IIS/nginx/Apache/Tomcat/Exchange-HttpProxy
 c.web_logs(log_type="nginx")           # filtered to one engine
 c.web_error_logs()                     # error logs: nginx/Apache/Tomcat/IIS HTTPERR
@@ -525,6 +539,62 @@ results.save("matches.csv")
 # Timeline
 tl = c.timeline(host="WKS01", event_id=[4624, 4625])
 ```
+
+### Bounded-memory access for large tables
+
+Every DataFrame-returning accessor above -- `.query()`, `.table()`,
+`.web_logs()`, `.timeline()`, all of them -- has a `_chunks` sibling that
+returns an `Iterator[pd.DataFrame]` instead of one DataFrame. This
+matters because `.query()`/`.table()`/etc. call DuckDB's `.fetchdf()`
+under the hood, which materializes the *entire* result as one DataFrame:
+fine for a filtered or aggregated result, but web access/error logs
+especially can realistically reach terabyte scale across a case, well
+past what fits in memory as one DataFrame -- DuckDB's lazy, out-of-core
+*query execution* doesn't help once the last step pulls everything into
+one object. The `_chunks` accessors use DuckDB's chunked fetch instead,
+so memory use is bounded by `chunksize` (rows per chunk, default
+100,000), not by how large the total result is. Verified empirically:
+reading 5M rows via chunks added ~190MB of peak memory against ~2.7GB for
+`fetchdf()` on the same query.
+
+```python
+from seclogx import Case
+c = Case.open("incident42")
+
+# Instead of this on a huge table (materializes everything at once):
+# df = c.web_logs(log_type="nginx")
+
+# ...iterate bounded-size chunks:
+for chunk in c.web_logs_chunks(log_type="nginx"):
+    # chunk is a normal pandas.DataFrame, just not the whole result
+    suspicious = chunk[chunk["status"] >= 400]
+    if not suspicious.empty:
+        suspicious.to_csv("web_errors.csv", mode="a", header=False, index=False)
+
+# Same pattern for any raw SQL, any table, and the timeline:
+for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity IN ('error', 'SEVERE')"):
+    ...
+for chunk in c.db.table_chunks("exchange_message_tracking"):
+    ...
+for chunk in c.timeline_chunks(host="WKS01"):
+    ...
+
+# Tune chunksize (rows per chunk) if the default doesn't fit your row width:
+for chunk in c.web_logs_chunks(chunksize=20_000):
+    ...
+```
+
+Every `_chunks` accessor mirrors its eager counterpart's signature (same
+filters, same `log_type=`/`host=`/etc. keywords) plus a `chunksize`
+keyword, and yields nothing (not an error) if the case has no data for
+that table -- consistent with the eager accessors returning an empty
+DataFrame instead of raising.
+
+The CLI applies this automatically: `seclogx query`/`table`/`tasks`/
+`timeline` stream chunks straight to CSV for `--out`, and the console
+preview only pulls enough rows to fill the table (never the whole
+result) -- see [section 4](#4-command-line-reference). You don't need
+`--chunks` or any equivalent flag; it's just how those commands work.
 
 `Case` supports the context manager protocol to close its DuckDB
 connection cleanly:
@@ -759,22 +829,41 @@ a case with data you expect to match, to confirm end to end.
 
 ## 9. Performance and scale notes
 
-- Designed and tested for realistic single-case volumes well under
-  100GB, on one workstation. There is no distributed/cluster mode.
+- Designed for one workstation, not a cluster -- there is no distributed
+  mode. Within that, individual log families vary widely in realistic
+  volume: EVTX cases are typically well under 100GB, while web access/
+  error logs across a case can realistically reach terabyte scale.
 - Ingest parallelism (`--workers`) scales with CPU cores -- files are
   parsed independently in separate processes.
 - Querying and hunting run through DuckDB directly against the
-  Hive-partitioned Parquet lake (`lake/host=.../channel=.../*.parquet`),
-  which gives lazy, out-of-core execution with predicate pushdown: a
-  query filtered to one host/channel/event range only reads the Parquet
-  row groups it actually needs, not the whole lake into memory.
+  Hive-partitioned Parquet lake, which gives lazy, out-of-core execution
+  with predicate pushdown: a query filtered to one host/channel/event
+  range only reads the Parquet row groups it actually needs, not the
+  whole lake into memory. That said, *fetching* a large unfiltered result
+  still defaults to one in-memory DataFrame (`.query()`/`.table()`/
+  `.web_logs()`/etc., via DuckDB's `fetchdf()`) -- for a table or query
+  that isn't already filtered/aggregated down to something small, use the
+  `_chunks` sibling instead (`.query_chunks()`, `.web_logs_chunks()`,
+  `.timeline_chunks()`, ...), which bounds memory by `chunksize` rather
+  than total result size. See "Bounded-memory access for large tables" in
+  [section 5](#5-python--notebook-api) for the full explanation and a
+  worked example; the CLI (`query`/`table`/`tasks`/`timeline`) uses this
+  automatically for both `--out` and the console preview, so no CLI flag
+  is needed to get the bounded-memory behavior there.
 - `--keep-raw` roughly doubles ingest cost (time and peak memory) for
   the files it's applied to -- use it selectively on evidence that
   needs full XML fidelity, not by default on an entire large case.
 - Scheduled Tasks/IIS/web access/Exchange logs are parsed straight to
-  Python dicts per file (no intermediate NDJSON staging) -- appropriate
-  at their typical per-file record volume, which is far lower than
-  EVTX's. Parallelism is still per-file via the same `--workers` setting.
+  Python dicts per file (no intermediate NDJSON staging), and unlike the
+  EVTX pipeline, **ingest for these log families is not yet
+  bounded-memory**: a single ingest run accumulates every parsed row for
+  a given table in memory across the whole batch before writing Parquet.
+  Fine at the volumes exercised so far; a single ingest run processing
+  enough files to reach terabyte scale *in one batch* could exhaust
+  memory during ingest even though querying the resulting lake afterward
+  would be fine. This is specifically an ingest-time boundary, separate
+  from (and not fixed by) the query-side chunking above -- see
+  `docs/known_limitations.md`.
 
 ## 10. Troubleshooting / FAQ
 
@@ -831,6 +920,17 @@ That rule's logsource category targets a table (`events` or `web_logs`)
 this case hasn't ingested any data into yet -- not a conversion error.
 Check `seclogx sources <case>` to see what the case actually has.
 
+**A query against a large table (`web_logs` especially) uses too much memory or is slow to return**
+`c.query()`/`c.table()`/`c.web_logs()`/etc. fetch the entire result as one
+DataFrame. Switch to the `_chunks` sibling (`c.query_chunks()`,
+`c.web_logs_chunks()`, ...) and iterate -- see "Bounded-memory access for
+large tables" in [section 5](#5-python--notebook-api). If you're using
+the CLI, `--out`/the console preview already use the chunked path
+automatically; if it's still slow, check whether your query's `WHERE`
+clause is actually selective (an unfiltered `SELECT * FROM web_logs`
+still has to read the whole table, chunked or not -- chunking bounds
+*memory*, not the amount of data scanned).
+
 ## 11. Known limitations
 
 Full details in `docs/known_limitations.md`. In short:
@@ -871,6 +971,16 @@ Full details in `docs/known_limitations.md`. In short:
 - No Sigma logsource category exists for on-disk Scheduled Task
   definitions, web application error logs (`web_error_logs`), or Exchange
   logs, so hunting doesn't cover those tables.
+- `.query()`/`.table()`/`.web_logs()`/etc. materialize the full result as
+  one DataFrame; use the `_chunks` sibling for anything not already
+  filtered/aggregated down to something small (see section 5/section 9).
+- Ingest for the non-EVTX log families (Scheduled Tasks/IIS/web/Exchange)
+  is not yet bounded-memory the way EVTX ingest and query/delivery are --
+  a single ingest run holds every parsed row per table in memory across
+  the whole batch before writing Parquet. Fine at the volumes exercised
+  so far; a batch large enough to reach terabyte scale in one run could
+  exhaust memory during ingest even though the resulting lake would query
+  fine afterward.
 
 ## 12. License and rule attribution
 

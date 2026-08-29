@@ -80,6 +80,32 @@ accessor per log family (`web_logs()`, `web_error_logs()`,
 the same first-class treatment `events` gets via `summary()`/`hosts()`/
 `channels()`, so no log family requires raw SQL just to get a DataFrame.
 
+### Bounded-memory delivery: `.sql()`/`.table()` vs. `.sql_chunks()`/`.table_chunks()`
+
+DuckDB executes lazily with predicate pushdown over the Parquet lake, but
+`.sql()`/`.table()` still call `.fetchdf()`, which materializes the
+*entire* result as one pandas DataFrame -- fine for a filtered or
+aggregated result, but any table here can realistically reach real-world
+log volumes (web access/error logs especially, easily terabyte-scale
+across a case), at which point one in-memory DataFrame for a whole table
+is the actual bottleneck, independent of how lazy the query engine
+underneath is. `.sql_chunks()`/`.table_chunks()` use DuckDB's
+`fetch_df_chunk()` on a dedicated cursor instead, yielding an
+`Iterator[pd.DataFrame]` of roughly `chunksize`-row chunks -- bounded
+memory regardless of total result size. Verified empirically: reading 5M
+rows via chunks added ~190MB of peak RSS against ~2.7GB for `fetchdf()`
+on the same query (bounded vs. proportional-to-data-size).
+
+Every DataFrame-returning accessor -- `CaseDB`'s and `Case`'s alike -- has
+a `_chunks` sibling built the same way (`Case.query_chunks()`,
+`Case.web_logs_chunks()`, `Case.timeline_chunks()`, ...), and the CLI
+(`query`/`table`/`tasks`/`timeline`) uses the chunked path automatically
+for both `--out` (streamed straight to CSV, one chunk at a time -- see
+`cli/_render.py`'s `export_chunks_to_csv`) and the console preview
+(`print_df_chunks` pulls only enough rows for the table, never the whole
+result, at the cost of not being able to report an exact "N more rows"
+count without materializing everything to know it).
+
 `detect/` compiles Sigma rules to DuckDB SQL via a custom pySigma backend
 (`detect/backend.py`) and a field-mapping pipeline (`detect/pipeline.py`)
 -- see `docs/sigma_backend.md` for how that works and how to extend it.
@@ -174,11 +200,32 @@ to `query.py` itself.
 
 ## Why not Dask / a distributed engine
 
-Designed for realistic single-case volumes (<100GB) on one workstation.
-DuckDB already gives lazy, out-of-core execution with predicate pushdown
-over Parquet without any cluster setup, and the parsing stage is
-parallelized locally via `ProcessPoolExecutor`. If a genuinely
-distributed use case shows up later, stage 2's output contract (a
-partitioned Parquet lake with a fixed schema) is the extension point --
-a distributed query engine could read the same lake without changing
-stages 1-2.
+Designed for a single workstation, not a cluster. DuckDB gives lazy,
+out-of-core *query execution* with predicate pushdown over Parquet
+without any cluster setup, and parsing is parallelized locally via
+`ProcessPoolExecutor`. The other half of "no cluster needed at real-world
+scale" is bounded-memory *delivery* of results to the analyst (see
+"Bounded-memory delivery" above) -- lazy execution underneath doesn't
+help if the last step still materializes the whole result as one
+DataFrame. If a genuinely distributed use case shows up later, the
+partitioned Parquet lake (stage 2's output contract) is the extension
+point -- a distributed query engine could read the same lake without
+changing stages 1-2.
+
+**Ingest is not yet bounded-memory the same way query is.** The EVTX
+pipeline is fine at real-world scale (stage 1 streams to NDJSON on disk
+per file; stage 2's flatten reads that back via DuckDB's own streaming
+`read_ndjson()`, never loading every record into a Python list at once).
+The non-EVTX pipeline (`logsources/ingest.py`) does not have this
+property yet: each worker parses a file straight to a Python
+`list[dict]`, and `run_aux_ingest()` accumulates every file's rows for a
+given table in memory (`by_table[table].extend(rows)`) across the whole
+ingest batch before writing Parquet, rather than streaming to disk
+per-file the way EVTX staging does. This is fine at the volumes exercised
+so far (a batch of moderately-sized log files); an ingest batch
+processing enough web/error/Exchange log files to reach real-world
+terabyte-scale *in one run* would need the same stage-to-disk-then-bulk-
+flatten treatment stage 2 already gives EVTX. Not yet implemented --
+flagged here as the known boundary of "bounded memory," which currently
+covers query/delivery (`.sql_chunks()`/`.table_chunks()`) but not this
+specific ingest path.

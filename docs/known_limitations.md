@@ -141,8 +141,33 @@ not oversights -- documented so they're easy to revisit later.
 
 ## Scale
 
-- Designed and tested for realistic single-case volumes (**<100GB**) on a
-  single workstation, per the intended use case. DuckDB + Parquet handle
-  this comfortably with lazy/out-of-core execution, but this is not a
-  distributed system -- see `docs/architecture.md` for the scale-out
-  extension point if that's ever needed.
+- Designed for a single workstation, not a distributed system -- see
+  `docs/architecture.md` for the scale-out extension point if that's ever
+  needed.
+- **`.sql()`/`.table()` (and the `Case` accessors built on them --
+  `web_logs()`, `events()`, `timeline()`, etc.) materialize the entire
+  result as one pandas DataFrame.** DuckDB's query execution underneath is
+  lazy/out-of-core, but that doesn't help once the last step calls
+  `fetchdf()` -- fine for a filtered/aggregated result, but web access/
+  error logs especially can realistically reach terabyte scale across a
+  case, well past what fits in memory as one DataFrame. Every such
+  accessor has a `_chunks` sibling (`sql_chunks()`/`table_chunks()`,
+  `query_chunks()`, `web_logs_chunks()`, `timeline_chunks()`, ...)
+  returning an `Iterator[pd.DataFrame]` instead, with memory bounded by
+  `chunksize` rather than total result size -- use these for any table or
+  query not already known to be small. The CLI (`query`/`table`/`tasks`/
+  `timeline`) uses the chunked path automatically for both `--out` and
+  the console preview.
+- **Ingest does not yet have the same bounded-memory property for the
+  non-EVTX log families.** The EVTX pipeline streams to disk per file and
+  bulk-flattens via DuckDB's own streaming `read_ndjson()`, so it never
+  holds more than one file's records as a Python list at a time. The
+  Scheduled Tasks/IIS/web/Exchange pipeline (`logsources/ingest.py`)
+  parses each file to a Python `list[dict]` and accumulates every file's
+  rows per table in memory across the whole ingest batch before writing
+  Parquet -- fine at the volumes exercised so far, but a single ingest run
+  processing enough log files to reach terabyte scale *in one batch*
+  would need the same stage-to-disk-then-bulk-flatten treatment the EVTX
+  pipeline already has. Not yet implemented; this is specifically an
+  ingest-time boundary, separate from (and not fixed by) the query-side
+  chunking above.

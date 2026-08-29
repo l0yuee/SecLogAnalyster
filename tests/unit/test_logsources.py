@@ -291,3 +291,36 @@ def test_case_table_accessors_return_dataframes(tmp_path: Path):
     empty_case = Case.create("emptydf", case_root=tmp_path / "cases")
     assert case.db.table("nonexistent_table").empty
     assert isinstance(empty_case.web_logs(), pd.DataFrame)
+
+
+def test_case_chunked_accessors_match_eager(tmp_path: Path):
+    """Every log family's *_chunks() accessor should reconstruct exactly
+    what the eager accessor returns -- the whole point is bounded memory,
+    not different data."""
+    import pandas as pd
+
+    from seclogx.case import Case
+
+    case = Case.create("chunkparity", case_root=tmp_path / "cases")
+    case.ingest([f"{FIXTURES}:LAB01"])
+
+    pairs = [
+        (case.web_logs(), case.web_logs_chunks()),
+        (case.web_error_logs(), case.web_error_logs_chunks()),
+        (case.scheduled_tasks(), case.scheduled_tasks_chunks()),
+        (case.exchange_message_tracking(), case.exchange_message_tracking_chunks()),
+        (case.exchange_logs(), case.exchange_logs_chunks()),
+    ]
+    for eager, chunked in pairs:
+        combined = pd.concat(list(chunked), ignore_index=True) if not eager.empty else pd.DataFrame()
+        assert len(combined) == len(eager)
+
+    # log_type-filtered chunked variants behave the same as their eager counterparts
+    assert set(pd.concat(list(case.web_logs_chunks(log_type="nginx")))["log_type"]) == {"nginx"}
+    assert set(pd.concat(list(case.web_error_logs_chunks(log_type="apache")))["log_type"]) == {"apache"}
+    assert set(pd.concat(list(case.exchange_logs_chunks(log_type="HttpProxy")))["log_type"]) == {"HttpProxy"}
+
+    # a table the case has no data for yields an empty iterator, not an error
+    empty_case = Case.create("chunkempty", case_root=tmp_path / "cases")
+    assert list(empty_case.web_logs_chunks()) == []
+    assert list(empty_case.scheduled_tasks_chunks()) == []

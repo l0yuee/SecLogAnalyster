@@ -6,7 +6,7 @@ import typer
 
 from ..case import Case
 from ..config import DEFAULT_CASE_ROOT
-from ._render import console, print_df
+from ._render import console, export_chunks_to_csv, print_df, print_df_chunks
 
 
 def tasks_command(
@@ -20,9 +20,22 @@ def tasks_command(
         console.print("[yellow]no scheduled task definitions ingested for this case[/yellow]")
         raise typer.Exit(1)
 
-    df = c.suspicious_tasks() if suspicious else c.scheduled_tasks()
+    if suspicious:
+        # The heuristic filter runs in pandas (see Case.suspicious_tasks),
+        # not pushed-down SQL -- fine in practice, since a case's task
+        # count is bounded by however many tasks exist on disk per host,
+        # nowhere near web-log volumes.
+        df = c.suspicious_tasks()
+        if out:
+            df.to_csv(out, index=False)
+            console.print(f"[green]wrote {len(df)} rows to {out}[/green]")
+        else:
+            print_df(df, title="Scheduled tasks")
+        return
+
+    chunks = c.scheduled_tasks_chunks()
     if out:
-        df.to_csv(out, index=False)
-        console.print(f"[green]wrote {len(df)} rows to {out}[/green]")
+        n = export_chunks_to_csv(chunks, out)
+        console.print(f"[green]wrote {n} rows to {out}[/green]")
     else:
-        print_df(df, title="Scheduled tasks")
+        print_df_chunks(chunks, title="Scheduled tasks")

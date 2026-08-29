@@ -252,12 +252,14 @@ Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange
 
 ### `seclogx query <case> "<SQL>"`
 
-对案例的 `events` 视图（即整个归一化数据湖）执行任意 SQL，并打印或导出结果。
+对案例中的任意一张表（`events` 或其他日志表）执行任意 SQL，并打印或导出结果。结果会以有界大小的分块方式流式获取，而不是先整体取成一个
+DataFrame——无论是控制台预览还是 `--out` 导出，都不需要整个结果先能装进内存，这一点在你针对真实规模的
+Web 日志表做查询时尤为重要（见[第 9 节](#9-性能与规模说明)）。
 
 | 参数 | 含义 |
 |---|---|
-| `--out FILE.csv` | 将完整结果写入 CSV，而不是打印表格 |
-| `--limit N` | 限制返回行数 |
+| `--out FILE.csv` | 将完整结果流式写入 CSV，而不是打印表格 |
+| `--limit N` | 限制返回行数——直接下推到查询本身（`LIMIT`），而不是取回结果后再截断，因此对一张巨大的表加限制不会白白多读数据 |
 
 ```bash
 seclogx query incident42 "
@@ -266,6 +268,10 @@ seclogx query incident42 "
   WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
   ORDER BY time_created
 " --out process_creations.csv
+
+# 导出所有 4xx/5xx 的 Web 访问日志命中记录，无论这张表有多大——
+# 都不会先整体装入内存
+seclogx query incident42 "SELECT * FROM web_logs WHERE status >= 400" --out web_errors.csv
 ```
 
 ### `seclogx summary <case>`
@@ -287,12 +293,12 @@ seclogx sources incident42
 ### `seclogx table <case> <name>`
 
 以 DataFrame 形式返回案例中任意一张表的完整内容——是 `Case.web_logs()`/`Case.scheduled_tasks()`
-等方法在命令行侧的对应物，适合那些还没有专属命令的表。
+等方法在命令行侧的对应物，适合那些还没有专属命令的表。与上面的 `query` 一样，采用分块流式获取。
 
 | 参数 | 含义 |
 |---|---|
-| `--out FILE.csv` | 导出完整结果 |
-| `--limit N` | 限制返回行数 |
+| `--out FILE.csv` | 流式写入完整结果到 CSV |
+| `--limit N` | 限制返回行数（下推到查询中） |
 
 ```bash
 seclogx table incident42 web_error_logs
@@ -355,7 +361,8 @@ seclogx rules validate --rules ~/my-sigma-rules/
 
 ### `seclogx timeline <case>`
 
-跨主机、按时间排序、可过滤的视图——即经典 DFIR 中的“超级时间线（supertimeline）”，聚焦于你当前真正关心的范围。
+跨主机、按时间排序、可过滤的视图——即经典 DFIR 中的“超级时间线（supertimeline）”，聚焦于你当前真正关心的范围。与上面的
+`query` 一样采用分块流式获取——一个大案例上未加过滤或过滤条件很宽松的时间线，其体量仍可能远超舒适装入内存的程度。
 
 | 参数 | 含义 |
 |---|---|
@@ -363,7 +370,7 @@ seclogx rules validate --rules ~/my-sigma-rules/
 | `--host` | 限定单个主机 |
 | `--channel` | 限定单个通道 |
 | `--event-id` | 限定一个或多个事件 ID（可重复） |
-| `--out FILE.csv` | 导出完整时间线 |
+| `--out FILE.csv` | 流式写入完整时间线到 CSV |
 
 ```bash
 # 导出某台主机上所有 4624（成功登录）事件
@@ -408,7 +415,8 @@ df = c.query("""
 
 # 每一类日志都有对应的一等 DataFrame 访问器——与 events 待遇完全相同，
 # 无需借助原生 SQL 就能拿到 DataFrame。案例中若还没有该表的数据，
-# 会返回一个空 DataFrame，而不是报错。
+# 会返回一个空 DataFrame，而不是报错。在真实规模的 Web 日志案例上不加过滤地调用这些方法之前，
+# 请先看下文的“大表的有界内存访问”。
 c.web_logs()                           # 访问日志：IIS/nginx/Apache/Tomcat/Exchange-HttpProxy
 c.web_logs(log_type="nginx")           # 只看某一种引擎
 c.web_error_logs()                     # 错误日志：nginx/Apache/Tomcat/IIS HTTPERR
@@ -438,6 +446,55 @@ results.save("matches.csv")
 # 时间线
 tl = c.timeline(host="WKS01", event_id=[4624, 4625])
 ```
+
+### 大表的有界内存访问
+
+上面提到的每一个返回 DataFrame 的访问器——`.query()`、`.table()`、
+`.web_logs()`、`.timeline()`，无一例外——都有一个 `_chunks`
+同名方法，返回 `Iterator[pd.DataFrame]` 而不是单个 DataFrame。这一点很重要，因为
+`.query()`/`.table()`/等方法底层调用的是 DuckDB 的 `.fetchdf()`，会把*整个*结果一次性物化成一个
+DataFrame：对于已经过滤/聚合到较小规模的结果没问题，但 Web
+访问/错误日志在整个案例范围内很可能达到 TB 级别，远超单个 DataFrame 能舒适容纳的规模——DuckDB
+惰性、核外（out-of-core）的*查询执行*本身并不能解决这个问题，因为瓶颈出在最后一步把所有结果一次性拉进一个对象里。`_chunks`
+系列方法改用 DuckDB 的分块获取机制，因此内存占用由 `chunksize`（每块的行数，默认
+100,000）决定，而不是由结果总量决定。经过实测验证：以分块方式读取 500 万行，峰值内存增加约
+190MB，而同样的查询用 `fetchdf()` 则增加约 2.7GB。
+
+```python
+from seclogx import Case
+c = Case.open("incident42")
+
+# 不要在大表上这样做（会一次性把所有内容物化）：
+# df = c.web_logs(log_type="nginx")
+
+# ……而是迭代有界大小的分块：
+for chunk in c.web_logs_chunks(log_type="nginx"):
+    # chunk 就是一个普通的 pandas.DataFrame，只是不是完整结果
+    suspicious = chunk[chunk["status"] >= 400]
+    if not suspicious.empty:
+        suspicious.to_csv("web_errors.csv", mode="a", header=False, index=False)
+
+# 同样的模式适用于任意原生 SQL、任意表，以及时间线：
+for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity IN ('error', 'SEVERE')"):
+    ...
+for chunk in c.db.table_chunks("exchange_message_tracking"):
+    ...
+for chunk in c.timeline_chunks(host="WKS01"):
+    ...
+
+# 如果默认值不适合你的行宽，可以调整 chunksize（每块的行数）：
+for chunk in c.web_logs_chunks(chunksize=20_000):
+    ...
+```
+
+每一个 `_chunks` 访问器都与其对应的一次性方法拥有相同的签名（同样的过滤条件、同样的
+`log_type=`/`host=` 等关键字参数），外加一个 `chunksize`
+关键字参数；如果案例中没有该表的数据，会返回一个空的迭代器，而不是报错——与一次性方法在这种情况下返回空
+DataFrame 保持一致。
+
+命令行会自动应用这一机制：`seclogx query`/`table`/`tasks`/`timeline`
+在 `--out` 时会将分块直接流式写入 CSV，控制台预览也只会拉取足够填满表格的行数（绝不会拉取完整结果）——见[第
+4 节](#4-命令行参考)。你不需要任何 `--chunks` 之类的参数；这就是这些命令本来的工作方式。
 
 `Case` 支持上下文管理器协议，便于干净地关闭其 DuckDB 连接：
 
@@ -641,16 +698,23 @@ seclogx rules validate --rules /path/to/your/rules
 
 ## 9. 性能与规模说明
 
-- 面向单台工作站上、远低于 100GB 的现实案例规模设计与测试，不提供分布式/集群模式。
+- 面向单台工作站设计，不提供分布式/集群模式。在此前提下，不同日志类别的现实规模差异很大：EVTX
+  案例通常远低于 100GB，而一个案例范围内的 Web 访问/错误日志现实中可以达到 TB 级别。
 - 导入并行度（`--workers`）随 CPU 核心数扩展——各文件在独立进程中互不依赖地解析。
-- 查询与狩猎都直接通过 DuckDB 针对按 Hive 方式分区的 Parquet 数据湖执行
-  （`lake/host=.../channel=.../*.parquet`），具备惰性、核外（out-of-core）执行能力与谓词下推：一个限定了主机/通道/时间范围的查询，只会读取实际需要的
-  Parquet 行组，而不会把整个数据湖都载入内存。
+- 查询与狩猎都直接通过 DuckDB 针对按 Hive 方式分区的 Parquet 数据湖执行，具备惰性、核外（out-of-core）执行能力与谓词下推：一个限定了主机/通道/时间范围的查询，只会读取实际需要的
+  Parquet 行组，而不会把整个数据湖都载入内存。不过，*取回*一个未加过滤的大结果时，默认仍然是单个
+  DataFrame（`.query()`/`.table()`/`.web_logs()` 等，底层调用 DuckDB 的
+  `fetchdf()`）——对于尚未过滤/聚合到较小规模的表或查询，请改用 `_chunks`
+  同名方法（`.query_chunks()`、`.web_logs_chunks()`、`.timeline_chunks()` 等），其内存占用由
+  `chunksize` 决定，而非结果总量。完整说明与示例见[第 5 节](#5-python--notebook-api)中的“大表的有界内存访问”；命令行（`query`/`table`/`tasks`/`timeline`）在
+  `--out` 导出和控制台预览时都会自动使用这一机制，无需任何额外参数即可获得有界内存的行为。
 - `--keep-raw` 会使被应用文件的导入耗时与峰值内存大致翻倍——建议只在需要完整 XML
   保真度的特定证据上选择性使用，而不要对整个大型案例默认开启。
 - 计划任务/IIS/Web 访问/Exchange 日志按文件直接解析为 Python 字典（没有中间 NDJSON
-  暂存步骤）——这与它们典型的单文件记录量相匹配，通常远低于 EVTX。并行度同样由
-  `--workers` 按文件粒度控制。
+  暂存步骤），并且与 EVTX 导入流程不同，**这几类日志的导入目前尚未做到有界内存**：单次导入运行会在整个批次范围内，把某张表的所有已解析行都保存在内存中，之后才一次性写入
+  Parquet。以目前实际验证过的规模而言没有问题；但如果单次导入处理的文件多到在一个批次内就达到 TB
+  级别，即便之后查询生成的数据湖完全没问题，导入过程本身也可能耗尽内存。这是导入阶段特有的边界，与上面提到的查询侧分块机制是两回事，后者并不能解决这个问题——详见
+  `docs/known_limitations.md`。
 
 ## 10. 故障排查 / 常见问题
 
@@ -693,6 +757,13 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
 说明该规则对应的日志来源类别所针对的表（`events` 或 `web_logs`）在这个案例里还没有任何数据，这不是转换错误。用
 `seclogx sources <case>` 查看案例实际拥有哪些数据。
 
+**对一张大表（尤其是 `web_logs`）执行查询时内存占用过高或返回很慢**
+`c.query()`/`c.table()`/`c.web_logs()` 等方法会把整个结果一次性取成一个
+DataFrame。改用对应的 `_chunks` 方法（`c.query_chunks()`、`c.web_logs_chunks()`
+等）并迭代处理——见[第 5 节](#5-python--notebook-api)中的“大表的有界内存访问”。如果你使用的是命令行，`--out`/控制台预览已经自动采用了分块方式；如果仍然很慢，请检查你的查询
+`WHERE` 子句是否真的具有选择性（一个未加过滤的 `SELECT * FROM web_logs`
+无论是否分块，都需要扫描整张表——分块限制的是*内存*，而不是需要扫描的数据量）。
+
 ## 11. 已知限制
 
 详情见 `docs/known_limitations.md`（英文）。简要概括：
@@ -718,6 +789,12 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
   `exchange_logs` 兜底表，字段被保留但未提升为真正的列。
 - 目前没有针对磁盘上计划任务定义、Web 应用错误日志（`web_error_logs`）或 Exchange
   日志的 Sigma 日志来源类别，因此狩猎功能不覆盖这些表。
+- `.query()`/`.table()`/`.web_logs()` 等方法会把完整结果物化成一个 DataFrame；对于尚未过滤/聚合到较小规模的场景，请改用对应的
+  `_chunks` 方法（见第 5/9 节）。
+- 非 EVTX 日志类别（计划任务/IIS/Web/Exchange）的导入流程尚未做到与 EVTX
+  导入以及查询/取回环节同等程度的有界内存：单次导入运行会在整个批次范围内把某张表的所有已解析行都保存在内存中，之后才写入
+  Parquet。以目前实际验证过的规模而言没有问题；但如果单次导入的文件多到在一个批次内就达到 TB
+  级别，即便之后生成的数据湖能正常查询，导入过程本身也可能耗尽内存。
 
 ## 12. 许可证与规则来源
 

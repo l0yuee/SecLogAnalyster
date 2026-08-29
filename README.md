@@ -27,8 +27,15 @@ workspace instead of raw XML and inconsistent text logs.
   Scheduled Tasks, Exchange logs -- is reachable as a `pandas.DataFrame`
   through a named accessor (`c.web_logs()`, `c.scheduled_tasks()`, ...),
   the same first-class treatment `events` gets, ready for a notebook.
-- **Handles realistic case volumes (<100GB) on a single workstation**,
-  lazily -- DuckDB + Parquet, no cluster required.
+- **Bounded-memory analysis for every log family.** Web access/error logs
+  especially can reach terabyte scale -- every DataFrame accessor has a
+  `_chunks()` sibling (`c.web_logs_chunks()`, `c.query_chunks()`, ...)
+  that streams the result as an iterator of DataFrames instead of one,
+  and `--out`/console preview in the CLI use this automatically, so
+  neither exporting nor previewing a huge table requires it to fit in
+  memory first.
+- **Handles realistic case volumes on a single workstation**, lazily --
+  DuckDB + Parquet, no cluster required.
 - **Never silently drops data.** Every parse error, partial file read,
   unrecognized log file, and unsupported Sigma rule is reported
   explicitly, not swallowed -- the direct answer to "importing into ELK
@@ -106,6 +113,15 @@ c.exchange_message_tracking()
 c.exchange_logs(log_type="HttpProxy")
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
 c.db.table("web_logs")            # generic escape hatch: any table this case has, by name
+
+# Every accessor above has a bounded-memory "_chunks()" sibling for tables
+# too large to hold as one DataFrame (web logs especially) -- an iterator
+# of DataFrames instead of one, each independently small regardless of
+# total result size.
+for chunk in c.web_logs_chunks(log_type="nginx"):
+    process(chunk)                # each chunk is a normal pandas.DataFrame
+for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'error'"):
+    process(chunk)
 ```
 
 ## CLI reference
@@ -114,7 +130,7 @@ c.db.table("web_logs")            # generic escape hatch: any table this case ha
 |---|---|
 | `seclogx case init/list/info <name>` | Manage case workspaces |
 | `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case |
-| `seclogx query <case> "<SQL>"` | Ad hoc SQL against the case's `events` view |
+| `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
 | `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs) |
 | `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |

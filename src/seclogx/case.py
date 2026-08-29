@@ -11,6 +11,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import unquote
 
 import pandas as pd
@@ -23,8 +24,8 @@ from .ingest import run_ingest
 from .ingest.manifest import IngestReport
 from .logsources import run_aux_ingest
 from .logsources.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
-from .query import CaseDB
-from .timeline import build_timeline
+from .query import DEFAULT_CHUNKSIZE, CaseDB
+from .timeline import build_timeline, build_timeline_chunks
 
 
 def _hosts_from_lake(case_dir: Path) -> set[str]:
@@ -175,6 +176,17 @@ class Case:
     def query(self, sql: str) -> pd.DataFrame:
         return self.db.sql(sql)
 
+    def query_chunks(self, sql: str, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        """Bounded-memory alternative to `.query()` -- yields the result as
+        a series of DataFrames instead of one, so an unfiltered or lightly
+        filtered query against a table that's grown to real-world log
+        volume (web access/error logs especially can reach terabyte scale)
+        doesn't require the whole result to fit in memory at once. See
+        query.py's module docstring for why this matters and what it costs
+        in practice (empirically: ~190MB bounded vs. multiple GB and
+        climbing for `fetchdf()` on the same 5M-row query)."""
+        return self.db.sql_chunks(sql, chunksize=chunksize)
+
     def summary(self) -> pd.DataFrame:
         return self.db.summary()
 
@@ -188,41 +200,76 @@ class Case:
         return self.db.table_counts()
 
     # -- non-EVTX log tables ----------------------------------------------------
-    # Every log family gets a DataFrame-returning accessor, same as `events`
-    # does via summary()/hosts()/channels() -- each returns an empty
-    # DataFrame (not an error) if the case has no data for that table yet.
+    # Every log family -- events included -- gets both an eager,
+    # DataFrame-returning accessor (same treatment `events` gets via
+    # summary()/hosts()/channels()) AND a "_chunks" sibling returning an
+    # Iterator[pd.DataFrame] instead, for tables too large to materialize
+    # as one DataFrame. Both return an empty DataFrame / empty iterator
+    # (never an error) if the case has no data for that table yet.
+    def events(self) -> pd.DataFrame:
+        """The full normalized Windows Event Log table. Prefer `.query()`
+        with a filter, or `.events_chunks()`, over this for a case of any
+        real size -- this is a full unfiltered dump."""
+        return self.db.table("events", order_by="time_created")
+
+    def events_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self.db.table_chunks("events", order_by="time_created", chunksize=chunksize)
+
     def web_logs(self, log_type: str | None = None) -> pd.DataFrame:
         """IIS / nginx / Apache / Tomcat / Exchange-HttpProxy access logs."""
-        if log_type is None:
-            return self.db.table("web_logs", order_by="time_created")
-        if "web_logs" not in self.db.tables:
-            return pd.DataFrame()
-        return self.db.sql("SELECT * FROM web_logs WHERE log_type = ? ORDER BY time_created", [log_type])
+        return self._log_type_table("web_logs", log_type)
+
+    def web_logs_chunks(self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self._log_type_chunks("web_logs", log_type, chunksize)
 
     def web_error_logs(self, log_type: str | None = None) -> pd.DataFrame:
         """nginx / Apache / Tomcat / IIS HTTP.sys (HTTPERR) error logs --
         the other major web-application log category besides access logs."""
-        if log_type is None:
-            return self.db.table("web_error_logs", order_by="time_created")
-        if "web_error_logs" not in self.db.tables:
-            return pd.DataFrame()
-        return self.db.sql("SELECT * FROM web_error_logs WHERE log_type = ? ORDER BY time_created", [log_type])
+        return self._log_type_table("web_error_logs", log_type)
+
+    def web_error_logs_chunks(
+        self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE
+    ) -> Iterator[pd.DataFrame]:
+        return self._log_type_chunks("web_error_logs", log_type, chunksize)
 
     def scheduled_tasks(self) -> pd.DataFrame:
         """On-disk Task Scheduler task definitions."""
         return self.db.table("scheduled_tasks", order_by="task_path")
 
+    def scheduled_tasks_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self.db.table_chunks("scheduled_tasks", order_by="task_path", chunksize=chunksize)
+
     def exchange_message_tracking(self) -> pd.DataFrame:
         """Exchange mail flow (Message Tracking) logs."""
         return self.db.table("exchange_message_tracking", order_by="time_created")
 
+    def exchange_message_tracking_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self.db.table_chunks("exchange_message_tracking", order_by="time_created", chunksize=chunksize)
+
     def exchange_logs(self, log_type: str | None = None) -> pd.DataFrame:
         """Every other Exchange CSV log type (HttpProxy, EAS, EWS, ...)."""
+        return self._log_type_table("exchange_logs", log_type)
+
+    def exchange_logs_chunks(
+        self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE
+    ) -> Iterator[pd.DataFrame]:
+        return self._log_type_chunks("exchange_logs", log_type, chunksize)
+
+    def _log_type_table(self, table: str, log_type: str | None) -> pd.DataFrame:
         if log_type is None:
-            return self.db.table("exchange_logs", order_by="time_created")
-        if "exchange_logs" not in self.db.tables:
+            return self.db.table(table, order_by="time_created")
+        if table not in self.db.tables:
             return pd.DataFrame()
-        return self.db.sql("SELECT * FROM exchange_logs WHERE log_type = ? ORDER BY time_created", [log_type])
+        return self.db.sql(f"SELECT * FROM {table} WHERE log_type = ? ORDER BY time_created", [log_type])
+
+    def _log_type_chunks(self, table: str, log_type: str | None, chunksize: int) -> Iterator[pd.DataFrame]:
+        if log_type is None:
+            return self.db.table_chunks(table, order_by="time_created", chunksize=chunksize)
+        if table not in self.db.tables:
+            return iter(())
+        return self.db.sql_chunks(
+            f"SELECT * FROM {table} WHERE log_type = ? ORDER BY time_created", [log_type], chunksize=chunksize
+        )
 
     def suspicious_tasks(self) -> pd.DataFrame:
         """Lightweight heuristic triage over `scheduled_tasks` -- flags tasks
@@ -259,6 +306,22 @@ class Case:
         event_id: int | list[int] | None = None,
     ) -> pd.DataFrame:
         return build_timeline(self.db, start=start, end=end, host=host, channel=channel, event_id=event_id)
+
+    def timeline_chunks(
+        self,
+        start=None,
+        end=None,
+        host: str | None = None,
+        channel: str | None = None,
+        event_id: int | list[int] | None = None,
+        chunksize: int = DEFAULT_CHUNKSIZE,
+    ) -> Iterator[pd.DataFrame]:
+        """Bounded-memory alternative to `.timeline()` -- an unfiltered or
+        lightly-filtered cross-host timeline over a large case can still
+        exceed comfortable in-memory size."""
+        return build_timeline_chunks(
+            self.db, start=start, end=end, host=host, channel=channel, event_id=event_id, chunksize=chunksize
+        )
 
     def __enter__(self) -> "Case":
         return self

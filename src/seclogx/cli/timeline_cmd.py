@@ -6,7 +6,7 @@ import typer
 
 from ..case import Case
 from ..config import DEFAULT_CASE_ROOT
-from ._render import console, print_df
+from ._render import console, export_chunks_to_csv, print_df_chunks
 
 
 def timeline_command(
@@ -19,8 +19,14 @@ def timeline_command(
     out: Path | None = typer.Option(None, "--out", help="Write full timeline to CSV"),
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
 ) -> None:
+    # Streamed in bounded-size chunks rather than fetched as one DataFrame --
+    # an unfiltered or lightly-filtered timeline over a large case can
+    # still be far bigger than comfortably fits in memory.
     c = Case.open(case_name, case_root=case_root)
-    df = c.timeline(
+    if "events" not in c.db.tables:
+        console.print("[yellow]case has no ingested Windows Event Log data[/yellow]")
+        raise typer.Exit(1)
+    chunks = c.timeline_chunks(
         start=start,
         end=end,
         host=host,
@@ -28,7 +34,7 @@ def timeline_command(
         event_id=list(event_id) if event_id else None,
     )
     if out:
-        df.to_csv(out, index=False)
-        console.print(f"[green]wrote {len(df)} rows to {out}[/green]")
+        n = export_chunks_to_csv(chunks, out)
+        console.print(f"[green]wrote {n} rows to {out}[/green]")
     else:
-        print_df(df, title="Timeline", max_rows=100)
+        print_df_chunks(chunks, title="Timeline", max_rows=100)

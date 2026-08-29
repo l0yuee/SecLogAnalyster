@@ -207,6 +207,55 @@ A few things worth knowing before you query these:
 - See [section 6](#6-analyst-workflows--recipes) for recipes, and
   `docs/known_limitations.md` for the full list of scope decisions.
 
+### Quick reference: analyzing each log type
+
+Every table below is always reachable the fully generic way regardless of
+whether it has a dedicated interface: `seclogx query <case> "<SQL>"` /
+`seclogx table <case> <name>` on the CLI, and `Case.query()`/
+`Case.db.table(name)` (plus their `_chunks` siblings) in Python. The
+columns below are the *additional*, purpose-built interfaces each table
+gets on top of that.
+
+| Log type | Table | Dedicated CLI | Dedicated Python (eager / chunked) | Sigma hunting |
+|---|---|---|---|---|
+| Windows Event Log | `events` | `summary`, `channels`, `timeline`, `hunt` | `summary()`/`channels()`/`hosts()`, `events()` / `events_chunks()`, `timeline()` / `timeline_chunks()` | Yes -- most bundled rule categories |
+| Web access logs (IIS/nginx/Apache/Tomcat/Exchange-HttpProxy) | `web_logs` | none -- use `table web_logs` / `query` | `web_logs(log_type=)` / `web_logs_chunks(log_type=)` | Yes -- `category: webserver` (bring your own rules; none bundled by default) |
+| Web error logs (nginx/Apache/Tomcat/IIS HTTPERR) | `web_error_logs` | none -- use `table web_error_logs` / `query` | `web_error_logs(log_type=)` / `web_error_logs_chunks(log_type=)` | No -- query directly |
+| Scheduled Tasks | `scheduled_tasks` | `tasks [--suspicious]` | `scheduled_tasks()` / `scheduled_tasks_chunks()`, `suspicious_tasks()` (heuristic) | No -- use `suspicious_tasks()` / query directly |
+| Exchange Message Tracking (mail flow) | `exchange_message_tracking` | none -- use `table exchange_message_tracking` / `query` | `exchange_message_tracking()` / `exchange_message_tracking_chunks()` | No -- query directly |
+| Other Exchange logs (HttpProxy, EWS, EAS, ...) | `exchange_logs` | none -- use `table exchange_logs` / `query` | `exchange_logs(log_type=)` / `exchange_logs_chunks(log_type=)` | No -- query directly |
+
+`seclogx sources <case>` isn't table-specific -- it's the one command to
+run first, before any of the above: a row count per table so you know
+what the case actually has before picking which of these to reach for.
+
+What to actually look for in each, at a glance (full recipes in
+[section 6](#6-analyst-workflows--recipes)):
+
+- **`events`** -- the day-to-day DFIR core: process creation
+  (parent/child chains, LOLBins), logon activity by type, PowerShell
+  script blocks, registry/file changes. Start with `summary()`/
+  `channels()` to see what actually got captured (was Sysmon running?),
+  then `hunt()` for a first pass.
+- **`web_logs`** -- anomalous status codes, uncommon URI extensions
+  hit with a 200 (possible webshells), suspicious user agents, one
+  client IP dominating traffic.
+- **`web_error_logs`** -- error spikes correlated with `web_logs`
+  anomalies at the same timestamp; IIS HTTPERR specifically catches
+  requests HTTP.sys itself rejected *before* reaching an IIS worker
+  process, so it can surface exploitation attempts that never show up
+  in `web_logs` at all.
+- **`scheduled_tasks`** -- persistence hunting: hidden or unauthored
+  tasks, actions invoking a LOLBin, action paths under Temp/AppData/
+  Public. `suspicious_tasks()` runs this heuristic for you.
+- **`exchange_message_tracking`** -- phishing and mail-based
+  exfiltration: sender/recipient/subject sweeps, unexpected external
+  mail flow, a sender domain that doesn't match its claimed identity.
+- **`exchange_logs`** -- Exchange HTTP-based compromise (e.g.
+  ProxyShell-style attacks) where the relevant activity is in
+  HttpProxy/OWA/ECP access patterns rather than mail flow -- sweep
+  `fields` by content when you don't know the exact schema.
+
 ## 4. Command-line reference
 
 Every command accepts `--case-root <dir>` (default `./cases`) to point

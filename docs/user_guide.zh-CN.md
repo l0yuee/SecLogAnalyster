@@ -155,6 +155,40 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   `exchange_logs`，所有字段都保存在 `fields` 中，虽未提升为真正的列，但依然完全可查询。
 - 常用查询见[第 6 节](#6-分析师工作流--常用查询)，完整的取舍决定见 `docs/known_limitations.md`。
 
+### 速查表：如何分析每一类日志
+
+无论下表中的表是否拥有专属接口，都始终可以用完全通用的方式访问：命令行的
+`seclogx query <case> "<SQL>"` / `seclogx table <case> <name>`，以及 Python 中的
+`Case.query()`/`Case.db.table(name)`（连同它们的 `_chunks` 同名方法）。下表列出的是每张表在此基础之上*额外*拥有的专属接口。
+
+| 日志类型 | 表 | 专属命令行 | 专属 Python（一次性 / 分块） | Sigma 狩猎 |
+|---|---|---|---|---|
+| Windows 事件日志 | `events` | `summary`、`channels`、`timeline`、`hunt` | `summary()`/`channels()`/`hosts()`，`events()` / `events_chunks()`，`timeline()` / `timeline_chunks()` | 支持——大多数内置规则类别 |
+| Web 访问日志（IIS/nginx/Apache/Tomcat/Exchange-HttpProxy） | `web_logs` | 无——用 `table web_logs` / `query` | `web_logs(log_type=)` / `web_logs_chunks(log_type=)` | 支持——`category: webserver`（需自备规则，v1 默认不内置） |
+| Web 错误日志（nginx/Apache/Tomcat/IIS HTTPERR） | `web_error_logs` | 无——用 `table web_error_logs` / `query` | `web_error_logs(log_type=)` / `web_error_logs_chunks(log_type=)` | 不支持——直接查询 |
+| 计划任务 | `scheduled_tasks` | `tasks [--suspicious]` | `scheduled_tasks()` / `scheduled_tasks_chunks()`，`suspicious_tasks()`（启发式规则） | 不支持——用 `suspicious_tasks()` 或直接查询 |
+| Exchange 邮件跟踪（邮件流转） | `exchange_message_tracking` | 无——用 `table exchange_message_tracking` / `query` | `exchange_message_tracking()` / `exchange_message_tracking_chunks()` | 不支持——直接查询 |
+| 其他 Exchange 日志（HttpProxy、EWS、EAS 等） | `exchange_logs` | 无——用 `table exchange_logs` / `query` | `exchange_logs(log_type=)` / `exchange_logs_chunks(log_type=)` | 不支持——直接查询 |
+
+`seclogx sources <case>`并不针对某一张具体的表——它是在使用上述任何一种接口之前，最值得先运行的一个命令：给出每张表的行数统计，让你在决定具体查哪张表之前，先了解案例里实际有什么。
+
+每一类日志具体该看什么（完整常用查询见[第 6 节](#6-分析师工作流--常用查询)）：
+
+- **`events`**——日常 DFIR 的核心：进程创建（父子进程链、LOLBin）、按类型划分的登录活动、PowerShell
+  脚本块、注册表/文件变更。先用 `summary()`/`channels()`
+  看看实际采集到了什么（Sysmon 当时是否在运行？），再用 `hunt()` 做第一轮排查。
+- **`web_logs`**——异常状态码、不常见扩展名却返回 200（可能是 webshell）、可疑的
+  User-Agent、某个客户端 IP 占据了绝大多数流量。
+- **`web_error_logs`**——与 `web_logs` 中同一时间点的异常相互印证的错误高峰；IIS
+  HTTPERR 专门捕获 HTTP.sys 自身在请求到达 IIS 工作进程*之前*就拒绝的请求，因此能发现完全不会出现在
+  `web_logs` 中的利用尝试。
+- **`scheduled_tasks`**——持久化排查：被隐藏或没有作者信息的任务、动作中调用了
+  LOLBin、动作路径位于 Temp/AppData/Public 之下。`suspicious_tasks()` 会自动帮你跑这套启发式规则。
+- **`exchange_message_tracking`**——钓鱼与邮件类数据泄露：按发件人/收件人/主题排查、异常的对外邮件流转、发件人域名与其声称身份不符的情况。
+- **`exchange_logs`**——Exchange 基于 HTTP 的入侵（例如 ProxyShell 类攻击），此时相关活动体现在
+  HttpProxy/OWA/ECP 的访问模式中，而不是邮件流转记录里——在不清楚具体字段结构时，可按内容对
+  `fields` 做全文排查。
+
 ## 4. 命令行参考
 
 所有命令都支持 `--case-root <dir>` 参数（默认 `./cases`）以指向不同位置的案例工作区。执行任意命令加 `--help` 可查看最新、完整的参数列表。

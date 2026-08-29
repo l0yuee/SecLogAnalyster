@@ -56,11 +56,13 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
   future one): add an entry directly to `LOGSOURCE_TABLE` (skip
   `LOGSOURCE_ROUTES` unless that category also needs an added condition).
 - `seclogx hunt` only ever runs bundled + user-supplied Sigma rules
-  against `events` and `web_logs` in v1 -- `scheduled_tasks` and
-  `exchange_message_tracking`/`exchange_logs` have no Sigma logsource
-  category that fits (Sigma's scheduled-task detections target the event
-  log, not on-disk task definitions), so they're queried directly via SQL
-  or the lightweight `Case.suspicious_tasks()` heuristic instead.
+  against `events` and `web_logs` in v1 -- `scheduled_tasks`,
+  `web_error_logs`, and `exchange_message_tracking`/`exchange_logs` have
+  no Sigma logsource category that fits (Sigma's scheduled-task
+  detections target the event log, not on-disk task definitions; there's
+  no standard Sigma category for web error/diagnostic logs either), so
+  they're queried directly via SQL or the lightweight
+  `Case.suspicious_tasks()` heuristic instead.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
   `seclogx hunt <case> --rules <dir>` against a case with known-good data

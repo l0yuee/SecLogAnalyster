@@ -1,4 +1,16 @@
-# Normalized event schema
+# Normalized schemas
+
+Column reference for every table a case can have. This file covers two
+sources: the Windows Event Log schema below (`src/seclogx/schema.py`),
+and every other log family's schema further down (`## Non-EVTX log
+tables`, from `src/seclogx/logsources/schema.py`) -- `events`,
+`web_logs`, `web_error_logs`, `scheduled_tasks`,
+`exchange_message_tracking`, `exchange_logs`. See "Quick reference:
+analyzing each log type" in `docs/user_guide.md` (section 3) for how to
+actually query each one, and `docs/architecture.md` for how they're
+ingested.
+
+## `events` (Windows Event Log)
 
 Schema version: `1` (see `schema_version` column). Generated from `src/seclogx/schema.py` -- regenerate this file if that module changes.
 
@@ -34,7 +46,7 @@ Parquet partition columns: `host, channel`.
 | `ingested_at` | `TIMESTAMP` | Load time |
 | `schema_version` | `UTINYINT` | Normalized schema version |
 
-## `event_data`
+### `event_data`
 
 Holds the provider-specific `EventData` (or `UserData` fallback) Name->Value payload as JSON text. Query individual fields with DuckDB's `->>` operator, e.g.:
 
@@ -48,11 +60,10 @@ See `docs/known_limitations.md` for the cases where `event_data` isn't a flat Na
 
 ---
 
-# Non-EVTX log tables
-
-Generated from / kept in sync with `src/seclogx/logsources/schema.py`. Each
-table lives under its own `lake/<table>/` subdirectory and is registered
-as a view of the same name by `CaseDB` -- only present if the case has
+**The remaining tables** (generated from / kept in sync with
+`src/seclogx/logsources/schema.py`) are the non-EVTX log families. Each
+lives under its own `lake/<table>/` subdirectory and is registered as a
+view of the same name by `CaseDB` -- only present if the case has
 ingested that log family (check `Case.table_counts()` / `seclogx sources`).
 See `docs/architecture.md` for how these are ingested.
 

@@ -1,9 +1,18 @@
 # Architecture
 
-seclogx turns scattered `.evtx` acquisitions into a queryable, huntable
-case workspace in three stages, favoring set-based DuckDB SQL over
-per-record Python wherever possible (validated during design: the `evtx`
-package's real bottleneck is per-record Python marshaling, not parsing).
+seclogx turns scattered forensic acquisitions -- `.evtx`, on-disk
+Scheduled Task definitions, IIS/nginx/Apache/Tomcat access and error
+logs, Exchange CSV logs -- into one queryable, huntable case workspace,
+favoring set-based DuckDB SQL over per-record Python wherever possible
+(validated during design: the `evtx` package's real bottleneck is
+per-record Python marshaling, not parsing). This is two parallel
+pipelines sharing one case workspace and one query layer: the EVTX
+pipeline (stages 1-3 below, the original and still the most
+performance-critical path) and a second one for everything else ("Non-EVTX
+log families" further down). `Case.ingest()` runs both over the same
+`--source` inputs in one call; `query.py`'s `CaseDB` and the plain-language
+`search.py` interface sit on top of whichever tables either pipeline
+produced, with no distinction between them at the query layer.
 
 ```
  .evtx files (multiple hosts/paths)

@@ -44,20 +44,36 @@ seclogx exists to make the first hours of triage fast:
   WMI-Activity, and anything else -- into one normalized, queryable
   table.
 - It also discovers and normalizes, in the same pass: on-disk **Scheduled
-  Task** definitions (a persistence artifact), **IIS** W3C access logs,
-  **nginx/Apache/Tomcat** access logs, and **Exchange** CSV logs
-  (Message Tracking gets first-class columns; every other Exchange log
-  type lands in a nothing-dropped catchall). Each format is detected by
-  content, not filename, so renamed/relocated evidence still works.
-- You get a `pandas.DataFrame`-native interface (CLI tables/CSV, or a
-  Python `Case` object for a notebook) plus built-in Sigma-rule threat
-  hunting with MITRE ATT&CK tagging, covering both Windows Event Log and
-  web access logs.
+  Task** definitions (a persistence artifact), **IIS/nginx/Apache/Tomcat**
+  access logs *and* error/diagnostic logs (both major log categories a
+  web application produces, including IIS HTTP.sys/HTTPERR), and
+  **Exchange** CSV logs (Message Tracking gets first-class columns;
+  every other Exchange log type lands in a nothing-dropped catchall).
+  Each format is detected by content, not filename, so renamed/relocated
+  evidence still works. See "Quick reference: analyzing each log type" in
+  [section 3](#3-core-concepts) for the full six-table picture.
+- You get a `pandas.DataFrame`-native interface throughout (CLI
+  tables/CSV, or a Python `Case` object for a notebook) plus built-in
+  Sigma-rule threat hunting with MITRE ATT&CK tagging, covering both
+  Windows Event Log and web access logs. **No SQL required either**:
+  `seclogx search` / `Case.search()` filter any table with plain
+  field/value conditions -- exact, fuzzy, or regex matching.
 - Every parse error, unrecognized file, and unsupported rule is reported
   explicitly. Nothing is silently dropped.
+- **Bounded memory at every step that touches the analyst directly.**
+  Web access/error logs especially can reach terabyte scale across a
+  case -- every DataFrame-returning method has a chunked/streamed
+  alternative, and `search()` actively checks a result against the
+  machine's available memory before fetching, refusing rather than
+  risking a crash (see [section 5](#5-python--notebook-api) and
+  [section 9](#9-performance-and-scale-notes)).
 
-It's designed for realistic single-analyst case volumes (well under
-100GB) on one workstation -- no cluster, no external services.
+It's designed for one workstation, not a cluster -- no distributed setup,
+no external services. Within that, realistic scale varies by log family:
+EVTX cases are typically well under 100GB (comfortable for DuckDB +
+Parquet's lazy, out-of-core execution outright), while web access/error
+logs can realistically reach terabyte scale, which is what the
+bounded-memory delivery above is specifically for.
 
 ## 2. Installation
 

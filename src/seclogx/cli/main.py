@@ -13,8 +13,8 @@ from .tasks_cmd import tasks_command
 from .timeline_cmd import timeline_command
 
 app = typer.Typer(
-    help="seclogx -- fast, pandas-friendly threat hunting over Windows Event Log, "
-    "Scheduled Tasks, IIS/web access logs, and Exchange logs",
+    help="seclogx -- fast, pandas-friendly threat hunting over Windows Event Log, Scheduled Tasks, "
+    "IIS/nginx/Apache/Tomcat access & error logs, and Exchange logs. No SQL required -- see `search`.",
     no_args_is_help=True,
 )
 app.add_typer(case_app, name="case")

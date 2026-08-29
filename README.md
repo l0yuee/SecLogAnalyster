@@ -51,10 +51,10 @@ workspace instead of raw XML and inconsistent text logs.
 
 **Full user guide: [English](docs/user_guide.md) | [中文](docs/user_guide.zh-CN.md)**
 
-See `docs/architecture.md` for how it works, `docs/schema.md` for the
-normalized event schema, `docs/sigma_backend.md` for the detection engine,
-and `docs/known_limitations.md` for known v1 scope decisions and edge
-cases.
+See `docs/architecture.md` for how it works, `docs/schema.md` for every
+table's normalized schema, `docs/sigma_backend.md` for the detection
+engine, and `docs/known_limitations.md` for known v1 scope decisions and
+edge cases.
 
 ## Install
 
@@ -71,10 +71,10 @@ install) so the bundled Sigma rules under `data/` are found.
 
 ```bash
 # Create a case and ingest from one or more forensic acquisition paths --
-# .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat access logs,
-# and Exchange CSV logs are all discovered and classified automatically in
-# the same pass. Each --source can carry an explicit host label
-# (PATH:HOST); if omitted, the source directory's name is used.
+# .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat access AND
+# error logs, and Exchange CSV logs are all discovered and classified
+# automatically in the same pass. Each --source can carry an explicit
+# host label (PATH:HOST); if omitted, the source directory's name is used.
 seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
 
 # See what's in it

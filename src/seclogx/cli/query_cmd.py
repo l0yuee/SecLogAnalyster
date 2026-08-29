@@ -11,8 +11,8 @@ from ._render import console, export_chunks_to_csv, print_df, print_df_chunks
 
 def query_command(
     case_name: str = typer.Argument(...),
-    sql: str = typer.Argument(..., help="Raw SQL against the case's `events` view"),
-    out: Path | None = typer.Option(None, "--out", help="Write full results to CSV instead of printing a table"),
+    sql: str = typer.Argument(..., help="Raw SQL against any table in the case, e.g. events, web_logs (see `seclogx sources`)"),
+    out: Path | None = typer.Option(None, "--out", help="Stream every matching row to CSV instead of printing a preview"),
     limit: int | None = typer.Option(None, "--limit"),
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
 ) -> None:
@@ -66,7 +66,7 @@ def sources_command(
 def table_command(
     case_name: str = typer.Argument(...),
     table_name: str = typer.Argument(..., help="Table name, e.g. web_logs, scheduled_tasks (see `seclogx sources`)"),
-    out: Path | None = typer.Option(None, "--out", help="Write full results to CSV instead of printing a table"),
+    out: Path | None = typer.Option(None, "--out", help="Stream every matching row to CSV instead of printing a preview"),
     limit: int | None = typer.Option(None, "--limit"),
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
 ) -> None:

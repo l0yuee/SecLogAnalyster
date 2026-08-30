@@ -139,3 +139,69 @@ def test_search_command_no_matches(synth_case: Case):
     )
     assert result.exit_code == 0, result.output
     assert "no rows matched" in result.output
+
+
+def test_timeline_command(synth_case: Case, tmp_path: Path):
+    case_root = synth_case.case_dir.parent
+
+    result = runner.invoke(app, ["timeline", synth_case.name, "--case-root", str(case_root)])
+    assert result.exit_code == 0, result.output
+
+    out = tmp_path / "timeline.csv"
+    result = runner.invoke(
+        app,
+        ["timeline", synth_case.name, "--host", "TESTHOST", "--event-id", "1", "--out", str(out), "--case-root", str(case_root)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "wrote 2 rows" in result.output
+    assert len(out.read_text().splitlines()) == 3  # header + 2 rows
+
+    # a case with no events table exits cleanly with a warning, not a crash
+    from seclogx.case import Case
+
+    empty = Case.create("notimeline", case_root=case_root)
+    result = runner.invoke(app, ["timeline", empty.name, "--case-root", str(case_root)])
+    assert result.exit_code != 0
+    assert "no ingested Windows Event Log data" in result.output
+
+
+def test_tasks_command(tmp_path: Path):
+    from seclogx.ingest.common import SourceSpec
+    from seclogx.ingest.logsources.orchestrator import run_aux_ingest
+
+    fixtures = Path(__file__).parent.parent / "fixtures" / "logsources"
+    case_root = tmp_path / "cases"
+    case = Case.create("clitasks", case_root=case_root)
+    run_aux_ingest(case.case_dir, [SourceSpec(path=fixtures, host="LAB01")], workers=1)
+
+    result = runner.invoke(app, ["tasks", "clitasks", "--case-root", str(case_root)])
+    assert result.exit_code == 0, result.output
+    assert "Scheduled tasks" in result.output
+
+    result = runner.invoke(app, ["tasks", "clitasks", "--suspicious", "--case-root", str(case_root)])
+    assert result.exit_code == 0, result.output
+
+    # a case with no scheduled_tasks table exits cleanly with a warning
+    empty = Case.create("notasks", case_root=case_root)
+    result = runner.invoke(app, ["tasks", empty.name, "--case-root", str(case_root)])
+    assert result.exit_code != 0
+    assert "no scheduled task definitions" in result.output
+
+
+def test_rules_validate_command():
+    result = runner.invoke(app, ["rules", "validate"])
+    assert result.exit_code == 0, result.output
+    assert "rules convert successfully" in result.output
+    assert "0 failed conversion" in result.output
+
+
+def test_rules_validate_command_with_custom_dir(tmp_path: Path):
+    result = runner.invoke(app, ["rules", "validate", "--rules", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "0 rules convert successfully" in result.output
+
+
+def test_version_command():
+    result = runner.invoke(app, ["version"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip()

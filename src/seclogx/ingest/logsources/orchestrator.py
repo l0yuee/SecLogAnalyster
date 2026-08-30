@@ -1,13 +1,16 @@
-"""Orchestrates discovery, parallel staging, and Parquet-lake flattening for
-the non-EVTX log families (Scheduled Tasks, IIS/nginx/Apache/Tomcat web
-access AND error logs, Exchange CSV logs). Runs as a second pass alongside
-the existing EVTX ingest (see case.py), over the same `--source` inputs.
+"""Orchestrates discovery and parallel staging for the non-EVTX log families
+(Scheduled Tasks, IIS/nginx/Apache/Tomcat web access AND error logs, Exchange
+CSV logs). Runs as a second pass alongside the existing EVTX ingest (see
+case.py), over the same `--source` inputs. Per-table Parquet flattening is
+delegated to flatten.py, mirroring how the EVTX pipeline
+(`ingest/evtx/orchestrator.py` + `ingest/evtx/flatten.py`) splits the two
+responsibilities.
 
 Unlike the EVTX pipeline (NDJSON staging + one bulk DuckDB flatten, chosen
 because per-record Python marshaling was the bottleneck at EVTX's typical
 record volume), these formats are already line-oriented text or small XML
 files at far lower per-file record counts, so each worker parses straight
-to Python dicts and this module batches them directly into Parquet -- no
+to Python dicts and flatten.py batches them directly into Parquet -- no
 intermediate staging files needed.
 """
 
@@ -18,13 +21,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-import duckdb
-import pandas as pd
-
-from ..discovery import SourceSpec
+from ..common import SourceSpec, StageStatus
 from .discovery import discover_and_classify
-from .manifest import AuxIngestReport, AuxStagedFile, StageStatus, now_iso
-from .schema import TABLES, cast_sql_for
+from .flatten import flatten_table
+from .manifest import AuxIngestReport, AuxStagedFile
 from .stage import stage_aux_file
 
 
@@ -68,7 +68,7 @@ def run_aux_ingest(case_dir: Path, sources: list[SourceSpec], workers: int | Non
             by_table.setdefault(f.table, []).extend(f.rows)
 
     ingested_at = datetime.now(timezone.utc)
-    rows_written = {table: _flatten_table(case_dir, table, rows, batch_id, ingested_at) for table, rows in by_table.items()}
+    rows_written = {table: flatten_table(case_dir, table, rows, batch_id, ingested_at) for table, rows in by_table.items()}
 
     return AuxIngestReport(
         batch_id=batch_id,
@@ -82,47 +82,3 @@ def run_aux_ingest(case_dir: Path, sources: list[SourceSpec], workers: int | Non
         problem_files=problem_files,
         staged_files=staged,
     )
-
-
-def _flatten_table(case_dir: Path, table: str, rows: list[dict], batch_id: str, ingested_at: datetime) -> int:
-    if not rows:
-        return 0
-
-    table_def = TABLES[table]
-    lake_dir = case_dir / "lake" / table
-    lake_dir.mkdir(parents=True, exist_ok=True)
-
-    con = duckdb.connect()
-    df = pd.DataFrame(rows)
-    con.register("raw", df)
-
-    cast_sql = cast_sql_for(table)
-    overrides = {
-        "ingest_batch_id": f"'{batch_id}'",
-        "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
-        "schema_version": "1",
-    }
-
-    select_exprs = []
-    for col, duckdb_type in table_def["columns"]:
-        if col in overrides:
-            expr = overrides[col]
-        elif col in df.columns:
-            expr = cast_sql[col]
-        else:
-            expr = f"CAST(NULL AS {duckdb_type})"
-        select_exprs.append(f"{expr} AS {col}")
-    select_sql = ",\n  ".join(select_exprs)
-
-    partition_by = ", ".join(table_def["partition_by"])
-    con.execute(
-        f"""
-        COPY (
-          SELECT
-          {select_sql}
-          FROM raw
-        ) TO '{lake_dir}' (FORMAT PARQUET, PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true)
-        """
-    )
-    con.close()
-    return len(df)

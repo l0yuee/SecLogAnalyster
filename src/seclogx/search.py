@@ -47,7 +47,7 @@ import pandas as pd
 
 from .csvutil import export_chunks_to_csv
 from .errors import ResultTooLargeError, UnknownFieldError
-from .logsources.schema import TABLES as _LOGSOURCE_TABLES
+from .ingest.logsources.schema import TABLES as _LOGSOURCE_TABLES
 from .query import DEFAULT_CHUNKSIZE, CaseDB
 from .schema import CORE_COLUMNS as _EVENTS_CORE_COLUMNS
 

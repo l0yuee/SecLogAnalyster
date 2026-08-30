@@ -19,7 +19,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .sniff import _decode_lines
+from ..sniff import _decode_lines
 
 _MESSAGE_TRACKING_FIELD_MAP = {
     "date-time": "time_created",

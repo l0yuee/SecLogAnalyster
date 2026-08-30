@@ -3,12 +3,13 @@
 Column reference for every table a case can have. This file covers two
 sources: the Windows Event Log schema below (`src/seclogx/schema.py`),
 and every other log family's schema further down (`## Non-EVTX log
-tables`, from `src/seclogx/logsources/schema.py`) -- `events`,
+tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 `web_logs`, `web_error_logs`, `scheduled_tasks`,
 `exchange_message_tracking`, `exchange_logs`. See "Quick reference:
-analyzing each log type" in `docs/user_guide.md` (section 3) for how to
-actually query each one, and `docs/architecture.md` for how they're
-ingested.
+analyzing each log type" in
+[`docs/guides/02_log_types_and_schema.md`](guides/02_log_types_and_schema.md)
+for how to actually query each one, and `docs/architecture.md` for how
+they're ingested.
 
 ## `events` (Windows Event Log)
 
@@ -61,7 +62,7 @@ See `docs/known_limitations.md` for the cases where `event_data` isn't a flat Na
 ---
 
 **The remaining tables** (generated from / kept in sync with
-`src/seclogx/logsources/schema.py`) are the non-EVTX log families. Each
+`src/seclogx/ingest/logsources/schema.py`) are the non-EVTX log families. Each
 lives under its own `lake/<table>/` subdirectory and is registered as a
 view of the same name by `CaseDB` -- only present if the case has
 ingested that log family (check `Case.table_counts()` / `seclogx sources`).

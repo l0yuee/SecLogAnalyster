@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .sniff import _decode_lines
+from ..sniff import _decode_lines
 
 _CLF_RE = re.compile(
     r'^(?P<client_ip>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<time>[^\]]+)\] '

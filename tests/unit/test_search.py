@@ -81,8 +81,8 @@ def test_search_unknown_field_on_table_without_json_catchall_raises(synth_case: 
 
 
 def test_search_unknown_field_without_any_catchall_raises(tmp_path: Path):
-    from seclogx.logsources.ingest import run_aux_ingest
-    from seclogx.discovery import SourceSpec
+    from seclogx.ingest.common import SourceSpec
+    from seclogx.ingest.logsources.orchestrator import run_aux_ingest
 
     fixtures = Path(__file__).parent.parent / "fixtures" / "logsources"
     case = Case.create("nocatchall", case_root=tmp_path / "cases")
@@ -167,8 +167,8 @@ def test_fields_unknown_table_raises(synth_case: Case):
 
 
 def test_fields_on_logsources_table(tmp_path: Path):
-    from seclogx.discovery import SourceSpec
-    from seclogx.logsources.ingest import run_aux_ingest
+    from seclogx.ingest.common import SourceSpec
+    from seclogx.ingest.logsources.orchestrator import run_aux_ingest
 
     fixtures = Path(__file__).parent.parent / "fixtures" / "logsources"
     case = Case.create("fieldslogsources", case_root=tmp_path / "cases")

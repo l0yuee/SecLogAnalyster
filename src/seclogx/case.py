@@ -17,13 +17,12 @@ from urllib.parse import unquote
 import pandas as pd
 
 from .config import DEFAULT_CASE_ROOT
-from .discovery import parse_source_arg
 from .errors import CaseAlreadyExistsError, CaseNotFoundError, NoSourcesFoundError
 from .detect import HuntResults, run_hunt
-from .ingest import run_ingest
-from .ingest.manifest import IngestReport
-from .logsources import run_aux_ingest
-from .logsources.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
+from .ingest import run_ingest, run_aux_ingest
+from .ingest.common import parse_source_arg
+from .ingest.evtx.manifest import IngestReport
+from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .query import DEFAULT_CHUNKSIZE, CaseDB
 from .search import Match, conditions_from_dicts, discover_fields
 from .search import search as _search

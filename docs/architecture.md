@@ -18,13 +18,13 @@ produced, with no distinction between them at the query layer.
  .evtx files (multiple hosts/paths)
         |
         v
- [1] discovery + parallel staging  (discovery.py, ingest/stage.py, ingest/orchestrator.py)
+ [1] discovery + parallel staging  (ingest/evtx/discovery.py, ingest/evtx/stage.py, ingest/evtx/orchestrator.py)
         |  ProcessPoolExecutor, one worker per file
         v
  cases/<name>/staging/<host>/*.ndjson   (+ staging/manifest via IngestReport)
         |
         v
- [2] DuckDB bulk flatten  (ingest/flatten.py, schema.py)
+ [2] DuckDB bulk flatten  (ingest/evtx/flatten.py, schema.py)
         |  one set-based SQL statement over all staged files
         v
  cases/<name>/lake/host=<h>/channel=<c>/*.parquet
@@ -38,28 +38,34 @@ produced, with no distinction between them at the query layer.
 
 ## Stage 1: discovery + parallel staging
 
-`discovery.py` recursively finds `.evtx` under one or more `--source
+`ingest/evtx/discovery.py` recursively finds `.evtx` under one or more `--source
 PATH[:HOST]` inputs (forensic acquisitions rarely live under one tidy
-directory) and dedupes by resolved path.
+directory) and dedupes by resolved path; `ingest/common.py` holds the
+`SourceSpec`/`sha256_file`/`parse_source_arg` primitives it shares with
+the non-EVTX pipeline's own discovery module (see "Non-EVTX log
+families" below).
 
-`ingest/stage.py` runs in a worker process per file (`ingest/orchestrator.py`
-coordinates via `ProcessPoolExecutor` -- files are independent and
-parsing is CPU/IO-bound, so this is where parallelism buys speed). Each
-worker streams `PyEvtxParser.records_json()` straight to
-`staging/<host>/<file>.ndjson` with minimal Python-side transformation.
+`ingest/evtx/stage.py` runs in a worker process per file
+(`ingest/evtx/orchestrator.py` coordinates via `ProcessPoolExecutor` --
+files are independent and parsing is CPU/IO-bound, so this is where
+parallelism buys speed). Each worker streams `PyEvtxParser.records_json()`
+straight to `staging/<host>/<file>.ndjson` with minimal Python-side
+transformation.
 
 Corrupted chunks are a real, observed failure mode (see
 `docs/known_limitations.md`): the parser raises at the generator level
 rather than yielding a per-record error, so a bad chunk aborts the rest
 of that file's parse. Staging catches this at the file level and records
 a `partial` status with the exact number of records recovered --
-`ingest/manifest.py`'s `StagedFile`/`IngestReport` never let a partial
+`ingest/evtx/manifest.py`'s `StagedFile`/`IngestReport` never let a partial
 read pass as a silent success, which is the direct fix for the "ELK
 silently drops records on import" pain point this tool exists to solve.
+(`ingest/common.py` also holds the `StageStatus` vocabulary and `now_iso()`
+helper both pipelines' manifests share.)
 
 ## Stage 2: DuckDB bulk flatten
 
-`ingest/flatten.py` reads all staged NDJSON for an ingest batch in one
+`ingest/evtx/flatten.py` reads all staged NDJSON for an ingest batch in one
 DuckDB `read_ndjson(..., filename=true)` call, joins it against an
 in-memory manifest table for provenance (host, source path, file hash),
 and extracts every normalized column via the SQL expressions defined
@@ -127,7 +133,7 @@ run, in three steps:
    as a key inside whichever of the table's columns hold a JSON *object*
    (`event_data`, `extra`, `fields`, ...). Which columns those are comes
    from this project's own schema modules (`schema.py`'s `CORE_COLUMNS`,
-   `logsources/schema.py`'s `TABLES`) -- their declared JSON-type
+   `ingest/logsources/schema.py`'s `TABLES`) -- their declared JSON-type
    annotations -- rather than DuckDB's catalog, because every JSON-bearing
    column here is physically stored as VARCHAR (see schema.py's
    `event_data` comment), so asking DuckDB "is this column's type JSON"
@@ -199,16 +205,19 @@ Every `--source` also gets a second discovery/staging/flatten pass, for
 artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
 IIS/nginx/Apache/Tomcat HTTP access **and** error/diagnostic logs, IIS
 HTTP.sys (HTTPERR) logs, and Exchange's self-describing CSV logs
-(`logsources/discovery.py`, `logsources/stage.py`, `logsources/ingest.py`,
-orchestrated from `Case.ingest()` alongside the EVTX pipeline; see
-`docs/known_limitations.md` for what happens when a source has one but
-not the other).
+(`ingest/logsources/discovery.py`, `ingest/logsources/stage.py`,
+`ingest/logsources/orchestrator.py` + `ingest/logsources/flatten.py` --
+this second pair mirrors the EVTX pipeline's own orchestrator/flatten
+split, unlike in earlier versions of this project where both lived in
+one `logsources/ingest.py` file), orchestrated from `Case.ingest()`
+alongside the EVTX pipeline; see `docs/known_limitations.md` for what
+happens when a source has one but not the other.
 
 ```
  same --source PATH[:HOST] inputs
         |
         v
- [1] classify   (logsources/sniff.py)
+ [1] classify   (ingest/logsources/sniff.py)
         |  content-sniffed, not trusted from filename/extension --
         |  forensic exports routinely rename/relocate files
         v
@@ -216,12 +225,13 @@ not the other).
    | exchange_message_tracking | exchange_generic | unknown
         |
         v
- [2] parse      (logsources/{scheduled_tasks,iis,webaccess,weberror,exchange}.py)
+ [2] parse      (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange}.py)
+        |  dispatched by ingest/logsources/orchestrator.py's
         |  ProcessPoolExecutor, one worker per file -- straight to Python
         |  dicts (these formats are already line/element-oriented text,
         |  unlike EVTX, so no NDJSON staging step is needed)
         v
- [3] flatten    (logsources/ingest.py, logsources/schema.py)
+ [3] flatten    (ingest/logsources/flatten.py, ingest/logsources/schema.py)
         |  explicit TRY_CAST per column per table -- same union_by_name
         |  stable-typing discipline as schema.py's event_data fix
         v
@@ -290,7 +300,7 @@ changing stages 1-2.
 pipeline is fine at real-world scale (stage 1 streams to NDJSON on disk
 per file; stage 2's flatten reads that back via DuckDB's own streaming
 `read_ndjson()`, never loading every record into a Python list at once).
-The non-EVTX pipeline (`logsources/ingest.py`) does not have this
+The non-EVTX pipeline (`ingest/logsources/orchestrator.py`) does not have this
 property yet: each worker parses a file straight to a Python
 `list[dict]`, and `run_aux_ingest()` accumulates every file's rows for a
 given table in memory (`by_table[table].extend(rows)`) across the whole

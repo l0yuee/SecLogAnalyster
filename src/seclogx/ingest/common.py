@@ -1,4 +1,6 @@
-"""Discover .evtx files across one or more (possibly unrelated) source paths.
+"""Primitives shared by both ingest pipelines (`ingest/evtx/`, `ingest/logsources/`):
+source-path parsing/hashing, and the staging status vocabulary + timestamp
+helper each pipeline's manifest uses to report what happened to every file.
 
 Forensic acquisitions rarely live under one tidy directory -- a case might
 combine a KAPE output folder for host A, a mounted image path for host B,
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -19,13 +22,6 @@ from pathlib import Path
 class SourceSpec:
     path: Path
     host: str | None = None
-
-
-@dataclass(frozen=True)
-class DiscoveredFile:
-    path: Path
-    host: str
-    size_bytes: int
 
 
 def parse_source_arg(raw: str) -> SourceSpec:
@@ -49,24 +45,12 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
-def discover_evtx_files(sources: list[SourceSpec]) -> list[DiscoveredFile]:
-    seen: dict[Path, DiscoveredFile] = {}
-    for spec in sources:
-        root = spec.path.resolve()
-        if not root.exists():
-            raise FileNotFoundError(f"source path does not exist: {root}")
+class StageStatus:
+    OK = "ok"
+    PARTIAL = "partial"  # some records/rows recovered, then a parse error stopped the rest
+    FAILED = "failed"  # zero records/rows recovered (e.g. corrupt/unreadable header)
+    UNKNOWN = "unknown"  # content didn't match any supported format (logsources pipeline only)
 
-        host = spec.host or root.name or str(root)
 
-        if root.is_file():
-            candidates = [root] if root.suffix.lower() == ".evtx" else []
-        else:
-            candidates = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() == ".evtx"]
-
-        for p in candidates:
-            resolved = p.resolve()
-            if resolved in seen:
-                continue
-            seen[resolved] = DiscoveredFile(path=resolved, host=host, size_bytes=resolved.stat().st_size)
-
-    return list(seen.values())
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

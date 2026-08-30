@@ -73,7 +73,7 @@ not oversights -- documented so they're easy to revisit later.
 
 - **Format is detected by content, not filename or extension.** Forensic
   acquisitions routinely rename or relocate files (a live Task Scheduler
-  task has no extension at all), so `logsources/sniff.py` peeks at file
+  task has no extension at all), so `ingest/logsources/sniff.py` peeks at file
   content. This is a heuristic classifier, not a guarantee -- an
   unusually-truncated or nonstandard log header can be misclassified as
   `unknown` and reported as unrecognized rather than ingested (see
@@ -121,7 +121,7 @@ not oversights -- documented so they're easy to revisit later.
   format, Apache's traditional and 2.4+ `ErrorLogFormat`, Tomcat's default
   `java.util.logging` `SimpleFormatter` output (`catalina.<date>.log` /
   `localhost.<date>.log`), and IIS's documented HTTPERR field set are what
-  `logsources/weberror.py` matches. A customized error-log format, or raw
+  `ingest/logsources/parsers/weberror.py` matches. A customized error-log format, or raw
   unstructured stdout mixed into `catalina.out` (common in practice,
   since Tomcat redirects raw `System.out`/`System.err` there too),
   produces parse errors for those lines (reported, not silently dropped)
@@ -219,7 +219,7 @@ not oversights -- documented so they're easy to revisit later.
   non-EVTX log families.** The EVTX pipeline streams to disk per file and
   bulk-flattens via DuckDB's own streaming `read_ndjson()`, so it never
   holds more than one file's records as a Python list at a time. The
-  Scheduled Tasks/IIS/web/Exchange pipeline (`logsources/ingest.py`)
+  Scheduled Tasks/IIS/web/Exchange pipeline (`ingest/logsources/orchestrator.py`)
   parses each file to a Python `list[dict]` and accumulates every file's
   rows per table in memory across the whole ingest batch before writing
   Parquet -- fine at the volumes exercised so far, but a single ingest run

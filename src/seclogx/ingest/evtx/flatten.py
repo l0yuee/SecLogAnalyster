@@ -19,7 +19,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from ..schema import CORE_COLUMNS, EXTRACTION_SQL
+from ...schema import CORE_COLUMNS, EXTRACTION_SQL
 from .manifest import StagedFile
 
 

@@ -12,7 +12,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .sniff import _decode_lines
+from ..sniff import _decode_lines
 
 _FIELD_MAP = {
     "s-ip": "server_ip",

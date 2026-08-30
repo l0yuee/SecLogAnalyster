@@ -5,12 +5,20 @@ from pathlib import Path
 
 import pytest
 
-from seclogx.logsources.discovery import discover_and_classify
-from seclogx.logsources.exchange import parse_exchange_csv
-from seclogx.logsources.iis import parse_iis_file
-from seclogx.logsources.ingest import run_aux_ingest
-from seclogx.logsources.scheduled_tasks import parse_task_xml
-from seclogx.logsources.sniff import (
+from seclogx.ingest.common import SourceSpec
+from seclogx.ingest.logsources.discovery import discover_and_classify
+from seclogx.ingest.logsources.orchestrator import run_aux_ingest
+from seclogx.ingest.logsources.parsers.exchange import parse_exchange_csv
+from seclogx.ingest.logsources.parsers.iis import parse_iis_file
+from seclogx.ingest.logsources.parsers.scheduled_tasks import parse_task_xml
+from seclogx.ingest.logsources.parsers.webaccess import parse_web_access_file
+from seclogx.ingest.logsources.parsers.weberror import (
+    parse_apache_error_file,
+    parse_iis_httperr_file,
+    parse_nginx_error_file,
+    parse_tomcat_error_file,
+)
+from seclogx.ingest.logsources.sniff import (
     KIND_EXCHANGE_MESSAGE_TRACKING,
     KIND_IIS,
     KIND_IIS_HTTPERR,
@@ -22,14 +30,6 @@ from seclogx.logsources.sniff import (
     classify_file,
     guess_web_log_type,
 )
-from seclogx.logsources.webaccess import parse_web_access_file
-from seclogx.logsources.weberror import (
-    parse_apache_error_file,
-    parse_iis_httperr_file,
-    parse_nginx_error_file,
-    parse_tomcat_error_file,
-)
-from seclogx.discovery import SourceSpec
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources"
 
@@ -54,7 +54,7 @@ def test_classify_exchange_message_tracking():
 
 
 def test_classify_exchange_generic():
-    from seclogx.logsources.sniff import KIND_EXCHANGE_GENERIC
+    from seclogx.ingest.logsources.sniff import KIND_EXCHANGE_GENERIC
 
     assert classify_file(FIXTURES / "sample_httpproxy.csv") == KIND_EXCHANGE_GENERIC
 
@@ -143,7 +143,7 @@ def test_parse_exchange_message_tracking():
 
 
 def test_parse_exchange_generic_catchall():
-    from seclogx.logsources.sniff import KIND_EXCHANGE_GENERIC
+    from seclogx.ingest.logsources.sniff import KIND_EXCHANGE_GENERIC
 
     table, rows, ok, err = parse_exchange_csv(
         FIXTURES / "sample_httpproxy.csv", host="MBX01", subkind=KIND_EXCHANGE_GENERIC

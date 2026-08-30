@@ -6,7 +6,7 @@ no extension on a live system, as `<name>.xml`).
 
 Classification never raises for an unreadable/binary/unrecognized file; it
 returns `None` ("unknown"), which the caller reports explicitly rather than
-silently skipping (see logsources/ingest.py).
+silently skipping (see ingest/logsources/orchestrator.py).
 """
 
 from __future__ import annotations

@@ -10,20 +10,15 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from ..common import StageStatus, now_iso  # noqa: F401 (now_iso re-exported for existing importers)
+
 if TYPE_CHECKING:
     from ..logsources.manifest import AuxIngestReport
-
-
-class StageStatus:
-    OK = "ok"
-    PARTIAL = "partial"  # some records recovered, then a parse error stopped the rest
-    FAILED = "failed"  # zero records recovered (e.g. corrupt/unreadable header)
 
 
 @dataclass
@@ -39,10 +34,6 @@ class StagedFile:
     error_message: str | None
     ndjson_path: str | None
     staged_at: str
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass

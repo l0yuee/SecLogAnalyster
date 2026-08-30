@@ -1,26 +1,16 @@
 """Staging result + ingest report for the non-EVTX log families. Mirrors
-`ingest/manifest.py`'s "never silently drop data" philosophy: every file is
-accounted for as ok/partial/failed/unrecognized, with a reason.
+`ingest/evtx/manifest.py`'s "never silently drop data" philosophy: every
+file is accounted for as ok/partial/failed/unrecognized, with a reason.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 import pandas as pd
 
-
-class StageStatus:
-    OK = "ok"
-    PARTIAL = "partial"  # some rows parsed, some lines rejected
-    FAILED = "failed"  # zero rows recovered
-    UNKNOWN = "unknown"  # content didn't match any supported format
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from ..common import StageStatus, now_iso  # noqa: F401 (re-exported for existing importers)
 
 
 @dataclass

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from seclogx.case import Case
-from seclogx.ingest.flatten import flatten_case
-from seclogx.ingest.manifest import StagedFile, now_iso
+from seclogx.ingest.evtx.flatten import flatten_case
+from seclogx.ingest.evtx.manifest import StagedFile, now_iso
 
 
 def make_record(

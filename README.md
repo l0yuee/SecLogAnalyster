@@ -52,7 +52,7 @@ workspace instead of raw XML and inconsistent text logs.
   explicitly, not swallowed -- the direct answer to "importing into ELK
   silently drops records."
 
-**Full user guide: [English](docs/user_guide.md) | [中文](docs/user_guide.zh-CN.md)**
+**Full documentation: [English](docs/index.md) | [中文](docs/index.zh-CN.md)**
 
 See `docs/architecture.md` for how it works, `docs/schema.md` for every
 table's normalized schema, `docs/sigma_backend.md` for the detection

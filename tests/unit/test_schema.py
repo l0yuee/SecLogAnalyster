@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from seclogx.ingest.flatten import flatten_case  # noqa: F401 (import sanity)
+from seclogx.ingest.evtx.flatten import flatten_case  # noqa: F401 (import sanity)
 from seclogx.schema import CORE_COLUMNS, COLUMN_NAMES, EXTRACTION_SQL, PROVENANCE_COLUMNS
 
 # Columns supplied by flatten.py's provenance join/constants override, not EXTRACTION_SQL.

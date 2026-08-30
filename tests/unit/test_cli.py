@@ -108,8 +108,8 @@ def test_search_command_contains_and_out(synth_case: Case, tmp_path: Path):
 
 
 def test_search_command_unknown_field_reports_cleanly(tmp_path: Path):
-    from seclogx.discovery import SourceSpec
-    from seclogx.logsources.ingest import run_aux_ingest
+    from seclogx.ingest.common import SourceSpec
+    from seclogx.ingest.logsources.orchestrator import run_aux_ingest
 
     fixtures = Path(__file__).parent.parent / "fixtures" / "logsources"
     case = Case.create("clisearchfields", case_root=tmp_path / "cases")

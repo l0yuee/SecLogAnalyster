@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..discovery import SourceSpec, sha256_file
+from ..common import SourceSpec, sha256_file
 from .sniff import classify_file
 
 # Extensions cheap to skip outright: known-binary or clearly irrelevant.

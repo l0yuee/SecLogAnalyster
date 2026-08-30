@@ -7,10 +7,12 @@ caught and reported as a failed file.
 from __future__ import annotations
 
 from .discovery import ClassifiedFile, sha256_file
-from .exchange import parse_exchange_csv
-from .iis import parse_iis_file
 from .manifest import AuxStagedFile, StageStatus, now_iso
-from .scheduled_tasks import parse_task_xml
+from .parsers.exchange import parse_exchange_csv
+from .parsers.iis import parse_iis_file
+from .parsers.scheduled_tasks import parse_task_xml
+from .parsers.webaccess import parse_web_access_file
+from .parsers.weberror import parse_apache_error_file, parse_iis_httperr_file, parse_nginx_error_file, parse_tomcat_error_file
 from .sniff import (
     KIND_EXCHANGE_GENERIC,
     KIND_EXCHANGE_MESSAGE_TRACKING,
@@ -23,8 +25,6 @@ from .sniff import (
     KIND_WEB_ERROR_TOMCAT,
     guess_web_log_type,
 )
-from .webaccess import parse_web_access_file
-from .weberror import parse_apache_error_file, parse_iis_httperr_file, parse_nginx_error_file, parse_tomcat_error_file
 
 
 def stage_aux_file(cf: ClassifiedFile) -> AuxStagedFile:

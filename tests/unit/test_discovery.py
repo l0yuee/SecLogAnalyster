@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from seclogx.discovery import SourceSpec, discover_evtx_files, parse_source_arg
+from seclogx.ingest.common import SourceSpec, parse_source_arg
+from seclogx.ingest.evtx.discovery import discover_evtx_files
 
 
 def test_parse_source_arg_plain_path():

@@ -15,7 +15,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .sniff import _decode_lines
+from ..sniff import _decode_lines
 
 _NGINX_ERROR_RE = re.compile(
     r"^(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<severity>\w+)\] "

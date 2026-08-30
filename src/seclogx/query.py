@@ -20,7 +20,7 @@ matters at real-world log volumes.
 The lake is organized as one table per log family under `lake/<table>/`
 (`events` for Windows Event Log; `web_logs`, `web_error_logs`,
 `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs` for the
-other artifact types -- see logsources/schema.py). A view is created per
+other artifact types -- see ingest/logsources/schema.py). A view is created per
 subdirectory found, so a case only ever exposes tables it actually has
 data for, and a new log family only needs a lake subdirectory to become
 queryable here -- true for both the eager and chunked accessors.

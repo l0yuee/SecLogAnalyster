@@ -139,6 +139,75 @@ not oversights -- documented so they're easy to revisit later.
   scope in v1** -- only the standard access (W3C/CLF/Combined) and error
   (HTTPERR / `error_log` / catalina) log categories are covered.
 
+## Linux log ingestion (syslog / auth.log / auditd / systemd journal)
+
+- **Format is detected by content, not filename or extension** -- same
+  reasoning and same non-guarantee as the Windows non-EVTX families above
+  (`AuxIngestReport.unknown_samples` / "files unrecognized", never silent).
+- **`auth.log`/`secure` are not a separate sniff kind or table.** They're
+  `syslog`-format lines like any other; `Case.auth_events()` /
+  `seclogx auth` derives a curated SSH/sudo/PAM/account-management view
+  from already-ingested `syslog` rows by recognizing program names and
+  message shapes -- see the next two bullets for exactly what it
+  recognizes.
+- **`auth_events()`'s SSH recognition covers OpenSSH's standard log
+  messages** (Accepted/Failed/Invalid user/disconnect variants) --
+  non-OpenSSH SSH daemons, or a customized/localized OpenSSH build,
+  produce messages this doesn't recognize (excluded from the result, not
+  misparsed).
+- **`auth_events()`'s session/account-management recognition covers
+  shadow-utils (`useradd`/`userdel`/`usermod`/`groupadd`/`groupdel`/
+  `passwd`) and generic `pam_unix(*:session)` open/close messages** --
+  other PAM modules, or a system using something other than shadow-utils
+  for account management, aren't recognized.
+- **BSD/RFC-3164 syslog lines have no year in their timestamp.** It's
+  inferred from the ingested file's mtime (`ingest/logsources/parsers/syslog.py`),
+  a best-effort heuristic, not a guarantee -- a file whose mtime doesn't
+  reflect when its content was actually written (e.g. copied during
+  acquisition without preserving timestamps) can get the wrong year. RFC
+  5424 lines carry a full timestamp and aren't affected.
+- **`syslog.facility`/`severity` are NULL unless the line has a `<PRI>`
+  prefix.** Most real-world `/var/log/syslog`/`auth.log` files use
+  rsyslog's default file template, which omits it entirely -- this is a
+  property of the log format actually present on disk, not a parsing gap.
+- **RFC 5424 structured-data (`[SD-ID key="value" ...]`) parsing is
+  best-effort**, via a straightforward bracket/key-value regex rather
+  than a full RFC 5424 grammar -- doesn't handle every edge case of
+  escaped characters inside SD-DATA values.
+- **`auditd_logs.syscall` is the raw number reported, not resolved to a
+  name.** The Linux syscall-number-to-name table is architecture-dependent
+  (differs between x86_64, aarch64, etc.); resolving it generically
+  wasn't worth the complexity for v1.
+- **A real auditd event is often several related lines** (e.g. SYSCALL +
+  EXECVE + CWD + PATH, all sharing one `audit_serial`) that aren't
+  stitched back into a single row -- correlate them yourself with `WHERE
+  audit_serial = ...`.
+- **auditd's key=value tokenizer is generic, not format-aware per
+  `type=`.** A record whose value contains nested `key=value`-shaped text
+  inside a quoted field (some `USER_AUTH`/`USER_CMD` records embed a
+  `msg='op=... res=...'` sub-message) can produce an imperfect split for
+  that sub-message -- the record itself is still counted as parsed
+  successfully (the header always parses), just with less precise field
+  extraction for that one nested value.
+- **`journal_logs` parses the journal *export* format**
+  (`journalctl -o json`), not the binary journal itself
+  (`/var/log/journal/**` or `/run/log/journal/**`), which isn't portable
+  across systems and isn't ingested.
+- **Crontab/`/etc/cron.d` definition files, `last`/`wtmp` binary login
+  records, and package-manager logs (`dpkg.log`, `yum.log`, ...) are out
+  of scope in v1** -- crontab files are a persistence-relevant config
+  artifact (not a log) that could get Scheduled-Tasks-style treatment
+  later; `wtmp`/`utmp` is an architecture-dependent binary struct with no
+  portable parse; package-manager logs weren't judged high-value enough
+  yet to prioritize. Same kind of deliberate v1 scope decision as
+  Procmon/Autoruns/FREB above.
+- **No Linux-specific Sigma logsource routes or detection rules ship in
+  v1** -- ingestion and query access only (`syslog`/`auditd_logs`/
+  `journal_logs` are fully queryable via `search()`/`query()`/`fields()`,
+  and `auth_events()` covers the non-Sigma heuristic case), matching how
+  Scheduled Tasks/web/Exchange logs also shipped without their own Sigma
+  routes.
+
 ## Plain-language search (`search.py` / `seclogx search` / `Case.search()`)
 
 - **`seclogx fields` / `Case.fields()` / `discover_fields()` is
@@ -198,9 +267,33 @@ not oversights -- documented so they're easy to revisit later.
 
 ## Scale
 
-- Designed for a single workstation, not a distributed system -- see
-  `docs/architecture.md` for the scale-out extension point if that's ever
-  needed.
+- **Single-machine by default; an opt-in, environment-variable-activated
+  distributed mode exists** (`src/seclogx/distributed/`, see
+  [10. Distributed deployment](guides/10_distributed_deployment.md)) --
+  not on unless `SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND` are set,
+  and default behavior is unchanged either way.
+- **What's distributed: ingest (both pipelines' per-file parse tasks) and
+  Sigma hunting (independent rules fanned out across workers).** What is
+  *not*: query execution. There is no distributed SQL engine -- DuckDB
+  still runs any single query or rule on exactly one process, against the
+  shared Parquet lake. Distributed mode means more independent things can
+  run concurrently (more ingest files parsed in parallel across machines,
+  more hunt rules evaluated in parallel, more analysts querying the same
+  lake at once); it does not make one query faster.
+- **S3-backed storage (`SECLOGX_STORAGE_BACKEND=s3`) needs a broker
+  (`SECLOGX_BROKER_URL`) configured too if more than one machine will run
+  `seclogx ingest` against the same case concurrently** -- `case.json`'s
+  locking falls back to a Redis-based lock once a broker is configured,
+  which is what makes concurrent multi-machine writers to the same case
+  safe; a plain local file lock (used when no broker is configured) isn't
+  a reliable cross-machine coordination mechanism over a network
+  filesystem.
+- **`case.json`, `staging/`, and `logs/` are never moved to S3, in any
+  mode.** Only `lake/` (the Parquet payload) is affected by
+  `SECLOGX_STORAGE_BACKEND` -- case metadata and ingest-time scratch space
+  stay on whatever local/NFS directory `--case-root` points at. This is a
+  deliberate scope boundary, not a gap: they're small, coordinator-only
+  bookkeeping, not what needs to scale.
 - **`.sql()`/`.table()` (and the `Case` accessors built on them --
   `web_logs()`, `events()`, `timeline()`, etc.) materialize the entire
   result as one pandas DataFrame.** DuckDB's query execution underneath is
@@ -219,12 +312,13 @@ not oversights -- documented so they're easy to revisit later.
   non-EVTX log families.** The EVTX pipeline streams to disk per file and
   bulk-flattens via DuckDB's own streaming `read_ndjson()`, so it never
   holds more than one file's records as a Python list at a time. The
-  Scheduled Tasks/IIS/web/Exchange pipeline (`ingest/logsources/orchestrator.py`)
-  parses each file to a Python `list[dict]` and accumulates every file's
-  rows per table in memory across the whole ingest batch before writing
-  Parquet -- fine at the volumes exercised so far, but a single ingest run
-  processing enough log files to reach terabyte scale *in one batch*
-  would need the same stage-to-disk-then-bulk-flatten treatment the EVTX
+  Scheduled Tasks/IIS/web/Exchange/Linux (syslog/auditd/journal) pipeline
+  (`ingest/logsources/orchestrator.py`) parses each file to a Python
+  `list[dict]` and accumulates every file's rows per table in memory
+  across the whole ingest batch before writing Parquet -- fine at the
+  volumes exercised so far, but a single ingest run processing enough log
+  files to reach terabyte scale *in one batch* would need the same
+  stage-to-disk-then-bulk-flatten treatment the EVTX
   pipeline already has. Not yet implemented; this is specifically an
   ingest-time boundary, separate from (and not fixed by) the query-side
   chunking above.

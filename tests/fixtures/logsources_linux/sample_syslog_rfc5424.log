@@ -1,0 +1,2 @@
+<34>1 2026-08-30T09:30:00.123456Z kaligraphite sshd 2400 ID47 [exampleSDID@32473 iut="3" eventSource="App"] Accepted publickey for carol from 198.51.100.9 port 22
+<78>1 2026-08-30T09:31:00+00:00 kaligraphite CRON 2401 - - (root) CMD (/usr/bin/backup.sh)

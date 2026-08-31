@@ -188,6 +188,31 @@ def test_tasks_command(tmp_path: Path):
     assert "no scheduled task definitions" in result.output
 
 
+def test_auth_command(tmp_path: Path):
+    from seclogx.ingest.common import SourceSpec
+    from seclogx.ingest.logsources.orchestrator import run_aux_ingest
+
+    fixtures = Path(__file__).parent.parent / "fixtures" / "logsources_linux"
+    case_root = tmp_path / "cases"
+    case = Case.create("cliauth", case_root=case_root)
+    run_aux_ingest(case.case_dir, [SourceSpec(path=fixtures, host="LAB01")], workers=1)
+
+    result = runner.invoke(app, ["auth", "cliauth", "--case-root", str(case_root)])
+    assert result.exit_code == 0, result.output
+    assert "Auth events" in result.output
+
+    out = tmp_path / "auth.csv"
+    result = runner.invoke(app, ["auth", "cliauth", "--out", str(out), "--case-root", str(case_root)])
+    assert result.exit_code == 0, result.output
+    assert "wrote 8 rows" in result.output
+
+    # a case with no syslog table exits cleanly with a warning
+    empty = Case.create("noauth", case_root=case_root)
+    result = runner.invoke(app, ["auth", empty.name, "--case-root", str(case_root)])
+    assert result.exit_code != 0
+    assert "no syslog data ingested" in result.output
+
+
 def test_rules_validate_command():
     result = runner.invoke(app, ["rules", "validate"])
     assert result.exit_code == 0, result.output

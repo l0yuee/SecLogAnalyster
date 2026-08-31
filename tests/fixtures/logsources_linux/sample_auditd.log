@@ -1,0 +1,3 @@
+type=SYSCALL msg=audit(1690000000.123:12345): arch=c000003e syscall=59 success=yes exit=0 a0=55d1 a1=55d2 a2=55d3 a3=0 items=2 ppid=1000 pid=1001 auid=1000 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=pts0 ses=2 comm="bash" exe="/bin/bash" subj=unconfined key="privilege_escalation"
+type=EXECVE msg=audit(1690000000.123:12345): argc=2 a0="sudo" a1="su"
+type=USER_AUTH msg=audit(1690000005.456:12346): pid=2002 uid=0 auid=1000 ses=2 acct="root" exe="/usr/bin/sudo" terminal="pts/0" res="success"

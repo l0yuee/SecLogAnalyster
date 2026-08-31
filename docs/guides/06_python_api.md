@@ -2,7 +2,7 @@
 
 **Language: English | [中文](06_python_api.zh-CN.md)**
 
-**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | 06. Python API | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md)
+**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | 06. Python API | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md) | [10. Distributed deployment](10_distributed_deployment.md)
 
 ---
 
@@ -82,6 +82,9 @@ c.web_error_logs(log_type="apache")
 c.scheduled_tasks()
 c.exchange_message_tracking()
 c.exchange_logs(log_type="HttpProxy")
+c.syslog()                             # generic syslog, incl. auth.log/secure content
+c.auditd_logs()                        # Linux Audit Framework
+c.journal_logs()                       # systemd journal export
 
 # The CaseDB convenience methods are available via c.db
 c.db.by_event_id([4624, 4625])
@@ -92,6 +95,10 @@ c.db.table("web_error_logs")           # generic escape hatch: any table by name
 
 # Scheduled Task triage (heuristic, not Sigma -- see 04. Threat hunting)
 c.suspicious_tasks()
+
+# Auth event triage over syslog (heuristic, not Sigma): SSH accept/fail,
+# sudo commands, PAM session open/close, account management
+c.auth_events()
 
 # Hunt
 results = c.hunt()                      # or c.hunt(rules_dir=Path("..."), min_level="high")
@@ -118,11 +125,26 @@ with Case.open("incident42") as c:
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |
-| Per-log-family accessors | `c.events()` / `c.events_chunks()`, `c.web_logs(log_type=)` / `_chunks`, `c.web_error_logs(log_type=)` / `_chunks`, `c.scheduled_tasks()` / `_chunks`, `c.exchange_message_tracking()` / `_chunks`, `c.exchange_logs(log_type=)` / `_chunks` |
+| Per-log-family accessors | `c.events()` / `c.events_chunks()`, `c.web_logs(log_type=)` / `_chunks`, `c.web_error_logs(log_type=)` / `_chunks`, `c.scheduled_tasks()` / `_chunks`, `c.exchange_message_tracking()` / `_chunks`, `c.exchange_logs(log_type=)` / `_chunks`, `c.syslog()` / `_chunks`, `c.auditd_logs()` / `_chunks`, `c.journal_logs()` / `_chunks` |
 | Scheduled Task triage | `c.suspicious_tasks()` |
+| Auth event triage (over `syslog`) | `c.auth_events()` |
 | Detection | `c.hunt(rules_dir=, min_level=)` -> `HuntResults` |
 | Timeline | `c.timeline(start=, end=, host=, channel=, event_id=)` / `c.timeline_chunks(...)` |
 | `CaseDB` (`c.db`) | `.tables`, `.table(name)` / `.table_chunks(name)`, `.sql(query)` / `.sql_chunks(query)`, `.by_event_id(ids)`, `.by_host(host)`, `.search(text)`, `.estimate(query)` -> `ResultSizeEstimate` |
+
+## Distributed mode from Python
+
+There's no separate API for this -- `Case.open()`/`Case.create()`/
+`Case.ingest()`/`Case.hunt()` all resolve `seclogx.distributed.config.
+ClusterConfig` from the environment automatically each time they run.
+Set the same `SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*`
+variables described in
+[10. Distributed deployment](10_distributed_deployment.md) before
+constructing/using a `Case`, and ingest/hunt dispatch through the
+configured job queue and storage backend exactly like the CLI does -- no
+code changes needed. Pass an explicit `cluster_config=` to override
+per-call instead of relying on the environment, if you're driving several
+differently-configured cases from one process.
 
 Next: [07. Recipes](07_recipes.md) for worked, copy-pasteable examples
 using this API (and its `seclogx search` no-SQL equivalents).

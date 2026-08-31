@@ -2,7 +2,7 @@
 
 **语言：[English](07_recipes.md) | 中文**
 
-**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | [2. 日志类型与模式](02_log_types_and_schema.zh-CN.md) | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | [5. 命令行参考](05_cli_reference.zh-CN.md) | [6. Python API](06_python_api.zh-CN.md) | 7. 常用查询 | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md)
+**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | [2. 日志类型与模式](02_log_types_and_schema.zh-CN.md) | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | [5. 命令行参考](05_cli_reference.zh-CN.md) | [6. Python API](06_python_api.zh-CN.md) | 7. 常用查询 | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md) | [10. 分布式部署](10_distributed_deployment.zh-CN.md)
 
 ---
 
@@ -168,6 +168,57 @@ ORDER BY time_created
 from seclogx import Case
 c = Case.open("incident42")
 c.suspicious_tasks()[["host", "task_path", "author", "hidden", "actions"]]
+```
+
+**按来源 IP 统计所有主机上的 SSH 失败登录（排查暴力破解来源），再反查该
+IP 是否有成功登录：**
+
+```python
+from seclogx import Case
+c = Case.open("incident42")
+auth = c.auth_events()
+auth[auth["event_type"] == "ssh_failed"]["source_ip"].value_counts()
+auth[(auth["event_type"] == "ssh_accepted") & (auth["source_ip"] == "203.0.113.7")]
+```
+
+也可以直接用 SQL 查询 `syslog`（当你还想看原始行，或某台主机还没跑过
+`auth_events()` 时很有用）：
+
+```sql
+SELECT host, time_created, message
+FROM syslog
+WHERE app_name = 'sshd' AND message ILIKE 'Failed password%'
+ORDER BY time_created
+```
+
+**某个用户的 sudo 命令历史：**
+
+```python
+auth = c.auth_events()
+auth[(auth["event_type"] == "sudo_command") & (auth["user"] == "alice")][["time_created", "host", "command"]]
+```
+
+**auditd：某条已知规则（`key`）触发的所有记录，再按 `audit_serial`
+取出某一次具体事件完整的 SYSCALL/EXECVE/CWD/PATH 全貌：**
+
+```sql
+SELECT time_created, host, record_type, exe, comm, pid, ppid
+FROM auditd_logs
+WHERE key = 'privilege_escalation'
+ORDER BY time_created
+
+-- 针对某一次具体事件：
+SELECT * FROM auditd_logs WHERE audit_serial = 12345 ORDER BY record_type
+```
+
+**systemd journal：当分析人员导出的是 `journalctl -o json` 而非转发的
+syslog 文件时，查看某个服务记录的所有 warning 及以上级别的内容：**
+
+```sql
+SELECT time_created, unit, priority, message
+FROM journal_logs
+WHERE unit = 'sshd.service' AND CAST(priority AS INTEGER) <= 4
+ORDER BY time_created
 ```
 
 下一步：[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)，看看这些查询在真实规模的案例上表现如何。

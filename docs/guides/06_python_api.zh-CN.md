@@ -2,7 +2,7 @@
 
 **语言：[English](06_python_api.md) | 中文**
 
-**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | [2. 日志类型与模式](02_log_types_and_schema.zh-CN.md) | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | [5. 命令行参考](05_cli_reference.zh-CN.md) | 6. Python API | [7. 常用查询](07_recipes.zh-CN.md) | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md)
+**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | [2. 日志类型与模式](02_log_types_and_schema.zh-CN.md) | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | [5. 命令行参考](05_cli_reference.zh-CN.md) | 6. Python API | [7. 常用查询](07_recipes.zh-CN.md) | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md) | [10. 分布式部署](10_distributed_deployment.zh-CN.md)
 
 ---
 
@@ -72,6 +72,9 @@ c.web_error_logs(log_type="apache")
 c.scheduled_tasks()
 c.exchange_message_tracking()
 c.exchange_logs(log_type="HttpProxy")
+c.syslog()                             # 通用 syslog，含 auth.log/secure 的内容
+c.auditd_logs()                        # Linux 审计框架
+c.journal_logs()                       # systemd journal 导出
 
 # CaseDB 的便捷方法可通过 c.db 访问
 c.db.by_event_id([4624, 4625])
@@ -82,6 +85,10 @@ c.db.table("web_error_logs")           # 通用兜底方法：按名称取任意
 
 # 计划任务排查（启发式规则，非 Sigma——见第 4 节）
 c.suspicious_tasks()
+
+# syslog 之上的登录/账户事件排查（启发式规则，非 Sigma）：SSH 成功/失败、
+# sudo 命令、PAM 会话开启/关闭、账户管理
+c.auth_events()
 
 # 狩猎
 results = c.hunt()                      # 或 c.hunt(rules_dir=Path("..."), min_level="high")
@@ -108,10 +115,21 @@ with Case.open("incident42") as c:
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
 | 原生 SQL | `c.query(sql)`、`c.query_chunks(sql, chunksize=)`、`c.db.table(name)`、`c.db.table_chunks(name, chunksize=)` |
-| 各日志家族的专属访问器 | `c.events()` / `c.events_chunks()`，`c.web_logs(log_type=)` / `_chunks`，`c.web_error_logs(log_type=)` / `_chunks`，`c.scheduled_tasks()` / `_chunks`，`c.exchange_message_tracking()` / `_chunks`，`c.exchange_logs(log_type=)` / `_chunks` |
+| 各日志家族的专属访问器 | `c.events()` / `c.events_chunks()`，`c.web_logs(log_type=)` / `_chunks`，`c.web_error_logs(log_type=)` / `_chunks`，`c.scheduled_tasks()` / `_chunks`，`c.exchange_message_tracking()` / `_chunks`，`c.exchange_logs(log_type=)` / `_chunks`，`c.syslog()` / `_chunks`，`c.auditd_logs()` / `_chunks`，`c.journal_logs()` / `_chunks` |
 | 计划任务排查 | `c.suspicious_tasks()` |
+| 登录事件排查（基于 `syslog`） | `c.auth_events()` |
 | 检测 | `c.hunt(rules_dir=, min_level=)` -> `HuntResults` |
 | 时间线 | `c.timeline(start=, end=, host=, channel=, event_id=)` / `c.timeline_chunks(...)` |
 | `CaseDB`（`c.db`） | `.tables`、`.table(name)` / `.table_chunks(name)`、`.sql(query)` / `.sql_chunks(query)`、`.by_event_id(ids)`、`.by_host(host)`、`.search(text)`、`.estimate(query)` -> `ResultSizeEstimate` |
+
+## 在 Python 中使用分布式模式
+
+这里不存在另一套单独的 API——`Case.open()`/`Case.create()`/`Case.ingest()`/`Case.hunt()`
+每次运行时都会自动从环境变量中解析
+`seclogx.distributed.config.ClusterConfig`。只需在构造/使用
+`Case` 之前，设置好[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)中描述的那些
+`SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*`
+环境变量，导入与狩猎就会像命令行一样，自动通过配置好的任务队列与存储后端来执行——不需要修改任何代码。如果你需要在同一个进程里驱动多个配置各不相同的案例，也可以不依赖环境变量，直接在调用时传入显式的
+`cluster_config=` 参数来覆盖。
 
 下一步：[《7. 常用查询》](07_recipes.zh-CN.md)，用这套 API（以及对应的 `seclogx search` 免 SQL 写法）给出的实际可用的例子。

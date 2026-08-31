@@ -1,0 +1,90 @@
+# seclogx worker fleet for Kubernetes. Deliberately deploys ONLY the
+# worker fleet -- no Redis/MinIO StatefulSet or Deployment is included
+# here. Bring your own managed broker (e.g. a hosted Redis/ElastiCache)
+# and S3-compatible bucket; point this Deployment at them via the
+# ConfigMap/Secret below. See ../README.md for the full walkthrough,
+# including how a coordinator (a laptop, a CI job, a jump host --
+# anywhere `seclogx` is installed) participates by exporting the same
+# env vars as this Deployment.
+#
+# The Secret manifest below has PLACEHOLDER values (base64 of literal
+# placeholder text, not real credentials) purely so this file is a
+# complete, `kubectl apply`-able example end to end. Replace it with
+# values from a real secrets mechanism (sealed-secrets, external-secrets,
+# Vault, your cloud provider's secret manager, ...) before applying to a
+# real cluster -- never commit real credentials to a manifest like this.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seclogx-cluster-config
+data:
+  SECLOGX_STORAGE_BACKEND: "s3"
+  SECLOGX_S3_BUCKET: "seclogx-cases" # replace with your real bucket name
+  SECLOGX_S3_ENDPOINT_URL: "" # leave empty for real AWS S3; set for MinIO/other S3-compatible stores
+  SECLOGX_S3_REGION: "us-east-1"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: seclogx-cluster-secrets
+type: Opaque
+stringData:
+  # PLACEHOLDERS -- replace before applying, and prefer generating this
+  # Secret via your cluster's secret-management tooling rather than
+  # editing/committing this file with real values.
+  SECLOGX_BROKER_URL: "redis://REPLACE_ME:6379/0"
+  AWS_ACCESS_KEY_ID: "REPLACE_ME"
+  AWS_SECRET_ACCESS_KEY: "REPLACE_ME"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seclogx-worker
+  labels:
+    app: seclogx-worker
+spec:
+  # Scale the fleet by raising this -- each replica is one independent
+  # `seclogx worker` process pulling from the same shared queue, so more
+  # replicas means more ingest files / hunt rule-chunks processed
+  # concurrently. `kubectl scale deployment/seclogx-worker --replicas=N`
+  # works too, without editing this file.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: seclogx-worker
+  template:
+    metadata:
+      labels:
+        app: seclogx-worker
+    spec:
+      containers:
+        - name: seclogx-worker
+          # Build deploy/Dockerfile and push it to a registry your
+          # cluster can pull from, then point this at that image:tag.
+          image: seclogx:latest
+          imagePullPolicy: IfNotPresent
+          command: ["seclogx", "worker"]
+          envFrom:
+            - configMapRef:
+                name: seclogx-cluster-config
+            - secretRef:
+                name: seclogx-cluster-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          # Not an HTTP service -- no liveness/readiness probes are
+          # configured. If you want one, a minimal exec probe like the
+          # commented example below confirms the interpreter/package are
+          # still importable without needing an HTTP endpoint:
+          # livenessProbe:
+          #   exec:
+          #     command: ["python", "-c", "import seclogx"]
+          #   initialDelaySeconds: 10
+          #   periodSeconds: 30

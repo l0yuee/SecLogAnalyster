@@ -4,14 +4,15 @@
 
 Fast, pandas-friendly threat hunting and analysis over forensic log
 acquisitions: Windows Event Log, Scheduled Tasks, IIS/nginx/Apache/Tomcat
-web access & error logs, and Exchange logs.
+web access & error logs, Exchange logs, and Linux syslog/auditd/systemd
+journal logs.
 
 ## Guides
 
 1. **[Getting started](guides/01_getting_started.md)** -- what seclogx is
    for, installation, the case workspace, and a quickstart.
 2. **[Log types and schema](guides/02_log_types_and_schema.md)** -- what
-   each of the six tables holds, what to look for, and which fields to
+   each of the nine tables holds, what to look for, and which fields to
    search on.
 3. **[Querying and search](guides/03_querying_and_search.md)** -- raw
    SQL, the no-SQL `search()` interface, and bounded-memory delivery.
@@ -27,6 +28,10 @@ web access & error logs, and Exchange logs.
    what to expect at real-world case volumes.
 9. **[Troubleshooting, FAQ, and known limitations](guides/09_faq_and_limitations.md)**
    -- common errors explained, and a pointer to the full limitations list.
+10. **[Distributed deployment](guides/10_distributed_deployment.md)** --
+    the opt-in job-queue/shared-storage cluster mode: what it distributes
+    (ingest, Sigma hunting), what it doesn't (query execution stays
+    single-node DuckDB), and how to run it.
 
 ## Internal design reference
 

@@ -1,0 +1,78 @@
+# Runnable single-machine cluster demo: a broker (Redis) + S3-compatible
+# object storage (MinIO, standing in for a real bucket) + a scalable
+# fleet of `seclogx worker` processes, all reachable from the host by the
+# same env vars the workers use -- see deploy/README.md for the full
+# walkthrough (case init / ingest / hunt / cluster status against this
+# stack, and how to scale workers).
+#
+# Every credential in this file is a demo-only placeholder. In
+# production, point SECLOGX_BROKER_URL at a managed Redis (e.g.
+# ElastiCache) and SECLOGX_S3_* / AWS_* at a real bucket with real,
+# secret-manager-issued credentials -- never at values committed to a
+# compose file.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: seclogx-demo
+      MINIO_ROOT_PASSWORD: seclogx-demo-secret
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - minio-data:/data
+
+  # One-shot: creates the bucket seclogx will use, then exits. Workers
+  # and the coordinator both assume this bucket already exists.
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 seclogx-demo seclogx-demo-secret &&
+      mc mb --ignore-existing local/seclogx-cases
+      "
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+    environment:
+      SECLOGX_BROKER_URL: redis://redis:6379/0
+      SECLOGX_STORAGE_BACKEND: s3
+      SECLOGX_S3_BUCKET: seclogx-cases
+      SECLOGX_S3_ENDPOINT_URL: http://minio:9000
+      SECLOGX_S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: seclogx-demo
+      AWS_SECRET_ACCESS_KEY: seclogx-demo-secret
+    # Scale this fleet with: docker compose up --scale worker=4
+    deploy:
+      replicas: 2
+
+volumes:
+  minio-data:

@@ -19,11 +19,19 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from ...distributed.config import ClusterConfig
+from ...distributed.storage import get_storage_backend
 from ...schema import CORE_COLUMNS, EXTRACTION_SQL
 from .manifest import StagedFile
 
 
-def flatten_case(case_dir: Path, staged_files: list[StagedFile], batch_id: str, keep_raw: bool = False) -> int:
+def flatten_case(
+    case_dir: Path,
+    staged_files: list[StagedFile],
+    batch_id: str,
+    keep_raw: bool = False,
+    cluster_config: ClusterConfig | None = None,
+) -> int:
     """Flatten all successfully-staged NDJSON files into the case's Parquet lake.
 
     Returns the number of rows written (0 if there was nothing to flatten).
@@ -32,12 +40,14 @@ def flatten_case(case_dir: Path, staged_files: list[StagedFile], batch_id: str, 
     if not ok_files:
         return 0
 
-    lake_dir = case_dir / "lake" / "events"
-    lake_dir.mkdir(parents=True, exist_ok=True)
+    backend = get_storage_backend(cluster_config or ClusterConfig.from_env())
+    lake_location = backend.table_location(case_dir, "events")
+    backend.ensure_dir(lake_location)
 
     ingested_at = datetime.now(timezone.utc)
 
     con = duckdb.connect()
+    backend.configure_duckdb(con)
     manifest_df = pd.DataFrame(
         [
             {
@@ -89,7 +99,9 @@ def flatten_case(case_dir: Path, staged_files: list[StagedFile], batch_id: str, 
           SELECT
           {select_sql}
           {from_sql}
-        ) TO '{lake_dir}' (FORMAT PARQUET, PARTITION_BY (host, channel), OVERWRITE_OR_IGNORE true)
+        ) TO '{backend.copy_target(lake_location)}' (
+          FORMAT PARQUET, PARTITION_BY (host, channel), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
+        )
         """
     )
 

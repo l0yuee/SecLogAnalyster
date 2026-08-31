@@ -2,7 +2,7 @@
 
 **语言：[English](05_cli_reference.md) | 中文**
 
-**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | [2. 日志类型与模式](02_log_types_and_schema.zh-CN.md) | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | 5. 命令行参考 | [6. Python API](06_python_api.zh-CN.md) | [7. 常用查询](07_recipes.zh-CN.md) | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md)
+**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | [2. 日志类型与模式](02_log_types_and_schema.zh-CN.md) | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | 5. 命令行参考 | [6. Python API](06_python_api.zh-CN.md) | [7. 常用查询](07_recipes.zh-CN.md) | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md) | [10. 分布式部署](10_distributed_deployment.zh-CN.md)
 
 ---
 
@@ -31,7 +31,8 @@ seclogx case info incident42
 ## `seclogx ingest <case> --source PATH[:HOST] [--source ...]`
 
 在来源路径下一次性发现、分类并归一化所有支持的文件，导入到案例中：`.evtx`、计划任务定义、IIS/nginx/Apache/Tomcat
-访问日志，以及 Exchange CSV 日志。这是核心命令。
+访问日志、Exchange CSV 日志，以及 Linux syslog/`auth.log`、auditd 与 systemd
+journal 导出日志。这是核心命令。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
@@ -209,6 +210,22 @@ seclogx search incident42 web_error_logs --eq severity=error,SEVERE --out errors
 seclogx tasks incident42 --suspicious
 ```
 
+## `seclogx auth <case>`
+
+列出 `syslog` 中被识别为 SSH/sudo/PAM/账户管理事件的行（具体识别哪些内容见
+`Case.auth_events()` / [《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)）。这不是
+Sigma 规则——是对已导入 `syslog` 数据的启发式筛选，相当于
+`auth.log`/`secure` 版本的 `tasks --suspicious`。
+
+| 参数 | 含义 |
+|---|---|
+| `--out FILE.csv` | 导出完整结果 |
+
+```bash
+seclogx auth incident42
+seclogx auth incident42 --out auth_events.csv
+```
+
 ## `seclogx hunt <case>`
 
 对案例执行 Sigma 检测规则，报告匹配结果并附带 MITRE ATT&CK 标签。`logsource.category` 为
@@ -267,6 +284,42 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 
 # 特定时间窗口内所有主机的事件
 seclogx timeline incident42 --start 2026-01-14T00:00:00 --end 2026-01-14T06:00:00
+```
+
+## `seclogx worker`
+
+运行一个分布式模式的 worker：消费由 `seclogx ingest`/`seclogx hunt`
+放入队列的导入/狩猎任务（前提是设置了 `SECLOGX_BROKER_URL`）。完整的环境变量参考以及
+Docker Compose/Kubernetes 操作步骤见[《10.
+分布式部署》](10_distributed_deployment.zh-CN.md)——这是可选启用的功能，除非你配置了集群模式，否则不会有任何影响。
+
+| 选项 | 默认值 | 含义 |
+|---|---|---|
+| `--burst` | 关闭 | 只处理当前队列中已有的任务，然后立即退出，而不是无限期监听——适合测试/CI 场景。 |
+
+```bash
+export SECLOGX_BROKER_URL=redis://broker:6379/0
+seclogx worker
+```
+
+如果没有设置 `SECLOGX_BROKER_URL`，会立即报错退出——没有配置 broker 就没有可供消费的任务。
+
+## `seclogx cluster config`
+
+以 JSON 格式打印从环境变量（`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*`/`SECLOGX_BROKER_URL`）解析出的分布式模式配置。绝不会打印任何凭据——凭据本来就不会进入这份配置（见[《10.
+分布式部署》](10_distributed_deployment.zh-CN.md)）。
+
+```bash
+seclogx cluster config
+```
+
+## `seclogx cluster status`
+
+报告当前在线的 `seclogx worker` 进程数量以及所配置 broker
+上各队列的排队情况。如果没有设置 `SECLOGX_BROKER_URL`，会明确说明这一点并正常退出——此时导入/狩猎都在本地运行，并非分布式，因此没有集群可供报告。
+
+```bash
+seclogx cluster status
 ```
 
 下一步：[《6. Python API》](06_python_api.zh-CN.md)，对应的 Python / notebook 接口。

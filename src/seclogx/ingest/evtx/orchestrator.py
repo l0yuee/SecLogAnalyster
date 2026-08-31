@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+from ...distributed.config import ClusterConfig
+from ...distributed.queue import INGEST_QUEUE_NAME, get_job_queue
 from ...errors import NoSourcesFoundError
 from ..common import SourceSpec, StageStatus, now_iso
 from .discovery import discover_evtx_files
@@ -19,7 +20,9 @@ def run_ingest(
     workers: int | None = None,
     keep_raw: bool = False,
     keep_staging: bool = True,
+    cluster_config: ClusterConfig | None = None,
 ) -> IngestReport:
+    cluster_config = cluster_config or ClusterConfig.from_env()
     started_at = now_iso()
     batch_id = str(uuid.uuid4())
 
@@ -30,11 +33,14 @@ def run_ingest(
     staging_dir = case_dir / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    staged_files: list[StagedFile] = []
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(stage_file, d, staging_dir, keep_raw) for d in discovered]
-        for fut in as_completed(futures):
-            staged_files.append(fut.result())
+    # Distributed mode (cluster_config.is_distributed): one `stage_file`
+    # task per discovered .evtx file is enqueued for `seclogx worker`
+    # processes to pick up -- staging_dir must then be reachable from
+    # every worker (a shared/NFS mount), same as it's always been
+    # reachable from this coordinator process. Local mode (default):
+    # identical ProcessPoolExecutor behavior as before this module existed.
+    queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
+    staged_files: list[StagedFile] = queue.submit_all(stage_file, [(d, staging_dir, keep_raw) for d in discovered])
 
     # Deterministic ordering for reproducible reports/logs.
     staged_files.sort(key=lambda f: f.source_path)
@@ -44,7 +50,7 @@ def run_ingest(
     files_partial = sum(1 for f in staged_files if f.status == StageStatus.PARTIAL)
     files_failed = sum(1 for f in staged_files if f.status == StageStatus.FAILED)
 
-    records_flattened = flatten_case(case_dir, staged_files, batch_id, keep_raw=keep_raw)
+    records_flattened = flatten_case(case_dir, staged_files, batch_id, keep_raw=keep_raw, cluster_config=cluster_config)
 
     if not keep_staging:
         for f in staged_files:

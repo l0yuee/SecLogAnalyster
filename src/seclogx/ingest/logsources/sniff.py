@@ -11,6 +11,7 @@ silently skipping (see ingest/logsources/orchestrator.py).
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -23,6 +24,9 @@ KIND_WEB_ACCESS = "web_access"
 KIND_WEB_ERROR_NGINX = "web_error_nginx"
 KIND_WEB_ERROR_APACHE = "web_error_apache"
 KIND_WEB_ERROR_TOMCAT = "web_error_tomcat"
+KIND_SYSLOG = "syslog"
+KIND_AUDITD = "auditd"
+KIND_JOURNAL_EXPORT = "journal_export"
 
 WEB_ERROR_KINDS = {KIND_WEB_ERROR_NGINX: "nginx", KIND_WEB_ERROR_APACHE: "apache", KIND_WEB_ERROR_TOMCAT: "tomcat"}
 
@@ -32,8 +36,15 @@ _CLF_RE = re.compile(rb'^\S+ \S+ \S+ \[[^\]]+\] "[^"]*" \d{3} (?:\d+|-)')
 _NGINX_ERROR_RE = re.compile(rb"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \[(?:emerg|alert|crit|error|warn|notice|info|debug)\] \d+#\d+:")
 _APACHE_ERROR_RE = re.compile(rb"^\[\w{3} \w{3} [ \d]\d \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4}\] \[")
 _TOMCAT_ERROR_RE = re.compile(rb"^\d{2}-\w{3}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3} (?:SEVERE|WARNING|INFO|CONFIG|FINE|FINER|FINEST|ALL)\b")
+_AUDITD_RE = re.compile(rb"^type=\S+\s+msg=audit\(\d+\.\d+:\d+\):")
+_SYSLOG_5424_RE = re.compile(rb"^<\d{1,3}>\d\s")
+_SYSLOG_BSD_RE = re.compile(rb"^(?:<\d{1,3}>)?\w{3}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}\s\S+\s")
 
 _MESSAGE_TRACKING_FIELDS = {"message-id", "recipient-address"}
+# journald's "trusted", double-underscore-prefixed fields -- reliable,
+# format-unique signal for `journalctl -o json` export lines (as opposed
+# to any other line-delimited JSON log a source directory might contain).
+_JOURNAL_EXPORT_MARKERS = {"__REALTIME_TIMESTAMP", "__CURSOR"}
 
 
 def _peek(path: Path) -> bytes:
@@ -63,6 +74,15 @@ def classify_file(path: Path) -> str | None:
         if _TASK_XMLNS_RE.search(raw):
             return KIND_SCHEDULED_TASK
         return None
+
+    if stripped.startswith(b"{"):
+        first_line = stripped.splitlines()[0] if stripped.splitlines() else b""
+        try:
+            obj = json.loads(first_line)
+        except (ValueError, UnicodeDecodeError):
+            obj = None
+        if isinstance(obj, dict) and _JOURNAL_EXPORT_MARKERS <= obj.keys():
+            return KIND_JOURNAL_EXPORT
 
     # Binary-ish content (lots of NUL bytes) isn't one of our line-oriented formats.
     if raw.count(b"\x00") > len(raw) // 8:
@@ -121,6 +141,10 @@ def classify_file(path: Path) -> str | None:
             return KIND_WEB_ERROR_TOMCAT
         if _CLF_RE.match(encoded):
             return KIND_WEB_ACCESS
+        if _AUDITD_RE.match(encoded):
+            return KIND_AUDITD
+        if _SYSLOG_5424_RE.match(encoded) or _SYSLOG_BSD_RE.match(encoded):
+            return KIND_SYSLOG
 
     return None
 

@@ -12,17 +12,20 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import unquote
 
 import pandas as pd
 
 from .config import DEFAULT_CASE_ROOT
+from .distributed.config import ClusterConfig
+from .distributed.locking import get_case_lock
+from .distributed.storage import get_storage_backend
 from .errors import CaseAlreadyExistsError, CaseNotFoundError, NoSourcesFoundError
 from .detect import HuntResults, run_hunt
 from .ingest import run_ingest, run_aux_ingest
 from .ingest.common import parse_source_arg
 from .ingest.evtx.manifest import IngestReport
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
+from .ingest.logsources.parsers.syslog import extract_auth_events
 from .query import DEFAULT_CHUNKSIZE, CaseDB
 from .search import Match, conditions_from_dicts, discover_fields
 from .search import search as _search
@@ -31,33 +34,36 @@ from .search import search_to_csv as _search_to_csv
 from .timeline import build_timeline, build_timeline_chunks
 
 
-def _hosts_from_lake(case_dir: Path) -> set[str]:
+def _hosts_from_lake(case_dir: Path, cluster_config: ClusterConfig | None = None) -> set[str]:
     """Hosts present in the Parquet lake, read directly off the Hive
     `host=<value>` partition folder names (percent-decoded) -- covers every
     table (events, web_logs, scheduled_tasks, ...) without needing a DB
-    connection."""
+    connection. Goes through the configured StorageBackend so this works
+    whether the lake is local or on shared object storage (see
+    distributed/storage.py)."""
+    backend = get_storage_backend(cluster_config or ClusterConfig.from_env())
+    lake_location = backend.lake_location(case_dir)
     hosts: set[str] = set()
-    lake_dir = case_dir / "lake"
-    if not lake_dir.exists():
+    if not backend.exists(lake_location):
         return hosts
-    for table_dir in lake_dir.iterdir():
-        if not table_dir.is_dir():
-            continue
-        for p in table_dir.glob("host=*"):
-            if p.is_dir():
-                hosts.add(unquote(p.name[len("host=") :]))
+    for table_name in backend.table_dirs(lake_location):
+        table_location = backend.join(lake_location, table_name)
+        hosts.update(backend.host_partitions(table_location))
     return hosts
 
 
 class Case:
-    def __init__(self, name: str, case_dir: Path):
+    def __init__(self, name: str, case_dir: Path, cluster_config: ClusterConfig | None = None):
         self.name = name
         self.case_dir = Path(case_dir)
+        self.cluster_config = cluster_config or ClusterConfig.from_env()
         self._db: CaseDB | None = None
 
     # -- lifecycle --------------------------------------------------------
     @classmethod
-    def create(cls, name: str, case_root: Path = DEFAULT_CASE_ROOT) -> "Case":
+    def create(
+        cls, name: str, case_root: Path = DEFAULT_CASE_ROOT, cluster_config: ClusterConfig | None = None
+    ) -> "Case":
         case_dir = Path(case_root) / name
         if case_dir.exists():
             raise CaseAlreadyExistsError(f"case '{name}' already exists at {case_dir}")
@@ -70,14 +76,16 @@ class Case:
             "ingest_runs": [],
         }
         (case_dir / "case.json").write_text(json.dumps(meta, indent=2))
-        return cls(name, case_dir)
+        return cls(name, case_dir, cluster_config=cluster_config)
 
     @classmethod
-    def open(cls, name: str, case_root: Path = DEFAULT_CASE_ROOT) -> "Case":
+    def open(
+        cls, name: str, case_root: Path = DEFAULT_CASE_ROOT, cluster_config: ClusterConfig | None = None
+    ) -> "Case":
         case_dir = Path(case_root) / name
         if not (case_dir / "case.json").exists():
             raise CaseNotFoundError(f"case '{name}' not found under {case_root}")
-        return cls(name, case_dir)
+        return cls(name, case_dir, cluster_config=cluster_config)
 
     @classmethod
     def list_cases(cls, case_root: Path = DEFAULT_CASE_ROOT) -> list[str]:
@@ -114,6 +122,7 @@ class Case:
                 workers=workers,
                 keep_raw=keep_raw,
                 keep_staging=keep_staging,
+                cluster_config=self.cluster_config,
             )
         except NoSourcesFoundError:
             # No .evtx under these sources -- not fatal on its own, the aux
@@ -133,34 +142,39 @@ class Case:
                 records_flattened=0,
             )
 
-        report.aux = run_aux_ingest(self.case_dir, specs, workers=workers)
+        report.aux = run_aux_ingest(self.case_dir, specs, workers=workers, cluster_config=self.cluster_config)
 
         if report.files_discovered == 0 and report.aux.files_discovered == 0:
             raise NoSourcesFoundError(
                 "no supported log files (.evtx, Scheduled Task definitions, IIS/web access logs, "
-                "Exchange CSV logs) found under the given source path(s)"
+                "Exchange CSV logs, syslog/auth logs, auditd logs, systemd journal export) "
+                "found under the given source path(s)"
             )
 
-        meta = self._load_meta()
-        meta.setdefault("ingest_runs", []).append(
-            {
-                "batch_id": report.batch_id,
-                "started_at": report.started_at,
-                "finished_at": report.finished_at,
-                "files_discovered": report.files_discovered,
-                "files_ok": report.files_ok,
-                "files_partial": report.files_partial,
-                "files_failed": report.files_failed,
-                "records_flattened": report.records_flattened,
-                "aux_files_discovered": report.aux.files_discovered,
-                "aux_rows_written": report.aux.rows_written,
-            }
-        )
-        hosts = set(meta.get("hosts", []))
-        hosts.update(f.host for f in report.staged_files)
-        hosts.update(_hosts_from_lake(self.case_dir))
-        meta["hosts"] = sorted(hosts)
-        self._save_meta(meta)
+        # Locked so two concurrent `ingest()` runs against the same case
+        # (two analysts, or two distributed coordinators) can't clobber
+        # each other's ingest_runs/hosts bookkeeping -- see distributed/locking.py.
+        with get_case_lock(self.case_dir, self.cluster_config):
+            meta = self._load_meta()
+            meta.setdefault("ingest_runs", []).append(
+                {
+                    "batch_id": report.batch_id,
+                    "started_at": report.started_at,
+                    "finished_at": report.finished_at,
+                    "files_discovered": report.files_discovered,
+                    "files_ok": report.files_ok,
+                    "files_partial": report.files_partial,
+                    "files_failed": report.files_failed,
+                    "records_flattened": report.records_flattened,
+                    "aux_files_discovered": report.aux.files_discovered,
+                    "aux_rows_written": report.aux.rows_written,
+                }
+            )
+            hosts = set(meta.get("hosts", []))
+            hosts.update(f.host for f in report.staged_files)
+            hosts.update(_hosts_from_lake(self.case_dir, self.cluster_config))
+            meta["hosts"] = sorted(hosts)
+            self._save_meta(meta)
 
         # Reset cached DB handle so a fresh view picks up newly written data.
         if self._db is not None:
@@ -173,7 +187,7 @@ class Case:
     @property
     def db(self) -> CaseDB:
         if self._db is None:
-            self._db = CaseDB(self.case_dir)
+            self._db = CaseDB(self.case_dir, cluster_config=self.cluster_config)
         return self._db
 
     def query(self, sql: str) -> pd.DataFrame:
@@ -335,6 +349,43 @@ class Case:
     ) -> Iterator[pd.DataFrame]:
         return self._log_type_chunks("exchange_logs", log_type, chunksize)
 
+    def syslog(self) -> pd.DataFrame:
+        """Generic syslog (BSD/RFC-3164 and RFC 5424) -- `/var/log/syslog`,
+        `messages`, `kern.log`, `auth.log`/`secure`, and everything else
+        sharing that line format. See `auth_events()` for a curated,
+        structured view over the SSH/sudo/PAM subset of this table."""
+        return self.db.table("syslog", order_by="time_created")
+
+    def syslog_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self.db.table_chunks("syslog", order_by="time_created", chunksize=chunksize)
+
+    def auditd_logs(self) -> pd.DataFrame:
+        """Linux Audit Framework (auditd) records, one row per line. Use
+        `audit_serial` to correlate related lines (e.g. SYSCALL + EXECVE +
+        CWD) belonging to the same audit event -- not stitched together
+        automatically, see docs/known_limitations.md."""
+        return self.db.table("auditd_logs", order_by="time_created")
+
+    def auditd_logs_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self.db.table_chunks("auditd_logs", order_by="time_created", chunksize=chunksize)
+
+    def journal_logs(self) -> pd.DataFrame:
+        """systemd journal export format (`journalctl -o json`) entries."""
+        return self.db.table("journal_logs", order_by="time_created")
+
+    def journal_logs_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self.db.table_chunks("journal_logs", order_by="time_created", chunksize=chunksize)
+
+    def auth_events(self) -> pd.DataFrame:
+        """Derived heuristic triage over `syslog`: recognizes SSH
+        (accepted/failed/invalid-user/disconnected), sudo command
+        execution, PAM session open/close, and account-management
+        (useradd/userdel/usermod/...) message shapes, structuring them
+        into `event_type`/`user`/`source_ip`/... columns. Not a separate
+        ingest table -- computed from already-ingested `syslog` rows, the
+        same way `suspicious_tasks()` derives from `scheduled_tasks`."""
+        return extract_auth_events(self.syslog())
+
     def _log_type_table(self, table: str, log_type: str | None) -> pd.DataFrame:
         if log_type is None:
             return self.db.table(table, order_by="time_created")
@@ -374,7 +425,7 @@ class Case:
 
     # -- detection ------------------------------------------------------------
     def hunt(self, rules_dir: Path | None = None, min_level: str | None = None) -> HuntResults:
-        return run_hunt(self.case_dir, rules_dir=rules_dir, min_level=min_level)
+        return run_hunt(self.case_dir, rules_dir=rules_dir, min_level=min_level, cluster_config=self.cluster_config)
 
     # -- timeline ---------------------------------------------------------------
     def timeline(

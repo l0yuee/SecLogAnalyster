@@ -2,7 +2,7 @@
 
 **Language: English | [中文](01_getting_started.zh-CN.md)**
 
-**[Guide index](../index.md)** -- 01. Getting started | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md)
+**[Guide index](../index.md)** -- 01. Getting started | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md) | [10. Distributed deployment](10_distributed_deployment.md)
 
 ---
 
@@ -27,12 +27,15 @@ seclogx exists to make the first hours of triage fast:
 - It also discovers and normalizes, in the same pass: on-disk **Scheduled
   Task** definitions (a persistence artifact), **IIS/nginx/Apache/Tomcat**
   access logs *and* error/diagnostic logs (both major log categories a
-  web application produces, including IIS HTTP.sys/HTTPERR), and
+  web application produces, including IIS HTTP.sys/HTTPERR),
   **Exchange** CSV logs (Message Tracking gets first-class columns;
-  every other Exchange log type lands in a nothing-dropped catchall).
-  Each format is detected by content, not filename, so renamed/relocated
-  evidence still works. See [02. Log types & schema](02_log_types_and_schema.md)
-  for the full six-table picture.
+  every other Exchange log type lands in a nothing-dropped catchall), and
+  **Linux** syslog (BSD/RFC-3164 and RFC 5424 -- `auth.log`/`secure`
+  content included), the Linux Audit Framework (auditd), and systemd
+  journal export logs. Each format is detected by content, not filename,
+  so renamed/relocated evidence still works. See
+  [02. Log types & schema](02_log_types_and_schema.md) for the full
+  nine-table picture.
 - You get a `pandas.DataFrame`-native interface throughout (CLI
   tables/CSV, or a Python `Case` object for a notebook) plus built-in
   Sigma-rule threat hunting with MITRE ATT&CK tagging, covering both
@@ -49,12 +52,17 @@ seclogx exists to make the first hours of triage fast:
   risking a crash (see [03. Querying & search](03_querying_and_search.md)
   and [08. Performance & scale](08_performance_and_scale.md)).
 
-It's designed for one workstation, not a cluster -- no distributed setup,
-no external services. Within that, realistic scale varies by log family:
-EVTX cases are typically well under 100GB (comfortable for DuckDB +
-Parquet's lazy, out-of-core execution outright), while web access/error
+It's designed for one workstation by default -- no distributed setup, no
+external services required. Within that, realistic scale varies by log
+family: EVTX cases are typically well under 100GB (comfortable for DuckDB
++ Parquet's lazy, out-of-core execution outright), while web access/error
 logs can realistically reach terabyte scale, which is what the
-bounded-memory delivery above is specifically for.
+bounded-memory delivery above is specifically for. An opt-in, purely
+environment-variable-activated distributed mode also exists for large
+ingest batches, large Sigma rule sets, or multiple analysts sharing one
+case concurrently -- see
+[10. Distributed deployment](10_distributed_deployment.md); it doesn't
+change anything described above unless you turn it on.
 
 ## Installation
 
@@ -95,7 +103,15 @@ cases/<name>/
     scheduled_tasks/host=<h>/*.parquet                           # Task Scheduler definitions
     exchange_message_tracking/host=<h>/*.parquet                 # Exchange mail flow
     exchange_logs/host=<h>/log_type=<t>/*.parquet                # other Exchange CSV logs
+    syslog/host=<h>/*.parquet                                    # generic syslog, incl. auth.log/secure
+    auditd_logs/host=<h>/record_type=<r>/*.parquet                # Linux Audit Framework
+    journal_logs/host=<h>/*.parquet                              # systemd journal export
 ```
+
+`lake/` can live on S3-compatible object storage instead of local disk
+(`SECLOGX_STORAGE_BACKEND=s3` -- opt-in, see
+[10. Distributed deployment](10_distributed_deployment.md)); `case.json`,
+`staging/`, and `logs/` always stay local/NFS, in every mode.
 
 You create a case once (`seclogx case init`), then `ingest` into it as
 many times as you like -- from different source paths, different hosts,
@@ -120,7 +136,7 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 Where to go next:
 
 - **[02. Log types & schema](02_log_types_and_schema.md)** -- what each of
-  the six tables holds and what to look for in it.
+  the nine tables holds and what to look for in it.
 - **[03. Querying & search](03_querying_and_search.md)** -- SQL, the
   no-SQL `search()` interface, and bounded-memory delivery.
 - **[04. Threat hunting](04_threat_hunting.md)** -- Sigma rules and ATT&CK

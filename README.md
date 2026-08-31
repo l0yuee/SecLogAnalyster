@@ -19,6 +19,12 @@ workspace instead of raw XML and inconsistent text logs.
   native error-log format, unified into a second table).
 - **Exchange logs**: Message Tracking (mail flow, first-class columns) plus
   every other Exchange CSV log type via a generic, nothing-dropped catchall.
+- **Linux system logs**: generic syslog (BSD/RFC-3164 and RFC 5424 --
+  `/var/log/syslog`, `messages`, `kern.log`, `auth.log`/`secure`, ...), the
+  Linux Audit Framework (`auditd`), and systemd journal export
+  (`journalctl -o json`). `auth.log`/`secure` content is recognized within
+  `syslog` (not a separate table) -- `seclogx auth` / `Case.auth_events()`
+  derives a curated SSH/sudo/PAM/account-management view from it.
 - **Threat hunting built in**: Sigma rules (a curated bundled starter set,
   or your own) compiled to DuckDB SQL and run against the case, with
   MITRE ATT&CK tags surfaced on every match -- covers Windows Event Log
@@ -32,9 +38,10 @@ workspace instead of raw XML and inconsistent text logs.
   actually has in this case's real data -- columns and JSON-catchall keys
   alike -- with a popularity count and a real example value.
 - **pandas-native**: every log family -- events, web access/error logs,
-  Scheduled Tasks, Exchange logs -- is reachable as a `pandas.DataFrame`
-  through a named accessor (`c.web_logs()`, `c.scheduled_tasks()`, ...),
-  the same first-class treatment `events` gets, ready for a notebook.
+  Scheduled Tasks, Exchange logs, syslog, auditd, systemd journal -- is
+  reachable as a `pandas.DataFrame` through a named accessor
+  (`c.web_logs()`, `c.scheduled_tasks()`, `c.syslog()`, ...), the same
+  first-class treatment `events` gets, ready for a notebook.
 - **Bounded-memory analysis for every log family.** Web access/error logs
   especially can reach terabyte scale -- every DataFrame accessor has a
   `_chunks()` sibling (`c.web_logs_chunks()`, `c.query_chunks()`,
@@ -46,7 +53,13 @@ workspace instead of raw XML and inconsistent text logs.
   fetching, refusing (with the chunked/streamed alternative named in the
   error) rather than risking an out-of-memory crash.
 - **Handles realistic case volumes on a single workstation**, lazily --
-  DuckDB + Parquet, no cluster required.
+  DuckDB + Parquet, no cluster required. An opt-in distributed mode is
+  also available (job-queue-based ingest/hunt fan-out, S3-backed shared
+  storage) for large ingest batches, large Sigma rule sets, or multiple
+  analysts sharing one case -- purely environment-variable-activated, zero
+  effect unless configured. See
+  [10. Distributed deployment](docs/guides/10_distributed_deployment.md)
+  and `deploy/`.
 - **Never silently drops data.** Every parse error, partial file read,
   unrecognized log file, and unsupported Sigma rule is reported
   explicitly, not swallowed -- the direct answer to "importing into ELK
@@ -75,7 +88,8 @@ install) so the bundled Sigma rules under `data/` are found.
 ```bash
 # Create a case and ingest from one or more forensic acquisition paths --
 # .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat access AND
-# error logs, and Exchange CSV logs are all discovered and classified
+# error logs, Exchange CSV logs, and Linux syslog/auth.log, auditd, and
+# systemd journal export logs are all discovered and classified
 # automatically in the same pass. Each --source can carry an explicit
 # host label (PATH:HOST); if omitted, the source directory's name is used.
 seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
@@ -83,8 +97,9 @@ seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01
 # See what's in it
 seclogx summary incident42
 seclogx channels incident42
-seclogx sources incident42        # row count per table: events, web_logs, scheduled_tasks, ...
+seclogx sources incident42        # row count per table: events, web_logs, scheduled_tasks, syslog, ...
 seclogx tasks incident42 --suspicious
+seclogx auth incident42           # curated SSH/sudo/PAM view over syslog
 
 # Ad hoc SQL (the `events` table is the normalized, Hive-partitioned lake)
 seclogx query incident42 "
@@ -129,7 +144,11 @@ c.web_error_logs(log_type="apache")      # error logs: nginx/Apache/Tomcat/IIS H
 c.scheduled_tasks()
 c.exchange_message_tracking()
 c.exchange_logs(log_type="HttpProxy")
+c.syslog()                        # generic syslog, incl. auth.log/secure content
+c.auditd_logs()                   # Linux Audit Framework
+c.journal_logs()                  # systemd journal export
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
+c.auth_events()                   # heuristic SSH/sudo/PAM/account triage over syslog
 c.db.table("web_logs")            # generic escape hatch: any table this case has, by name
 
 # Not sure what fields a table has, or which one to search on? fields()
@@ -165,14 +184,17 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
-| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs) |
+| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs) |
 | `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |
 | `seclogx fields <case> <table>` | List every field a table actually has in this case's real data (columns + JSON-catchall keys), with a popularity count and example value |
 | `seclogx search <case> <table> [--eq/--contains/--regex FIELD=VALUE]...` | Query any table without writing SQL: exact/fuzzy/regex conditions, case-insensitive by default, combined with AND (or `--match-any` for OR) |
 | `seclogx tasks <case> [--suspicious]` | List ingested Scheduled Task definitions, optionally filtered by a built-in heuristic |
+| `seclogx auth <case>` | List SSH/sudo/PAM/account-management events recognized in `syslog` (a heuristic view, not Sigma) |
 | `seclogx hunt <case> [--rules DIR] [--min-level LEVEL]` | Run Sigma rules, report matches + ATT&CK tags |
 | `seclogx rules validate [--rules DIR]` | Check which rules convert vs are unsupported |
 | `seclogx timeline <case> [--start/--end/--host/--channel/--event-id]` | Cross-host, filterable timeline over `events` |
+| `seclogx worker` | Distributed-mode worker (opt-in, see below) |
+| `seclogx cluster status/config` | Distributed-mode status/configuration |
 
 Run any command with `--help` for full options.
 
@@ -182,6 +204,11 @@ Run any command with `--help` for full options.
 pip install -e ".[dev]"
 pytest
 ```
+
+`pip install -e ".[cluster]"` adds `redis`/`rq`/`boto3`, needed only for
+distributed mode (`seclogx worker`, `seclogx cluster status`,
+`SECLOGX_STORAGE_BACKEND=s3`) -- see
+[10. Distributed deployment](docs/guides/10_distributed_deployment.md).
 
 ## License
 

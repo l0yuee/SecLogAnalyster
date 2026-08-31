@@ -2,12 +2,12 @@
 
 **Language: English | [中文](02_log_types_and_schema.zh-CN.md)**
 
-**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | 02. Log types & schema | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md)
+**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | 02. Log types & schema | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md) | [10. Distributed deployment](10_distributed_deployment.md)
 
 ---
 
 This guide answers "what does each table hold, and what should I actually
-look at first" for all six log families seclogx normalizes. For the exact
+look at first" for all nine log families seclogx normalizes. For the exact
 column-by-column reference (types, nullability, partition keys), see
 `docs/schema.md`; for how each format is ingested, see `docs/architecture.md`.
 
@@ -60,7 +60,7 @@ If you don't know the exact field name for something, `CaseDB.search()`
 search across it -- see [07. Recipes](07_recipes.md) -- or read on for
 `seclogx fields`, which lists real field names directly from your data.
 
-## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`
+## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`
 
 Windows Event Log isn't the only artifact `ingest` normalizes. Each of
 these is fundamentally a different shape, so each gets its own table
@@ -77,6 +77,9 @@ via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md)
 | `scheduled_tasks` | On-disk Task Scheduler task definitions (`System32\Tasks\**`) -- a persistence artifact, distinct from the Task Scheduler *event log* (already in `events`) | `task_path`, `author`, `enabled`, `hidden`, `actions` (JSON), `triggers` (JSON) |
 | `exchange_message_tracking` | Exchange mail flow (who sent what to whom) | `sender_address`, `recipient_address`, `message_subject`, `event_id` (Exchange's own, not a Windows Event ID) |
 | `exchange_logs` | Every other Exchange CSV log type (HttpProxy, ActiveSync, EWS, ...), fields preserved verbatim | `log_type`, `fields` (JSON, query with `fields ->> 'field-name'`) |
+| `syslog` | Generic BSD/RFC-3164 and RFC 5424 syslog: `/var/log/syslog`, `messages`, `kern.log`, `auth.log`/`secure`, etc., unified | `app_name`, `hostname`, `facility`, `severity`, `message`, `structured_data` (JSON, RFC5424 only) |
+| `auditd_logs` | Linux Audit Framework (`/var/log/audit/audit.log`), one row per line | `record_type`, `audit_serial`, `syscall`, `exe`, `comm`, `auid`, `key`, `fields` (JSON) |
+| `journal_logs` | systemd journal export format (`journalctl -o json`) | `unit`, `syslog_identifier`, `priority`, `comm`, `exe`, `message`, `fields` (JSON) |
 
 A few things worth knowing before you query these:
 
@@ -105,6 +108,24 @@ A few things worth knowing before you query these:
   columns**; every other Exchange log type (there are over a dozen)
   lands in `exchange_logs` with all fields preserved in `fields`, still
   fully queryable, just not promoted to real columns.
+- **`auth.log`/`secure` are not their own table or format** -- they're
+  `syslog`-format lines like any other, just with recognizable program
+  names (`sshd`, `sudo`, `su`, `useradd`, ...) in them. `Case.auth_events()`
+  / `seclogx auth` derives a curated, structured view (SSH accept/fail,
+  sudo commands, PAM session open/close, account management) from
+  `syslog` rows already ingested -- not a separate ingest table, the same
+  pattern `suspicious_tasks()` uses over `scheduled_tasks`.
+- **`syslog.facility`/`severity` are NULL unless the line has a `<PRI>`
+  prefix** -- the common rsyslog default file template omits it entirely,
+  so this is a property of the log format, not a parsing gap.
+- **`auditd_logs.syscall` is the raw number, not a resolved name** -- the
+  Linux syscall table is architecture-dependent. A real audit event is
+  often several related lines (SYSCALL + EXECVE + CWD + ...) sharing one
+  `audit_serial`; these aren't stitched together automatically -- filter
+  on `audit_serial` yourself to see them all.
+- **`journal_logs` parses the journal *export* format** (`journalctl -o
+  json`), not the binary journal itself (`/var/log/journal/**`), which
+  isn't portable across systems and isn't ingested.
 - See [07. Recipes](07_recipes.md) for recipes, and `docs/known_limitations.md`
   for the full list of scope decisions.
 
@@ -128,6 +149,9 @@ gets on top of that.
 | Scheduled Tasks | `scheduled_tasks` | `tasks [--suspicious]` | `scheduled_tasks()` / `scheduled_tasks_chunks()`, `suspicious_tasks()` (heuristic) | No -- use `suspicious_tasks()` / query directly |
 | Exchange Message Tracking (mail flow) | `exchange_message_tracking` | none -- use `table exchange_message_tracking` / `query` | `exchange_message_tracking()` / `exchange_message_tracking_chunks()` | No -- query directly |
 | Other Exchange logs (HttpProxy, EWS, EAS, ...) | `exchange_logs` | none -- use `table exchange_logs` / `query` | `exchange_logs(log_type=)` / `exchange_logs_chunks(log_type=)` | No -- query directly |
+| Linux syslog (incl. `auth.log`/`secure`) | `syslog` | `auth` (curated SSH/sudo/PAM view) | `syslog()` / `syslog_chunks()`, `auth_events()` (heuristic) | No -- use `auth_events()` / query directly |
+| Linux Audit Framework (auditd) | `auditd_logs` | none -- use `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | No -- query directly |
+| systemd journal export | `journal_logs` | none -- use `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | No -- query directly |
 
 `seclogx sources <case>` isn't table-specific -- it's the one command to
 run first, before any of the above: a row count per table so you know
@@ -159,6 +183,19 @@ What to actually look for in each, at a glance (full recipes in
   ProxyShell-style attacks) where the relevant activity is in
   HttpProxy/OWA/ECP access patterns rather than mail flow -- sweep
   `fields` by content when you don't know the exact schema.
+- **`syslog`** -- start with `auth_events()` for SSH/sudo/PAM/account
+  triage (failed logins by source IP, invalid-user probing, sudo command
+  history for a user); query `syslog` directly by `app_name`/`facility`
+  for anything else (cron activity, kernel messages, mail transport).
+- **`auditd_logs`** -- process execution and privilege-escalation
+  auditing on hosts with audit rules configured: sweep by `key` (the
+  triggering rule's tag) or `exe`/`comm`, then pull every line sharing
+  that row's `audit_serial` to see the full SYSCALL/EXECVE/CWD/PATH
+  picture for one event.
+- **`journal_logs`** -- the systemd-native equivalent of `syslog` on
+  hosts where the analyst exported `journalctl -o json` instead of (or in
+  addition to) a forwarded syslog file; sweep by `unit`/`syslog_identifier`
+  to see everything one service logged.
 
 ## Which fields can I search on?
 
@@ -220,6 +257,9 @@ vary):
 | `scheduled_tasks` | `author`, `hidden`, `enabled`, `actions`, `triggers`, `task_path`, `principal_user_id` |
 | `exchange_message_tracking` | `sender_address`, `recipient_address`, `message_subject`, `recipient_status`, `event_id` |
 | `exchange_logs` | `log_type` first (to see what kind of Exchange log you actually have), then `seclogx fields` for that log type's real field names |
+| `syslog` | `app_name`, `message`, `hostname`, `facility`/`severity` (NULL unless the source has `<PRI>`) |
+| `auditd_logs` | `record_type`, `key`, `exe`, `comm`, `auid`, `audit_serial` (to correlate related lines) |
+| `journal_logs` | `unit`, `syslog_identifier`, `message`, `priority` |
 
 For `events` specifically, note that which fields exist depends on the
 *channel* -- `Image`/`CommandLine` are Sysmon fields and won't appear on

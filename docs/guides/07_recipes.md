@@ -2,7 +2,7 @@
 
 **Language: English | [中文](07_recipes.zh-CN.md)**
 
-**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | 07. Recipes | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md)
+**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | 07. Recipes | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md) | [10. Distributed deployment](10_distributed_deployment.md)
 
 ---
 
@@ -175,6 +175,59 @@ hidden, or invoking a LOLBin -- the same heuristic `--suspicious` uses:**
 from seclogx import Case
 c = Case.open("incident42")
 c.suspicious_tasks()[["host", "task_path", "author", "hidden", "actions"]]
+```
+
+**Failed SSH logins by source IP, across every host (spot a brute-force
+source), then pivot to that IP's successful logins if any:**
+
+```python
+from seclogx import Case
+c = Case.open("incident42")
+auth = c.auth_events()
+auth[auth["event_type"] == "ssh_failed"]["source_ip"].value_counts()
+auth[(auth["event_type"] == "ssh_accepted") & (auth["source_ip"] == "203.0.113.7")]
+```
+
+Or with SQL directly against `syslog` (useful when you also want the raw
+line, or a host `auth_events()` hasn't been run against yet):
+
+```sql
+SELECT host, time_created, message
+FROM syslog
+WHERE app_name = 'sshd' AND message ILIKE 'Failed password%'
+ORDER BY time_created
+```
+
+**sudo command history for a specific user:**
+
+```python
+auth = c.auth_events()
+auth[(auth["event_type"] == "sudo_command") & (auth["user"] == "alice")][["time_created", "host", "command"]]
+```
+
+**auditd: every line belonging to one flagged rule (`key`), then pull the
+full SYSCALL/EXECVE/CWD/PATH picture for one specific event via its
+`audit_serial`:**
+
+```sql
+SELECT time_created, host, record_type, exe, comm, pid, ppid
+FROM auditd_logs
+WHERE key = 'privilege_escalation'
+ORDER BY time_created
+
+-- then, for one event of interest:
+SELECT * FROM auditd_logs WHERE audit_serial = 12345 ORDER BY record_type
+```
+
+**systemd journal: everything one unit logged at warning severity or
+above, when the analyst exported `journalctl -o json` instead of a
+forwarded syslog file:**
+
+```sql
+SELECT time_created, unit, priority, message
+FROM journal_logs
+WHERE unit = 'sshd.service' AND CAST(priority AS INTEGER) <= 4
+ORDER BY time_created
 ```
 
 Next: [08. Performance & scale](08_performance_and_scale.md) for how

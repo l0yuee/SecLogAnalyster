@@ -2,11 +2,11 @@
 
 **语言：[English](02_log_types_and_schema.md) | 中文**
 
-**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | 2. 日志类型与模式 | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | [5. 命令行参考](05_cli_reference.zh-CN.md) | [6. Python API](06_python_api.zh-CN.md) | [7. 常用查询](07_recipes.zh-CN.md) | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md)
+**[指南索引](../index.zh-CN.md)** -- [1. 快速上手](01_getting_started.zh-CN.md) | 2. 日志类型与模式 | [3. 查询与搜索](03_querying_and_search.zh-CN.md) | [4. 威胁狩猎](04_threat_hunting.zh-CN.md) | [5. 命令行参考](05_cli_reference.zh-CN.md) | [6. Python API](06_python_api.zh-CN.md) | [7. 常用查询](07_recipes.zh-CN.md) | [8. 性能与规模](08_performance_and_scale.zh-CN.md) | [9. 常见问题与已知限制](09_faq_and_limitations.zh-CN.md) | [10. 分布式部署](10_distributed_deployment.zh-CN.md)
 
 ---
 
-本指南回答的问题是：seclogx 归一化的六大日志家族里，每张表分别存放什么，以及应该先看什么。逐列的精确参考（类型、可空性、分区键）见
+本指南回答的问题是：seclogx 归一化的九大日志家族里，每张表分别存放什么，以及应该先看什么。逐列的精确参考（类型、可空性、分区键）见
 `docs/schema.md`；每种格式具体是怎么导入的见 `docs/architecture.md`。
 
 ## 归一化事件模式（Normalized event schema）
@@ -50,7 +50,7 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 `seclogx query ... event_data::VARCHAR ILIKE '%...%'` 对其做全文检索（见[《7. 常用查询》](07_recipes.zh-CN.md)），或继续往下看
 `seclogx fields`——它能直接从你的数据里列出真实字段名。
 
-## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`
+## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`
 
 Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每一类数据的形态都与事件日志本质不同，因此各自拥有独立的表，而不是硬塞进
 `events` 里——完整列参考见 `docs/schema.md`。其中每一张表也都有对应的 `Case`
@@ -64,6 +64,9 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 | `scheduled_tasks` | 磁盘上的计划任务定义（`System32\Tasks\**`）——一种持久化痕迹，区别于计划任务的*事件日志*（已在 `events` 中覆盖） | `task_path`、`author`、`enabled`、`hidden`、`actions`（JSON）、`triggers`（JSON） |
 | `exchange_message_tracking` | Exchange 邮件流转记录（谁给谁发了什么） | `sender_address`、`recipient_address`、`message_subject`、`event_id`（Exchange 自身的事件标识，**不是** Windows 事件 ID） |
 | `exchange_logs` | 其他所有 Exchange CSV 日志类型（HttpProxy、ActiveSync、EWS 等），字段原样保留 | `log_type`、`fields`（JSON，用 `fields ->> 'field-name'` 查询） |
+| `syslog` | 通用 BSD/RFC-3164 与 RFC 5424 syslog：`/var/log/syslog`、`messages`、`kern.log`、`auth.log`/`secure` 等，统一存放 | `app_name`、`hostname`、`facility`、`severity`、`message`、`structured_data`（JSON，仅 RFC5424） |
+| `auditd_logs` | Linux 审计框架（`/var/log/audit/audit.log`），每行一条记录 | `record_type`、`audit_serial`、`syscall`、`exe`、`comm`、`auid`、`key`、`fields`（JSON） |
+| `journal_logs` | systemd journal 导出格式（`journalctl -o json`） | `unit`、`syslog_identifier`、`priority`、`comm`、`exe`、`message`、`fields`（JSON） |
 
 在查询这些表之前，有几点需要了解：
 
@@ -78,6 +81,20 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   中的原始未结构化标准输出，会导致这些行被报告为解析错误，而不是被错误解析）。
 - **Exchange 支持范围以邮件跟踪日志为一等列**；其余十余种 Exchange 日志类型都进入
   `exchange_logs`，所有字段都保存在 `fields` 中，虽未提升为真正的列，但依然完全可查询。
+- **`auth.log`/`secure` 并不是独立的表或格式**——它们只是 `syslog`
+  格式的行，只是恰好包含 `sshd`、`sudo`、`su`、`useradd`
+  等可识别的程序名。`Case.auth_events()` / `seclogx auth`
+  会从已导入的 `syslog` 行中提炼出一份结构化的、经过筛选的视图（SSH
+  成功/失败、sudo 命令、PAM 会话开启/关闭、账户管理）——它不是一张独立的导入表，采用的与
+  `suspicious_tasks()` 从 `scheduled_tasks` 派生的方式相同。
+- **`syslog.facility`/`severity` 在没有 `<PRI>` 前缀时为 NULL**——rsyslog
+  常见的默认文件模板根本不写入这个前缀，这是日志格式本身的特性，不是解析缺陷。
+- **`auditd_logs.syscall` 是原始编号，未解析为名称**——Linux
+  系统调用表与体系结构相关。一个真实的审计事件往往由多行相关记录组成（SYSCALL +
+  EXECVE + CWD + ...），它们共享同一个 `audit_serial`；这些行不会自动拼接在一起——按
+  `audit_serial` 自行筛选即可看到完整全貌。
+- **`journal_logs` 解析的是 journal *导出*格式**（`journalctl -o
+  json`），而不是二进制 journal 本身（`/var/log/journal/**`）——后者不具备可移植性，未被导入。
 - 常用查询见[《7. 常用查询》](07_recipes.zh-CN.md)，完整的取舍决定见 `docs/known_limitations.md`。
 
 ## 速查表：如何分析每一类日志
@@ -96,6 +113,9 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 | 计划任务 | `scheduled_tasks` | `tasks [--suspicious]` | `scheduled_tasks()` / `scheduled_tasks_chunks()`，`suspicious_tasks()`（启发式规则） | 不支持——用 `suspicious_tasks()` 或直接查询 |
 | Exchange 邮件跟踪（邮件流转） | `exchange_message_tracking` | 无——用 `table exchange_message_tracking` / `query` | `exchange_message_tracking()` / `exchange_message_tracking_chunks()` | 不支持——直接查询 |
 | 其他 Exchange 日志（HttpProxy、EWS、EAS 等） | `exchange_logs` | 无——用 `table exchange_logs` / `query` | `exchange_logs(log_type=)` / `exchange_logs_chunks(log_type=)` | 不支持——直接查询 |
+| Linux syslog（含 `auth.log`/`secure`） | `syslog` | `auth`（经过筛选的 SSH/sudo/PAM 视图） | `syslog()` / `syslog_chunks()`，`auth_events()`（启发式） | 不支持——用 `auth_events()` 或直接查询 |
+| Linux 审计框架（auditd） | `auditd_logs` | 无——用 `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | 不支持——直接查询 |
+| systemd journal 导出 | `journal_logs` | 无——用 `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | 不支持——直接查询 |
 
 `seclogx sources <case>`并不针对某一张具体的表——它是在使用上述任何一种接口之前，最值得先运行的一个命令：给出每张表的行数统计，让你在决定具体查哪张表之前，先了解案例里实际有什么。
 
@@ -115,6 +135,16 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 - **`exchange_logs`**——Exchange 基于 HTTP 的入侵（例如 ProxyShell 类攻击），此时相关活动体现在
   HttpProxy/OWA/ECP 的访问模式中，而不是邮件流转记录里——在不清楚具体字段结构时，可按内容对
   `fields` 做全文排查。
+- **`syslog`**——先用 `auth_events()` 排查 SSH/sudo/PAM/账户相关活动（按来源
+  IP 统计的失败登录、无效用户探测、某个用户的 sudo 命令历史）；其他内容（cron
+  活动、内核消息、邮件传输）直接按 `app_name`/`facility` 查询 `syslog`。
+- **`auditd_logs`**——在配置了审计规则的主机上排查进程执行与提权：按 `key`
+  （触发规则的标签）或 `exe`/`comm` 排查，再取出与该行共享同一个
+  `audit_serial` 的所有记录，拼出一次事件完整的 SYSCALL/EXECVE/CWD/PATH
+  全貌。
+- **`journal_logs`**——在分析人员导出了 `journalctl -o json`（而非仅有转发的
+  syslog 文件，或与之并存）的主机上，这是 `syslog` 的 systemd 原生等价物；按
+  `unit`/`syslog_identifier` 排查，可以看到某个服务记录的全部内容。
 
 ## 我能查询哪些字段？
 
@@ -166,6 +196,9 @@ c.fields("web_logs")   # -> status、uri_stem、client_ip 等（真实列）
 | `scheduled_tasks` | `author`、`hidden`、`enabled`、`actions`、`triggers`、`task_path`、`principal_user_id` |
 | `exchange_message_tracking` | `sender_address`、`recipient_address`、`message_subject`、`recipient_status`、`event_id` |
 | `exchange_logs` | 先看 `log_type`（弄清楚这具体是哪一种 Exchange 日志），再用 `seclogx fields` 查该日志类型的真实字段名 |
+| `syslog` | `app_name`、`message`、`hostname`、`facility`/`severity`（源日志没有 `<PRI>` 时为 NULL） |
+| `auditd_logs` | `record_type`、`key`、`exe`、`comm`、`auid`、`audit_serial`（用于关联相关记录） |
+| `journal_logs` | `unit`、`syslog_identifier`、`message`、`priority` |
 
 特别是对 `events` 而言，注意有哪些字段存在取决于具体的*通道（channel）*——`Image`/`CommandLine`
 是 Sysmon 的字段，不会出现在 Security 通道的登录事件里，反过来

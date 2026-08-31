@@ -204,7 +204,10 @@ same `events` table.
 Every `--source` also gets a second discovery/staging/flatten pass, for
 artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
 IIS/nginx/Apache/Tomcat HTTP access **and** error/diagnostic logs, IIS
-HTTP.sys (HTTPERR) logs, and Exchange's self-describing CSV logs
+HTTP.sys (HTTPERR) logs, Exchange's self-describing CSV logs, and three
+Linux log families (generic syslog -- which is also where `auth.log`/
+`secure` content lands, see below -- the Linux Audit Framework/auditd,
+and systemd journal export)
 (`ingest/logsources/discovery.py`, `ingest/logsources/stage.py`,
 `ingest/logsources/orchestrator.py` + `ingest/logsources/flatten.py` --
 this second pair mirrors the EVTX pipeline's own orchestrator/flatten
@@ -222,10 +225,11 @@ happens when a source has one but not the other.
         |  forensic exports routinely rename/relocate files
         v
  scheduled_task | iis | web_access | web_error_{nginx,apache,tomcat} | iis_httperr
-   | exchange_message_tracking | exchange_generic | unknown
+   | exchange_message_tracking | exchange_generic | syslog | auditd
+   | journal_export | unknown
         |
         v
- [2] parse      (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange}.py)
+ [2] parse      (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal}.py)
         |  dispatched by ingest/logsources/orchestrator.py's
         |  ProcessPoolExecutor, one worker per file -- straight to Python
         |  dicts (these formats are already line/element-oriented text,
@@ -235,8 +239,18 @@ happens when a source has one but not the other.
         |  explicit TRY_CAST per column per table -- same union_by_name
         |  stable-typing discipline as schema.py's event_data fix
         v
- cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs}/host=<h>/[log_type=<t>/]*.parquet
+ cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs,syslog,auditd_logs,journal_logs}/host=<h>/[log_type=<t>/]*.parquet
 ```
+
+**`syslog` covers `auth.log`/`secure` too -- there's no separate sniff
+kind or table for it.** Both are the same BSD/RFC-3164-or-RFC-5424
+envelope as `/var/log/syslog`; only the program names inside (`sshd`,
+`sudo`, `su`, `useradd`, ...) distinguish auth-relevant content, and that
+distinction is made afterward, on already-ingested data, by
+`ingest/logsources/parsers/syslog.py`'s `extract_auth_events()` (exposed
+as `Case.auth_events()` / `seclogx auth`) -- the same "derived heuristic
+view over an already-ingested table" pattern `Case.suspicious_tasks()`
+uses over `scheduled_tasks`, not a separate ingest-time table.
 
 Access logs (`web_logs`) and error/diagnostic logs (`web_error_logs`) are
 each web applications' two major log categories, and are kept as
@@ -282,19 +296,64 @@ only ever exposes tables it has ingested data for, and a future log
 family only needs a lake subdirectory to become queryable -- no changes
 to `query.py` itself.
 
-## Why not Dask / a distributed engine
+Only `lake/` is affected by cluster mode's storage backend (see below) --
+`case.json`, `staging/`, and `logs/` always stay on whatever local/NFS
+directory `--case-root` points at, in every mode.
 
-Designed for a single workstation, not a cluster. DuckDB gives lazy,
-out-of-core *query execution* with predicate pushdown over Parquet
+## Why not Dask / a distributed query engine -- and what got distributed instead
+
+Designed for a single workstation by default, not a cluster: DuckDB gives
+lazy, out-of-core *query execution* with predicate pushdown over Parquet
 without any cluster setup, and parsing is parallelized locally via
 `ProcessPoolExecutor`. The other half of "no cluster needed at real-world
 scale" is bounded-memory *delivery* of results to the analyst (see
 "Bounded-memory delivery" above) -- lazy execution underneath doesn't
 help if the last step still materializes the whole result as one
-DataFrame. If a genuinely distributed use case shows up later, the
-partitioned Parquet lake (stage 2's output contract) is the extension
-point -- a distributed query engine could read the same lake without
-changing stages 1-2.
+DataFrame. **This is still exactly true for query execution**: DuckDB
+remains the only query engine, and any single query or Sigma rule still
+runs on exactly one process. No distributed SQL planner was added, and
+none is planned -- that would mean reimplementing a distributed OLAP
+engine, not extending this one.
+
+What *did* get built, opt-in, is `src/seclogx/distributed/` (see
+[10. Distributed deployment](guides/10_distributed_deployment.md) for the
+user-facing guide): a `JobQueue` abstraction (`LocalJobQueue`, the same
+`ProcessPoolExecutor` behavior as always; `RQJobQueue`, Redis-backed via
+`rq`, consumed by `seclogx worker` processes) that both ingest
+orchestrators and `detect/hunt.py`'s rule loop dispatch through instead of
+constructing a process pool directly, plus a `StorageBackend` abstraction
+(`LocalStorageBackend`; `S3StorageBackend`, via DuckDB's `httpfs`
+extension for the Parquet I/O and boto3 for cheap metadata/listing) that
+`CaseDB` and the flatten step of both pipelines use instead of raw
+`pathlib` calls against `lake/`. This is exactly the previously-anticipated
+extension point realized: **the partitioned Parquet lake is what makes
+this possible without touching ingest stages 1-2's actual parsing logic
+or query stage 3's actual DuckDB execution** -- "distributed" here means
+job-level parallelism (many independent DuckDB processes/queries against
+one shared lake), never intra-query execution. Activation is entirely
+environment-variable driven (`SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`
+and friends) with zero new CLI flags on any existing command, and default
+(no env vars set) behavior is unchanged from before this existed -- see
+`distributed/config.py`'s `ClusterConfig`.
+
+Two correctness gaps this surfaced (and fixed) along the way, independent
+of whether cluster mode is ever turned on:
+
+- `flatten_case`/`flatten_table`'s `COPY ... TO ... PARTITION_BY (...)`
+  had no unique-filename guarantee across independent COPY invocations --
+  fine when flattening was always serialized per case (true before this),
+  but a real collision risk once distributed ingest workers can flatten
+  into the same case concurrently. Fixed via DuckDB's
+  `FILENAME_PATTERN '{uuid}'` COPY option, so concurrent flatten calls can
+  never collide on a filename inside the same Hive partition -- no lock
+  needed for this piece.
+- `Case._load_meta`/`_save_meta`'s `case.json` read-modify-write had no
+  lock at all -- a latent lost-update race even with two plain `seclogx
+  ingest` runs on one machine, not just a cluster-mode concern. Now always
+  lock-protected (`distributed/locking.py`): a stdlib-only file lock
+  locally (no new dependency for default use), a Redis-based lock instead
+  once a broker is configured (more reliable than a POSIX file lock over a
+  network filesystem for coordinating genuinely separate machines).
 
 **Ingest is not yet bounded-memory the same way query is.** The EVTX
 pipeline is fine at real-world scale (stage 1 streams to NDJSON on disk

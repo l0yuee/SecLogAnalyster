@@ -35,6 +35,8 @@ from typing import Iterator
 import duckdb
 import pandas as pd
 
+from .distributed.config import ClusterConfig
+from .distributed.storage import get_storage_backend
 from .memcheck import available_memory_bytes
 
 # DuckDB's internal vector size (rows per execution batch) -- fetch_df_chunk()
@@ -76,10 +78,13 @@ class ResultSizeEstimate:
 
 
 class CaseDB:
-    def __init__(self, case_dir: Path):
+    def __init__(self, case_dir: Path, cluster_config: ClusterConfig | None = None):
         self.case_dir = Path(case_dir)
-        self.lake_dir = self.case_dir / "lake"
+        self.cluster_config = cluster_config or ClusterConfig.from_env()
+        self.backend = get_storage_backend(self.cluster_config)
+        self.lake_dir = self.backend.lake_location(self.case_dir)
         self._con = duckdb.connect()
+        self.backend.configure_duckdb(self._con)
         self.tables: list[str] = []
         # search.py's per-table "which columns hold a JSON object" detection
         # is content-sniffed (see there for why), not free -- cached here so
@@ -87,16 +92,17 @@ class CaseDB:
         # condition. Invalidated naturally whenever Case creates a fresh
         # CaseDB (post-ingest).
         self._json_object_columns_cache: dict[str, list[str]] = {}
-        if self.lake_dir.exists():
-            for table_dir in sorted(p for p in self.lake_dir.iterdir() if p.is_dir()):
-                if not any(table_dir.rglob("*.parquet")):
+        if self.backend.exists(self.lake_dir):
+            for table_name in sorted(self.backend.table_dirs(self.lake_dir)):
+                table_location = self.backend.join(self.lake_dir, table_name)
+                if not self.backend.has_parquet(table_location):
                     continue
-                glob = str(table_dir / "**" / "*.parquet")
+                glob = self.backend.parquet_glob(table_location)
                 self._con.execute(
-                    f"CREATE VIEW {table_dir.name} AS "
+                    f"CREATE VIEW {table_name} AS "
                     f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)"
                 )
-                self.tables.append(table_dir.name)
+                self.tables.append(table_name)
         self._has_data = "events" in self.tables
 
     @property

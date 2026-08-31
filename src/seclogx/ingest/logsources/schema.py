@@ -166,6 +166,90 @@ EXCHANGE_LOGS_COLUMNS: list[tuple[str, str]] = [
 ]
 EXCHANGE_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
 
+# Generic syslog (BSD/RFC-3164, with or without a <PRI> prefix, and RFC
+# 5424) -- covers /var/log/syslog, messages, kern.log, daemon.log,
+# mail.log, cron.log, auth.log/secure, and anything else rsyslog/syslog-ng
+# writes in one of these two wire formats. auth.log is *not* a separate
+# sniff kind or table: it's syslog format like everything else, just with
+# recognizable program names/message shapes in it -- see
+# Case.auth_events() / ingest/logsources/parsers/syslog.py:extract_auth_events
+# for the derived, curated view over this table.
+SYSLOG_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("time_created", "TIMESTAMP"),
+    ("hostname", "VARCHAR"),  # syslog-reported hostname -- may differ from analyst-assigned host
+    ("facility", "VARCHAR"),  # kern/user/mail/daemon/auth/syslog/cron/authpriv/local0-7/... ; NULL if no <PRI>
+    ("severity", "VARCHAR"),  # emerg/alert/crit/err/warning/notice/info/debug ; NULL if no <PRI>
+    ("app_name", "VARCHAR"),  # program/tag, e.g. sshd, CRON, sudo, kernel
+    ("proc_id", "VARCHAR"),  # pid in brackets (BSD) or PROCID (RFC5424)
+    ("msg_id", "VARCHAR"),  # RFC5424 MSGID only, NULL for BSD-format lines
+    ("message", "VARCHAR"),  # free-text message body
+    ("structured_data", "JSON"),  # RFC5424 SD-ELEMENTs, NULL for BSD-format lines or SD-DATA '-'
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+SYSLOG_PARTITION_COLUMNS = ["host"]
+
+# Linux Audit Framework (auditd) -- /var/log/audit/audit.log,
+# `type=X msg=audit(epoch.ms:serial): key=val ...` format. One row per
+# *line*; a real audit event is often several related lines (SYSCALL +
+# EXECVE + CWD + PATH + ...) sharing one audit_serial, which this does not
+# stitch back together -- filter/join on audit_serial yourself (see
+# docs/known_limitations.md).
+AUDITD_LOGS_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("time_created", "TIMESTAMP"),
+    ("audit_serial", "BIGINT"),  # the audit(epoch:SERIAL) id -- ties related lines together
+    ("record_type", "VARCHAR"),  # SYSCALL / EXECVE / CWD / PATH / USER_AUTH / CRED_ACQ / ...
+    ("syscall", "VARCHAR"),  # raw syscall= number as text -- not resolved to a name (arch-dependent)
+    ("success", "VARCHAR"),  # 'yes'/'no' as reported ; not every record_type has one
+    ("exe", "VARCHAR"),
+    ("comm", "VARCHAR"),
+    ("uid", "VARCHAR"),
+    ("auid", "VARCHAR"),  # loginuid -- the original authenticated user, survives su/sudo
+    ("pid", "VARCHAR"),
+    ("ppid", "VARCHAR"),
+    ("key", "VARCHAR"),  # the triggering audit rule's -k tag, when set
+    ("fields", "JSON"),  # every key=value pair on the line not promoted above, verbatim
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+AUDITD_LOGS_PARTITION_COLUMNS = ["host", "record_type"]
+
+# systemd journal export format (`journalctl -o json`), one JSON object per
+# line -- the standard log source on modern systemd distros. Not the same
+# as the binary journal itself (/var/journal/**), which isn't portable
+# across systems and isn't parsed here.
+JOURNAL_LOGS_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("time_created", "TIMESTAMP"),  # from __REALTIME_TIMESTAMP (microseconds since epoch)
+    ("hostname", "VARCHAR"),  # _HOSTNAME
+    ("unit", "VARCHAR"),  # _SYSTEMD_UNIT
+    ("syslog_identifier", "VARCHAR"),  # SYSLOG_IDENTIFIER
+    ("priority", "VARCHAR"),  # PRIORITY (0-7, syslog severity scale)
+    ("pid", "VARCHAR"),  # _PID
+    ("uid", "VARCHAR"),  # _UID
+    ("comm", "VARCHAR"),  # _COMM
+    ("exe", "VARCHAR"),  # _EXE
+    ("message", "VARCHAR"),  # MESSAGE
+    ("fields", "JSON"),  # every other journal field verbatim (_TRANSPORT, _BOOT_ID, custom fields, ...)
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+JOURNAL_LOGS_PARTITION_COLUMNS = ["host"]
+
 TABLES: dict[str, dict] = {
     "web_logs": {"columns": WEB_LOGS_COLUMNS, "partition_by": WEB_LOGS_PARTITION_COLUMNS},
     "web_error_logs": {"columns": WEB_ERROR_LOGS_COLUMNS, "partition_by": WEB_ERROR_LOGS_PARTITION_COLUMNS},
@@ -175,12 +259,15 @@ TABLES: dict[str, dict] = {
         "partition_by": EXCHANGE_MESSAGE_TRACKING_PARTITION_COLUMNS,
     },
     "exchange_logs": {"columns": EXCHANGE_LOGS_COLUMNS, "partition_by": EXCHANGE_LOGS_PARTITION_COLUMNS},
+    "syslog": {"columns": SYSLOG_COLUMNS, "partition_by": SYSLOG_PARTITION_COLUMNS},
+    "auditd_logs": {"columns": AUDITD_LOGS_COLUMNS, "partition_by": AUDITD_LOGS_PARTITION_COLUMNS},
+    "journal_logs": {"columns": JOURNAL_LOGS_COLUMNS, "partition_by": JOURNAL_LOGS_PARTITION_COLUMNS},
 }
 
 # Columns holding JSON-serialized text (lists/dicts) or otherwise needing an
 # explicit VARCHAR cast rather than TRY_CAST to their declared type, to
 # guarantee stable physical Parquet typing across ingest batches.
-_TEXT_CAST_COLUMNS = {"extra", "actions", "triggers", "fields"}
+_TEXT_CAST_COLUMNS = {"extra", "actions", "triggers", "fields", "structured_data"}
 
 
 def cast_sql_for(table: str) -> dict[str, str]:

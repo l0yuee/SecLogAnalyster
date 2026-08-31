@@ -26,3 +26,11 @@ class ResultTooLargeError(SeclogxError):
     error's message points the caller at."""
 
     pass
+
+
+class ClusterConfigError(SeclogxError):
+    """Raised when distributed/cluster-mode configuration is missing or
+    inconsistent for the operation being attempted (e.g. a cluster
+    dependency -- redis/rq/boto3 -- isn't installed)."""
+
+    pass

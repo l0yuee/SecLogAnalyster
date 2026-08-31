@@ -12,18 +12,29 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from ...distributed.config import ClusterConfig
+from ...distributed.storage import get_storage_backend
 from .schema import TABLES, cast_sql_for
 
 
-def flatten_table(case_dir: Path, table: str, rows: list[dict], batch_id: str, ingested_at: datetime) -> int:
+def flatten_table(
+    case_dir: Path,
+    table: str,
+    rows: list[dict],
+    batch_id: str,
+    ingested_at: datetime,
+    cluster_config: ClusterConfig | None = None,
+) -> int:
     if not rows:
         return 0
 
     table_def = TABLES[table]
-    lake_dir = case_dir / "lake" / table
-    lake_dir.mkdir(parents=True, exist_ok=True)
+    backend = get_storage_backend(cluster_config or ClusterConfig.from_env())
+    lake_location = backend.table_location(case_dir, table)
+    backend.ensure_dir(lake_location)
 
     con = duckdb.connect()
+    backend.configure_duckdb(con)
     df = pd.DataFrame(rows)
     con.register("raw", df)
 
@@ -52,7 +63,9 @@ def flatten_table(case_dir: Path, table: str, rows: list[dict], batch_id: str, i
           SELECT
           {select_sql}
           FROM raw
-        ) TO '{lake_dir}' (FORMAT PARQUET, PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true)
+        ) TO '{backend.copy_target(lake_location)}' (
+          FORMAT PARQUET, PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
+        )
         """
     )
     con.close()

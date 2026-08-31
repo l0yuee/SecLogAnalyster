@@ -2,16 +2,27 @@
 
 **Language: English | [中文](08_performance_and_scale.zh-CN.md)**
 
-**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | 08. Performance & scale | [09. FAQ & limitations](09_faq_and_limitations.md)
+**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | [05. CLI reference](05_cli_reference.md) | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | 08. Performance & scale | [09. FAQ & limitations](09_faq_and_limitations.md) | [10. Distributed deployment](10_distributed_deployment.md)
 
 ---
 
-- Designed for one workstation, not a cluster -- there is no distributed
-  mode. Within that, individual log families vary widely in realistic
+- Designed for one workstation by default -- no setup, no external
+  services required. An opt-in, environment-variable-activated
+  distributed mode also exists (see
+  [10. Distributed deployment](10_distributed_deployment.md)): it helps
+  when an ingest batch is large enough that spreading file-parsing across
+  machines saves real wall-clock time, when a Sigma rule set is large
+  enough that rule-by-rule evaluation on one machine is the bottleneck, or
+  when multiple analysts want to query one shared case concurrently
+  without each holding a local copy of it. It does **not** help a single
+  query or a single small case -- query execution is always single-node
+  DuckDB, distributed or not; see that guide for the exact boundary.
+  Within all of this, individual log families vary widely in realistic
   volume: EVTX cases are typically well under 100GB, while web access/
   error logs across a case can realistically reach terabyte scale.
 - Ingest parallelism (`--workers`) scales with CPU cores -- files are
-  parsed independently in separate processes.
+  parsed independently in separate processes (or, in distributed mode,
+  across `seclogx worker` processes on any number of machines).
 - Querying and hunting run through DuckDB directly against the
   Hive-partitioned Parquet lake, which gives lazy, out-of-core execution
   with predicate pushdown: a query filtered to one host/channel/event

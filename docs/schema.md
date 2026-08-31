@@ -5,8 +5,8 @@ sources: the Windows Event Log schema below (`src/seclogx/schema.py`),
 and every other log family's schema further down (`## Non-EVTX log
 tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 `web_logs`, `web_error_logs`, `scheduled_tasks`,
-`exchange_message_tracking`, `exchange_logs`. See "Quick reference:
-analyzing each log type" in
+`exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`,
+`journal_logs`. See "Quick reference: analyzing each log type" in
 [`docs/guides/02_log_types_and_schema.md`](guides/02_log_types_and_schema.md)
 for how to actually query each one, and `docs/architecture.md` for how
 they're ingested.
@@ -196,4 +196,75 @@ first-class columns. Partition columns: `host, log_type`.
 | `log_type` | `VARCHAR` | From the log file's `#Log-type:` header, e.g. `HttpProxy` (partition key) |
 | `time_created` | `TIMESTAMP` | Best-effort, from the first datetime-shaped field |
 | `fields` | `JSON` | The full self-described CSV row, keyed by its `#Fields:` header -- query with `fields ->> 'field-name'` |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `syslog`
+
+Generic BSD/RFC-3164 (with or without a `<PRI>` prefix -- most real-world
+`/var/log/syslog`/`messages`/`auth.log` files use rsyslog's default
+template, which omits it) and RFC 5424 syslog lines: `/var/log/syslog`,
+`messages`, `kern.log`, `daemon.log`, `mail.log`, `cron.log`,
+`auth.log`/`secure`, and anything else sharing this line format.
+`auth.log`/`secure` are **not** a separate table -- see `Case.auth_events()`
+/ `seclogx auth` for a curated, structured view over the SSH/sudo/PAM
+subset of this table. Partition column: `host`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `time_created` | `TIMESTAMP` | Log entry timestamp. BSD-format lines have no year in the wire format; it's inferred from the file's mtime (see known_limitations) |
+| `hostname` | `VARCHAR` | Syslog-reported hostname -- may differ from analyst-assigned `host` |
+| `facility` | `VARCHAR` | `kern`/`user`/`mail`/`daemon`/`auth`/`cron`/`authpriv`/`local0`-`7`/...; NULL if the line has no `<PRI>` |
+| `severity` | `VARCHAR` | `emerg`/`alert`/`crit`/`err`/`warning`/`notice`/`info`/`debug`; NULL if the line has no `<PRI>` |
+| `app_name` | `VARCHAR` | Program/tag, e.g. `sshd`, `CRON`, `sudo`, `kernel` |
+| `proc_id` | `VARCHAR` | PID in brackets (BSD) or PROCID (RFC 5424) |
+| `msg_id` | `VARCHAR` | RFC 5424 MSGID only, NULL for BSD-format lines |
+| `message` | `VARCHAR` | Free-text message body |
+| `structured_data` | `JSON` | RFC 5424 SD-ELEMENTs, keyed by SD-ID; NULL for BSD-format lines or SD-DATA `-` |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `auditd_logs`
+
+Linux Audit Framework (`/var/log/audit/audit.log`) records, one row per
+*line*. A real audit event is often several related lines (e.g. SYSCALL +
+EXECVE + CWD + PATH) sharing one `audit_serial` -- these are not stitched
+back together; correlate them yourself with `WHERE audit_serial = ...`
+(see known_limitations). `syscall` is the raw number as reported, not
+resolved to a name (the syscall table is architecture-dependent).
+Partition columns: `host, record_type`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `time_created` | `TIMESTAMP` | From `msg=audit(epoch.ms:serial)` |
+| `audit_serial` | `BIGINT` | The `audit(epoch:SERIAL)` id -- ties related lines together |
+| `record_type` | `VARCHAR` | `SYSCALL` / `EXECVE` / `CWD` / `PATH` / `USER_AUTH` / `CRED_ACQ` / ... (partition key) |
+| `syscall` | `VARCHAR` | Raw `syscall=` number as text -- not resolved to a name |
+| `success` | `VARCHAR` | `yes`/`no` as reported; not every `record_type` has one |
+| `exe`, `comm` | `VARCHAR` | Executable path / command name |
+| `uid`, `auid` | `VARCHAR` | Effective uid, and loginuid (`auid` survives `su`/`sudo`) |
+| `pid`, `ppid` | `VARCHAR` | Process / parent process id |
+| `key` | `VARCHAR` | The triggering audit rule's `-k` tag, when set |
+| `fields` | `JSON` | Every `key=value` pair on the line not promoted above, verbatim |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `journal_logs`
+
+systemd journal export format (`journalctl -o json`), one JSON object per
+line -- the standard log source on modern systemd distros. Not the same
+as the binary journal itself (`/var/log/journal/**`), which isn't parsed.
+Partition column: `host`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `time_created` | `TIMESTAMP` | From `__REALTIME_TIMESTAMP` (microseconds since epoch) |
+| `hostname` | `VARCHAR` | `_HOSTNAME` |
+| `unit` | `VARCHAR` | `_SYSTEMD_UNIT` |
+| `syslog_identifier` | `VARCHAR` | `SYSLOG_IDENTIFIER` |
+| `priority` | `VARCHAR` | `PRIORITY` (0-7, syslog severity scale) |
+| `pid`, `uid` | `VARCHAR` | `_PID` / `_UID` |
+| `comm`, `exe` | `VARCHAR` | `_COMM` / `_EXE` |
+| `message` | `VARCHAR` | `MESSAGE` |
+| `fields` | `JSON` | Every other journal field verbatim (`_TRANSPORT`, `_BOOT_ID`, custom structured-logging fields, ...) |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |

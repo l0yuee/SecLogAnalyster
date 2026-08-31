@@ -32,6 +32,7 @@ from seclogx.ingest.logsources.sniff import (
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources"
+LINUX_FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources_linux"
 
 
 # -- classification -----------------------------------------------------------
@@ -324,3 +325,60 @@ def test_case_chunked_accessors_match_eager(tmp_path: Path):
     empty_case = Case.create("chunkempty", case_root=tmp_path / "cases")
     assert list(empty_case.web_logs_chunks()) == []
     assert list(empty_case.scheduled_tasks_chunks()) == []
+
+
+# -- Linux logs: end-to-end aux ingest ---------------------------------------------
+
+
+def test_run_aux_ingest_writes_linux_tables(tmp_path: Path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    report = run_aux_ingest(case_dir, [SourceSpec(path=LINUX_FIXTURES, host="LAB01")], workers=1)
+
+    assert report.files_discovered == 4
+    assert report.files_ok == 4
+    assert report.files_failed == 0
+    assert report.rows_written.get("syslog") == 11  # 9 BSD + 2 RFC5424
+    assert report.rows_written.get("auditd_logs") == 3
+    assert report.rows_written.get("journal_logs") == 2
+
+
+def test_case_auth_events_over_ingested_syslog(tmp_path: Path):
+    from seclogx.case import Case
+
+    case = Case.create("authtest", case_root=tmp_path / "cases")
+    case.ingest([f"{LINUX_FIXTURES}:LAB01"])
+
+    syslog = case.syslog()
+    assert len(syslog) == 11
+
+    auth = case.auth_events()
+    assert set(auth["event_type"]) == {
+        "ssh_accepted", "ssh_failed", "ssh_invalid_user", "ssh_disconnected",
+        "sudo_command", "session_opened", "account_management",
+    }
+    assert len(auth) == 8  # 7 from the BSD sample + 1 (Accepted publickey) from the RFC5424 sample
+
+    # a case with no syslog data returns an empty, correctly-shaped frame
+    empty_case = Case.create("authempty", case_root=tmp_path / "cases")
+    empty_auth = empty_case.auth_events()
+    assert empty_auth.empty
+    assert "event_type" in empty_auth.columns
+
+
+def test_case_linux_table_accessors_and_chunks_match(tmp_path: Path):
+    import pandas as pd
+    from seclogx.case import Case
+
+    case = Case.create("linuxdfparity", case_root=tmp_path / "cases")
+    case.ingest([f"{LINUX_FIXTURES}:LAB01"])
+
+    for eager, chunked in (
+        (case.syslog(), case.syslog_chunks()),
+        (case.auditd_logs(), case.auditd_logs_chunks()),
+        (case.journal_logs(), case.journal_logs_chunks()),
+    ):
+        assert not eager.empty
+        combined = pd.concat(list(chunked), ignore_index=True)
+        assert len(combined) == len(eager)

@@ -17,10 +17,11 @@ intermediate staging files needed.
 from __future__ import annotations
 
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ...distributed.config import ClusterConfig
+from ...distributed.queue import INGEST_QUEUE_NAME, get_job_queue
 from ..common import SourceSpec, StageStatus
 from .discovery import discover_and_classify
 from .flatten import flatten_table
@@ -28,7 +29,13 @@ from .manifest import AuxIngestReport, AuxStagedFile
 from .stage import stage_aux_file
 
 
-def run_aux_ingest(case_dir: Path, sources: list[SourceSpec], workers: int | None = None) -> AuxIngestReport:
+def run_aux_ingest(
+    case_dir: Path,
+    sources: list[SourceSpec],
+    workers: int | None = None,
+    cluster_config: ClusterConfig | None = None,
+) -> AuxIngestReport:
+    cluster_config = cluster_config or ClusterConfig.from_env()
     batch_id = str(uuid.uuid4())
     classified = discover_and_classify(sources)
 
@@ -45,11 +52,8 @@ def run_aux_ingest(case_dir: Path, sources: list[SourceSpec], workers: int | Non
             problem_files=[],
         )
 
-    staged: list[AuxStagedFile] = []
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(stage_aux_file, cf) for cf in classified]
-        for fut in as_completed(futures):
-            staged.append(fut.result())
+    queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
+    staged: list[AuxStagedFile] = queue.submit_all(stage_aux_file, [(cf,) for cf in classified])
     staged.sort(key=lambda f: f.source_path)
 
     files_ok = sum(1 for f in staged if f.status == StageStatus.OK)
@@ -68,7 +72,10 @@ def run_aux_ingest(case_dir: Path, sources: list[SourceSpec], workers: int | Non
             by_table.setdefault(f.table, []).extend(f.rows)
 
     ingested_at = datetime.now(timezone.utc)
-    rows_written = {table: flatten_table(case_dir, table, rows, batch_id, ingested_at) for table, rows in by_table.items()}
+    rows_written = {
+        table: flatten_table(case_dir, table, rows, batch_id, ingested_at, cluster_config=cluster_config)
+        for table, rows in by_table.items()
+    }
 
     return AuxIngestReport(
         batch_id=batch_id,

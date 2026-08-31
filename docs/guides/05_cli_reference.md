@@ -2,7 +2,7 @@
 
 **Language: English | [中文](05_cli_reference.zh-CN.md)**
 
-**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | 05. CLI reference | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md)
+**[Guide index](../index.md)** -- [01. Getting started](01_getting_started.md) | [02. Log types & schema](02_log_types_and_schema.md) | [03. Querying & search](03_querying_and_search.md) | [04. Threat hunting](04_threat_hunting.md) | 05. CLI reference | [06. Python API](06_python_api.md) | [07. Recipes](07_recipes.md) | [08. Performance & scale](08_performance_and_scale.md) | [09. FAQ & limitations](09_faq_and_limitations.md) | [10. Distributed deployment](10_distributed_deployment.md)
 
 ---
 
@@ -35,8 +35,9 @@ seclogx case info incident42
 
 Discovers, classifies, and normalizes every supported file under the
 given source paths into the case in one pass: `.evtx`, Scheduled Task
-definitions, IIS/nginx/Apache/Tomcat access logs, and Exchange CSV logs.
-This is the core command.
+definitions, IIS/nginx/Apache/Tomcat access logs, Exchange CSV logs, and
+Linux syslog/`auth.log`, auditd, and systemd journal export logs. This is
+the core command.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -245,6 +246,23 @@ Lists ingested Scheduled Task definitions from `scheduled_tasks`.
 seclogx tasks incident42 --suspicious
 ```
 
+## `seclogx auth <case>`
+
+Lists `syslog` rows recognized as SSH/sudo/PAM/account-management events
+(see `Case.auth_events()` / [02. Log types & schema](02_log_types_and_schema.md)
+for exactly what's recognized). Not a Sigma rule -- a heuristic filter over
+already-ingested `syslog` data, the `auth.log`/`secure` equivalent of
+`tasks --suspicious`.
+
+| Option | Meaning |
+|---|---|
+| `--out FILE.csv` | Export the full result |
+
+```bash
+seclogx auth incident42
+seclogx auth incident42 --out auth_events.csv
+```
+
 ## `seclogx hunt <case>`
 
 Runs Sigma detection rules against the case and reports matches with
@@ -313,6 +331,48 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 
 # Everything across all hosts in a specific window
 seclogx timeline incident42 --start 2026-01-14T00:00:00 --end 2026-01-14T06:00:00
+```
+
+## `seclogx worker`
+
+Runs a distributed-mode worker: consumes ingest/hunt tasks enqueued by
+`seclogx ingest`/`seclogx hunt` once `SECLOGX_BROKER_URL` is set. See
+[10. Distributed deployment](10_distributed_deployment.md) for the full
+env-var reference and Docker Compose/Kubernetes walkthroughs -- this is
+opt-in and doesn't apply unless you've configured cluster mode.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--burst` | off | Process whatever's queued right now, then exit, instead of listening indefinitely -- useful for testing/CI. |
+
+```bash
+export SECLOGX_BROKER_URL=redis://broker:6379/0
+seclogx worker
+```
+
+Exits with an error immediately if `SECLOGX_BROKER_URL` isn't set --
+there's nothing to consume without a broker configured.
+
+## `seclogx cluster config`
+
+Prints the distributed-mode configuration resolved from the environment
+(`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*`/`SECLOGX_BROKER_URL`) as JSON.
+Never prints credentials -- those are never read into this configuration
+in the first place (see [10. Distributed deployment](10_distributed_deployment.md)).
+
+```bash
+seclogx cluster config
+```
+
+## `seclogx cluster status`
+
+Reports live `seclogx worker` processes and queue depth for the
+configured broker. With no `SECLOGX_BROKER_URL` set, says so and exits
+cleanly -- ingest/hunt are running locally, not distributed, so there's
+no cluster to report on.
+
+```bash
+seclogx cluster status
 ```
 
 Next: [06. Python API](06_python_api.md) for the equivalent Python/notebook surface.

@@ -12,6 +12,9 @@ def test_tables_registry_has_expected_tables():
         "scheduled_tasks",
         "exchange_message_tracking",
         "exchange_logs",
+        "syslog",
+        "auditd_logs",
+        "journal_logs",
     }
     for table, definition in TABLES.items():
         assert "columns" in definition
@@ -52,3 +55,22 @@ def test_cast_sql_for_varchar_columns_use_cast():
 def test_cast_sql_for_unknown_table_raises_key_error():
     with pytest.raises(KeyError):
         cast_sql_for("does_not_exist")
+
+
+def test_cast_sql_for_uses_cast_for_structured_data():
+    # syslog.structured_data is declared JSON but physically stored as
+    # VARCHAR text (json.dumps'd by the parser), same reasoning as
+    # scheduled_tasks.actions/triggers.
+    cast_sql = cast_sql_for("syslog")
+    assert cast_sql["structured_data"] == "CAST(raw.structured_data AS VARCHAR)"
+
+
+def test_cast_sql_for_auditd_and_journal_logs_use_try_cast_for_typed_columns():
+    auditd_cast = cast_sql_for("auditd_logs")
+    assert auditd_cast["audit_serial"] == "TRY_CAST(raw.audit_serial AS BIGINT)"
+    assert auditd_cast["time_created"] == "TRY_CAST(raw.time_created AS TIMESTAMP)"
+    assert auditd_cast["fields"] == "CAST(raw.fields AS VARCHAR)"
+
+    journal_cast = cast_sql_for("journal_logs")
+    assert journal_cast["time_created"] == "TRY_CAST(raw.time_created AS TIMESTAMP)"
+    assert journal_cast["fields"] == "CAST(raw.fields AS VARCHAR)"

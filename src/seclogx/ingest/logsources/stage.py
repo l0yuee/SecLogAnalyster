@@ -8,17 +8,23 @@ from __future__ import annotations
 
 from .discovery import ClassifiedFile, sha256_file
 from .manifest import AuxStagedFile, StageStatus, now_iso
+from .parsers.auditd import parse_auditd_file
 from .parsers.exchange import parse_exchange_csv
 from .parsers.iis import parse_iis_file
+from .parsers.journal import parse_journal_file
 from .parsers.scheduled_tasks import parse_task_xml
+from .parsers.syslog import parse_syslog_file
 from .parsers.webaccess import parse_web_access_file
 from .parsers.weberror import parse_apache_error_file, parse_iis_httperr_file, parse_nginx_error_file, parse_tomcat_error_file
 from .sniff import (
+    KIND_AUDITD,
     KIND_EXCHANGE_GENERIC,
     KIND_EXCHANGE_MESSAGE_TRACKING,
     KIND_IIS,
     KIND_IIS_HTTPERR,
+    KIND_JOURNAL_EXPORT,
     KIND_SCHEDULED_TASK,
+    KIND_SYSLOG,
     KIND_WEB_ACCESS,
     KIND_WEB_ERROR_APACHE,
     KIND_WEB_ERROR_NGINX,
@@ -135,4 +141,13 @@ def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
     if cf.kind == KIND_IIS_HTTPERR:
         rows, ok, err = parse_iis_httperr_file(cf.path, cf.host)
         return rows, "web_error_logs", ok, err
+    if cf.kind == KIND_SYSLOG:
+        rows, ok, err = parse_syslog_file(cf.path, cf.host)
+        return rows, "syslog", ok, err
+    if cf.kind == KIND_AUDITD:
+        rows, ok, err = parse_auditd_file(cf.path, cf.host)
+        return rows, "auditd_logs", ok, err
+    if cf.kind == KIND_JOURNAL_EXPORT:
+        rows, ok, err = parse_journal_file(cf.path, cf.host)
+        return rows, "journal_logs", ok, err
     raise ValueError(f"no parser registered for kind {cf.kind!r}")

@@ -21,7 +21,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "moto[s3]>=5.0", "fakeredis>=2.20", "redis>=5.0", "rq>=1.16"]
+cluster = ["redis>=5.0", "rq>=1.16", "boto3>=1.34"]
 
 [project.scripts]
 seclogx = "seclogx.cli.main:app"

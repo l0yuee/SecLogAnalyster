@@ -1,0 +1,9 @@
+Aug 30 09:15:01 kaligraphite CRON[1234]: (root) CMD (   cd / && run-parts --report /etc/cron.hourly)
+Aug 30 09:16:02 kaligraphite sshd[2345]: Accepted password for alice from 10.0.0.5 port 51322 ssh2
+Aug 30 09:17:03 kaligraphite sshd[2346]: Failed password for invalid user oracle from 203.0.113.7 port 41233 ssh2
+Aug 30 09:17:05 kaligraphite sshd[2346]: Invalid user oracle from 203.0.113.7 port 41233
+Aug 30 09:18:10 kaligraphite sshd[2347]: Received disconnect from 203.0.113.7 port 41233:11: Bye Bye [preauth]
+Aug 30 09:20:00 kaligraphite sudo[2399]:   alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/apt update
+Aug 30 09:21:00 kaligraphite su[2400]: pam_unix(su:session): session opened for user root by alice(uid=1000)
+Aug 30 09:22:00 kaligraphite useradd[2500]: new user: name=bob, UID=1001, GID=1001, home=/home/bob, shell=/bin/bash
+Aug 30 09:23:00 kaligraphite kernel: [12345.678901] usb 1-1: new high-speed USB device number 5 using xhci_hcd

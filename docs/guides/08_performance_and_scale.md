@@ -53,17 +53,16 @@
 - `--keep-raw` roughly doubles ingest cost (time and peak memory) for
   the files it's applied to -- use it selectively on evidence that
   needs full XML fidelity, not by default on an entire large case.
-- Scheduled Tasks/IIS/web access/Exchange logs are parsed straight to
-  Python dicts per file (no intermediate NDJSON staging), and unlike the
-  EVTX pipeline, **ingest for these log families is not yet
-  bounded-memory**: a single ingest run accumulates every parsed row for
-  a given table in memory across the whole batch before writing Parquet.
-  Fine at the volumes exercised so far; a single ingest run processing
-  enough files to reach terabyte scale *in one batch* could exhaust
-  memory during ingest even though querying the resulting lake afterward
-  would be fine. This is specifically an ingest-time boundary, separate
-  from (and not fixed by) the query-side chunking above -- see
-  `docs/known_limitations.md`.
+- Scheduled Tasks/IIS/web access/Exchange/syslog/auditd/journal logs now
+  stage to per-file NDJSON the same way EVTX does, and flatten via DuckDB
+  reading straight off disk (`read_ndjson_auto`) instead of accumulating
+  every parsed row for a table in Python across the whole batch. Peak
+  ingest-time memory is now bounded by (one file's parse footprint) x
+  `workers`, not by total batch size -- a batch large enough to reach
+  terabyte scale no longer has to fit in memory at once during ingest.
+  Per-file parsing itself (needed for encoding detection) still reads a
+  whole file at a time, so a single pathologically large individual file
+  is still a per-file, not per-batch, memory cost.
 
 Next: [09. FAQ & limitations](09_faq_and_limitations.md) for
 troubleshooting and the full known-limitations pointer.

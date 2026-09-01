@@ -169,12 +169,14 @@ ORDER BY time_created
 ```
 
 **Scheduled Tasks: everything not authored by a recognized account, or
-hidden, or invoking a LOLBin -- the same heuristic `--suspicious` uses:**
+hidden, or invoking a LOLBin, or masquerading as a known Microsoft task --
+the same heuristic `--suspicious` uses, with `suspicion_reasons` showing
+why each row matched:**
 
 ```python
 from seclogx import Case
 c = Case.open("incident42")
-c.suspicious_tasks()[["host", "task_path", "author", "hidden", "actions"]]
+c.suspicious_tasks()[["host", "task_path", "author", "hidden", "action_command", "suspicion_reasons"]]
 ```
 
 **Failed SSH logins by source IP, across every host (spot a brute-force

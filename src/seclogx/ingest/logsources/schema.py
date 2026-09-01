@@ -100,6 +100,11 @@ SCHEDULED_TASKS_COLUMNS: list[tuple[str, str]] = [
     ("principal_user_id", "VARCHAR"),
     ("principal_run_level", "VARCHAR"),
     ("principal_logon_type", "VARCHAR"),
+    ("action_command", "VARCHAR"),  # first Exec action's Command, if any -- derived from `actions` for direct filtering
+    ("action_arguments", "VARCHAR"),  # first Exec action's Arguments, if any
+    ("action_working_directory", "VARCHAR"),  # first Exec action's WorkingDirectory, if any
+    ("action_types", "VARCHAR"),  # comma-joined action element types, e.g. 'Exec' or 'Exec,ComHandler'
+    ("trigger_types", "VARCHAR"),  # comma-joined trigger element types, e.g. 'TimeTrigger,LogonTrigger'
     ("actions", "JSON"),  # list of {type, ...} -- Exec/ComHandler/SendEmail/ShowMessage, captured generically
     ("triggers", "JSON"),  # list of {type, ...} -- TimeTrigger/LogonTrigger/BootTrigger/... captured generically
     ("source_path", "VARCHAR"),

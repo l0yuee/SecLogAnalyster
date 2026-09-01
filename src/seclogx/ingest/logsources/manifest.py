@@ -26,7 +26,7 @@ class AuxStagedFile:
     record_count: int
     error_count: int
     error_message: str | None
-    rows: list[dict] = field(default_factory=list, repr=False)
+    ndjson_path: str | None = None
     staged_at: str = ""
 
 
@@ -46,9 +46,8 @@ class AuxIngestReport:
     def to_dataframe(self) -> pd.DataFrame:
         """Per-file staging detail as a DataFrame -- one row per discovered
         file (ok/partial/failed/unknown), mirroring `IngestReport.to_dataframe()`
-        for the EVTX pipeline. Excludes the parsed `rows` payload itself
-        (that's what the lake tables are for)."""
-        cols = [f.name for f in dataclasses.fields(AuxStagedFile) if f.name != "rows"]
+        for the EVTX pipeline."""
+        cols = [f.name for f in dataclasses.fields(AuxStagedFile)]
         records = [{col: getattr(f, col) for col in cols} for f in self.staged_files]
         return pd.DataFrame(records, columns=cols)
 

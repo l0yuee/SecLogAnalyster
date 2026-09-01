@@ -149,14 +149,26 @@ EVTX channel). Partition column: `host`.
 | `principal_user_id` | `VARCHAR` | Principal the task runs as |
 | `principal_run_level` | `VARCHAR` | e.g. `HighestAvailable` |
 | `principal_logon_type` | `VARCHAR` | e.g. `InteractiveToken`, `S4U` |
+| `action_command` | `VARCHAR` | First `Exec` action's `Command`, if any -- derived from `actions` for direct filtering without parsing JSON |
+| `action_arguments` | `VARCHAR` | First `Exec` action's `Arguments`, if any |
+| `action_working_directory` | `VARCHAR` | First `Exec` action's `WorkingDirectory`, if any |
+| `action_types` | `VARCHAR` | Comma-joined action element types present, e.g. `Exec` or `Exec,ComHandler` |
+| `trigger_types` | `VARCHAR` | Comma-joined trigger element types present, e.g. `TimeTrigger,LogonTrigger` |
 | `actions` | `JSON` | List of `{type, ...}` -- every action element captured generically (Exec/ComHandler/SendEmail/ShowMessage) |
 | `triggers` | `JSON` | List of `{type, ...}` -- every trigger element captured generically (TimeTrigger/LogonTrigger/BootTrigger/...) |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
 
-`Case.suspicious_tasks()` / `seclogx tasks <case> --suspicious` apply a
-lightweight heuristic (action path under Temp/AppData/Public, or a
-LOLBin-like command, or a hidden/unauthored task) -- not a Sigma rule,
-since Sigma has no logsource category for on-disk task definitions.
+`Case.scheduled_tasks()` returns this table in full, for open-ended
+analysis (filter/group on `action_command`, `task_path`, etc. directly).
+`Case.suspicious_tasks()` / `seclogx tasks <case> --suspicious` layer a
+lightweight heuristic on top (action path under Temp/AppData/Public, a
+LOLBin-like command, a hidden/unauthored task, or a known Microsoft task
+path whose action doesn't match its expected executable location --
+see `data/scheduled_tasks/known_microsoft_tasks.json` and
+`docs/known_limitations.md`) -- not a Sigma rule, since Sigma has no
+logsource category for on-disk task definitions. The returned rows carry
+a `suspicion_reasons` column (list of which heuristic(s) matched) rather
+than a bare filter.
 
 ## `exchange_message_tracking`
 

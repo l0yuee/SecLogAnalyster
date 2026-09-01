@@ -61,7 +61,7 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 |---|---|---|
 | `web_logs` | **访问日志**：IIS、nginx、Apache、Tomcat 的 HTTP 访问日志，统一存放 | `log_type`、`client_ip`、`method`、`uri_stem`、`uri_query`、`status`、`user_agent`、`referer` |
 | `web_error_logs` | **错误/诊断日志**：nginx、Apache、Tomcat 以及 IIS HTTP.sys（HTTPERR）——Web 应用另一大类日志，统一存放 | `log_type`、`severity`、`client_ip`、`message`，以及 IIS HTTPERR 特有的 `method`/`uri`/`status` |
-| `scheduled_tasks` | 磁盘上的计划任务定义（`System32\Tasks\**`）——一种持久化痕迹，区别于计划任务的*事件日志*（已在 `events` 中覆盖） | `task_path`、`author`、`enabled`、`hidden`、`actions`（JSON）、`triggers`（JSON） |
+| `scheduled_tasks` | 磁盘上的计划任务定义（`System32\Tasks\**`）——一种持久化痕迹，区别于计划任务的*事件日志*（已在 `events` 中覆盖） | `task_path`、`author`、`enabled`、`hidden`、`action_command`、`action_arguments`、`action_types`、`trigger_types`、`actions`（JSON）、`triggers`（JSON） |
 | `exchange_message_tracking` | Exchange 邮件流转记录（谁给谁发了什么） | `sender_address`、`recipient_address`、`message_subject`、`event_id`（Exchange 自身的事件标识，**不是** Windows 事件 ID） |
 | `exchange_logs` | 其他所有 Exchange CSV 日志类型（HttpProxy、ActiveSync、EWS 等），字段原样保留 | `log_type`、`fields`（JSON，用 `fields ->> 'field-name'` 查询） |
 | `syslog` | 通用 BSD/RFC-3164 与 RFC 5424 syslog：`/var/log/syslog`、`messages`、`kern.log`、`auth.log`/`secure` 等，统一存放 | `app_name`、`hostname`、`facility`、`severity`、`message`、`structured_data`（JSON，仅 RFC5424） |
@@ -130,7 +130,11 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   HTTPERR 专门捕获 HTTP.sys 自身在请求到达 IIS 工作进程*之前*就拒绝的请求，因此能发现完全不会出现在
   `web_logs` 中的利用尝试。
 - **`scheduled_tasks`**——持久化排查：被隐藏或没有作者信息的任务、动作中调用了
-  LOLBin、动作路径位于 Temp/AppData/Public 之下。`suspicious_tasks()` 会自动帮你跑这套启发式规则。
+  LOLBin、动作路径位于 Temp/AppData/Public 之下，或者是某个已知微软计划任务路径，但其动作指向的可执行文件与预期位置不符（伪装/劫持了合法任务，对应
+  MITRE ATT&CK T1053.005）。`suspicious_tasks()`
+  会自动帮你跑完这一整套启发式规则，并通过 `suspicion_reasons`
+  列说明每一行具体是因为什么被标记的；`scheduled_tasks()` 则返回完整表（包含从原始
+  `actions` JSON 派生出的一级列 `action_command`/`action_arguments`/`action_types`），供你做开放式分析。
 - **`exchange_message_tracking`**——钓鱼与邮件类数据泄露：按发件人/收件人/主题排查、异常的对外邮件流转、发件人域名与其声称身份不符的情况。
 - **`exchange_logs`**——Exchange 基于 HTTP 的入侵（例如 ProxyShell 类攻击），此时相关活动体现在
   HttpProxy/OWA/ECP 的访问模式中，而不是邮件流转记录里——在不清楚具体字段结构时，可按内容对
@@ -193,7 +197,7 @@ c.fields("web_logs")   # -> status、uri_stem、client_ip 等（真实列）
 | `events`（任意通道都有） | `channel`、`event_id`、`host`、`computer`、`time_created`、`user_sid` |
 | `web_logs` | `uri_stem`、`uri_query`、`status`、`method`、`client_ip`、`user_agent`、`referer`、`log_type` |
 | `web_error_logs` | `severity`、`message`、`client_ip`；仅 IIS HTTPERR 有：`method`、`uri`、`status` |
-| `scheduled_tasks` | `author`、`hidden`、`enabled`、`actions`、`triggers`、`task_path`、`principal_user_id` |
+| `scheduled_tasks` | `author`、`hidden`、`enabled`、`action_command`、`action_arguments`、`actions`、`triggers`、`task_path`、`principal_user_id` |
 | `exchange_message_tracking` | `sender_address`、`recipient_address`、`message_subject`、`recipient_status`、`event_id` |
 | `exchange_logs` | 先看 `log_type`（弄清楚这具体是哪一种 Exchange 日志），再用 `seclogx fields` 查该日志类型的真实字段名 |
 | `syslog` | `app_name`、`message`、`hostname`、`facility`/`severity`（源日志没有 `<PRI>` 时为 NULL） |

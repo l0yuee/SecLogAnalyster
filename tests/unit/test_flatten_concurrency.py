@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,14 @@ def _syslog_row(host: str, message: str) -> dict:
     }
 
 
+def _write_ndjson(path: Path, rows: list[dict]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    return str(path)
+
+
 def test_concurrent_flatten_calls_do_not_collide(tmp_path: Path):
     """Regression test for the collision risk flatten_table had before
     FILENAME_PATTERN '{uuid}' was added: COPY's default partitioned
@@ -32,18 +41,20 @@ def test_concurrent_flatten_calls_do_not_collide(tmp_path: Path):
 
     batch_a = [_syslog_row("LAB01", f"batch-a-{i}") for i in range(5)]
     batch_b = [_syslog_row("LAB01", f"batch-b-{i}") for i in range(5)]
+    ndjson_a = _write_ndjson(tmp_path / "staging" / "batch_a.ndjson", batch_a)
+    ndjson_b = _write_ndjson(tmp_path / "staging" / "batch_b.ndjson", batch_b)
 
     errors: list[Exception] = []
 
-    def run(rows: list[dict], batch_id: str) -> None:
+    def run(ndjson_paths: list[str], batch_id: str) -> None:
         try:
-            flatten_table(case_dir, "syslog", rows, batch_id, datetime.now(timezone.utc))
+            flatten_table(case_dir, "syslog", ndjson_paths, batch_id, datetime.now(timezone.utc))
         except Exception as e:  # noqa: BLE001
             errors.append(e)
 
     threads = [
-        threading.Thread(target=run, args=(batch_a, "batch-a")),
-        threading.Thread(target=run, args=(batch_b, "batch-b")),
+        threading.Thread(target=run, args=([ndjson_a], "batch-a")),
+        threading.Thread(target=run, args=([ndjson_b], "batch-b")),
     ]
     for t in threads:
         t.start()

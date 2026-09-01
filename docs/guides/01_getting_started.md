@@ -95,6 +95,7 @@ Everything revolves around a **case** -- a named workspace under
 cases/<name>/
   case.json                     # hosts, source paths, ingest run history
   staging/<host>/*.ndjson       # intermediate parsed EVTX records (kept by default)
+  staging_aux/<host>/*.ndjson   # intermediate parsed non-EVTX records (kept by default)
   logs/ingest_<batch_id>.log    # reconciliation report per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows Event Log
@@ -111,7 +112,8 @@ cases/<name>/
 `lake/` can live on S3-compatible object storage instead of local disk
 (`SECLOGX_STORAGE_BACKEND=s3` -- opt-in, see
 [10. Distributed deployment](10_distributed_deployment.md)); `case.json`,
-`staging/`, and `logs/` always stay local/NFS, in every mode.
+`staging/`, `staging_aux/`, and `logs/` always stay local/NFS, in every
+mode.
 
 You create a case once (`seclogx case init`), then `ingest` into it as
 many times as you like -- from different source paths, different hosts,

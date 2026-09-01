@@ -89,11 +89,7 @@ def flatten_case(
     JOIN manifest_df m ON raw.filename = m.ndjson_path
     """
 
-    (row_count,) = con.execute(f"SELECT count(*) {from_sql}").fetchone()
-    if row_count == 0:
-        return 0
-
-    con.execute(
+    (row_count,) = con.execute(
         f"""
         COPY (
           SELECT
@@ -103,6 +99,6 @@ def flatten_case(
           FORMAT PARQUET, PARTITION_BY (host, channel), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
         )
         """
-    )
+    ).fetchone()
 
     return int(row_count)

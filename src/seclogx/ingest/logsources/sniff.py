@@ -52,13 +52,26 @@ def _peek(path: Path) -> bytes:
         return f.read(_PEEK_BYTES)
 
 
-def _decode_lines(raw: bytes) -> list[str]:
-    for encoding in ("utf-8-sig", "utf-16"):
+def _decode_text(raw: bytes) -> str:
+    """Best-effort bytes -> str for forensic log/artifact content of unknown
+    origin. Tries progressively looser encodings -- UTF-8 (with BOM),
+    UTF-16 (with BOM), then GB18030 (a strict superset of GBK/GB2312,
+    covering Simplified/Traditional Chinese-locale logs and Windows
+    artifacts) -- before falling back to Latin-1 with `errors="replace"`,
+    which maps every byte 1:1 and therefore can never raise: even opaque
+    binary data mixed into a text log becomes decodable (if not always
+    meaningful) text rather than crashing the caller. GB18030 is a Python
+    stdlib codec (`encodings.gb18030`), so this adds no new dependency."""
+    for encoding in ("utf-8-sig", "utf-16", "gb18030"):
         try:
-            return raw.decode(encoding).splitlines()
+            return raw.decode(encoding)
         except UnicodeError:
             continue
-    return raw.decode("latin-1", errors="replace").splitlines()
+    return raw.decode("latin-1", errors="replace")
+
+
+def _decode_lines(raw: bytes) -> list[str]:
+    return _decode_text(raw).splitlines()
 
 
 def classify_file(path: Path) -> str | None:

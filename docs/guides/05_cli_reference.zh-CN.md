@@ -39,7 +39,7 @@ journal 导出日志。这是核心命令。
 | `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。可选地用 `PATH:HOST` 语法显式指定主机标签；若省略，则使用来源目录本身的名称作为主机标签。 |
 | `--workers N` | CPU 核心数 | 并行处理文件的工作进程数。各文件相互独立解析，因此该参数随核心数线性扩展效果明显。 |
 | `--keep-raw` | 关闭 | 仅对 `.evtx` 来源生效：同时将每条记录的原始 XML 一并写入数据湖（`raw_xml` 列），适用于需要完整证据保真度的场景。会使被应用文件的导入耗时与内存占用大致翻倍。 |
-| `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留 `staging/` 下的中间 NDJSON 文件（仅 EVTX——其他格式不会先落盘暂存）。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
+| `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留中间 NDJSON 文件——EVTX 来源存放在 `staging/` 下，其他所有日志类型存放在 `staging_aux/` 下。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
 
 如果 `<case>` 尚不存在，`ingest` 会自动创建它。只要来源路径下至少有一种受支持的非
@@ -134,7 +134,7 @@ seclogx query incident42 "SELECT * FROM web_logs WHERE status >= 400" --out web_
 
 ## `seclogx sources <case>`
 
-列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
+列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
 
 ```bash
 seclogx sources incident42
@@ -203,7 +203,7 @@ seclogx search incident42 web_error_logs --eq severity=error,SEVERE --out errors
 
 | 参数 | 含义 |
 |---|---|
-| `--suspicious` | 只显示内置启发式规则标记出的任务：动作可执行文件位于类似 Temp/AppData/Public 的路径下、命令类似 LOLBin（powershell/cmd/wscript/cscript/mshta/rundll32/regsvr32）、任务被隐藏，或任务未记录作者。这不是 Sigma 规则——参见[《4. 威胁狩猎》](04_threat_hunting.zh-CN.md)。 |
+| `--suspicious` | 只显示内置启发式规则标记出的任务（动作可执行文件位于 Temp/AppData/Public 之下、命令类似 LOLBin、任务被隐藏、未记录作者，或伪装成已知的微软计划任务——完整列表以及说明每行具体匹配原因的 `suspicion_reasons` 列，见[《2. 日志类型与 Schema》](02_log_types_and_schema.zh-CN.md)中的“其他表”一节）。这不是 Sigma 规则——参见[《4. 威胁狩猎》](04_threat_hunting.zh-CN.md)。 |
 | `--out FILE.csv` | 导出完整结果 |
 
 ```bash

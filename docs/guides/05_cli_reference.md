@@ -44,7 +44,7 @@ the core command.
 | `--source PATH[:HOST]` | required, repeatable | A file or directory to scan recursively. Optionally tag it with an explicit host label (`PATH:HOST`); if omitted, the source directory's own name is used as the host label. |
 | `--workers N` | CPU count | Parallel staging workers. Files are parsed independently, so this scales with cores. |
 | `--keep-raw` | off | `.evtx` sources only: also capture each record's raw XML into the lake (`raw_xml` column), for cases needing full evidentiary completeness. Roughly doubles ingest time and memory for the files it's applied to. |
-| `--keep-staging` / `--no-keep-staging` | keep | Whether to keep the intermediate NDJSON under `staging/` after flattening (EVTX only -- the other formats don't stage to disk). Keeping it makes reprocessing cheap if you change something; deleting it saves disk. |
+| `--keep-staging` / `--no-keep-staging` | keep | Whether to keep the intermediate NDJSON after flattening -- `staging/` for `.evtx` sources, `staging_aux/` for every other log family. Keeping it makes reprocessing cheap if you change something; deleting it saves disk. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
 
 If `<case>` doesn't already exist, `ingest` creates it automatically. A
@@ -160,8 +160,9 @@ Sysmon was running).
 
 Row count per table currently in the case -- `events`, `web_logs`,
 `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`,
-`exchange_logs`, whichever are present. The quickest way to see what log
-families a case actually has before writing queries against them.
+`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, whichever are
+present. The quickest way to see what log families a case actually has
+before writing queries against them.
 
 ```bash
 seclogx sources incident42
@@ -239,7 +240,7 @@ Lists ingested Scheduled Task definitions from `scheduled_tasks`.
 
 | Option | Meaning |
 |---|---|
-| `--suspicious` | Only tasks flagged by a built-in heuristic: action executable under a Temp/AppData/Public-like path, a LOLBin-style command (powershell/cmd/wscript/cscript/mshta/rundll32/regsvr32), a hidden task, or a task with no recorded author. Not a Sigma rule -- see [04. Threat hunting](04_threat_hunting.md). |
+| `--suspicious` | Only tasks flagged by a built-in heuristic (action path under Temp/AppData/Public, a LOLBin-style command, hidden, no recorded author, or masquerading as a known Microsoft task -- see "The other tables" in [02. Log types & schema](02_log_types_and_schema.md) for the full list and the `suspicion_reasons` column that explains each match). Not a Sigma rule -- see [04. Threat hunting](04_threat_hunting.md). |
 | `--out FILE.csv` | Export the full result |
 
 ```bash

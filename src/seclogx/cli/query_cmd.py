@@ -58,7 +58,8 @@ def sources_command(
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
 ) -> None:
     """Row count per table (events, web_logs, web_error_logs, scheduled_tasks,
-    exchange_message_tracking, exchange_logs) currently in the case."""
+    exchange_message_tracking, exchange_logs, syslog, auditd_logs,
+    journal_logs) currently in the case."""
     c = Case.open(case_name, case_root=case_root)
     print_df(c.table_counts(), title="Tables in case")
 

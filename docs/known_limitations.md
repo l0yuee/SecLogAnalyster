@@ -86,6 +86,24 @@ not oversights -- documented so they're easy to revisit later.
   outright** (reported as a failed file, not silently skipped) as a
   defense-in-depth XXE guard, rather than attempting to sanitize or
   safely parse it -- legitimate Task Scheduler exports never contain one.
+- **Text/XML decoding tries UTF-8, UTF-16, then GB18030 (a superset of
+  GBK/GB2312) before an always-succeeds Latin-1 fallback**
+  (`ingest/logsources/sniff._decode_text`, used by every aux parser
+  including Scheduled Tasks XML). This covers Simplified/Traditional
+  Chinese-locale content and binary-ish data without crashing, but is
+  still a best-effort guess, not real charset detection -- content in an
+  encoding outside this list (e.g. Shift-JIS, Big5, KOI8-R) can still
+  decode as readable-looking but wrong text rather than being flagged as
+  misdecoded.
+- **`Case.suspicious_tasks()`'s known-Microsoft-task baseline
+  (`data/scheduled_tasks/known_microsoft_tasks.json`) is a curated,
+  best-effort reference, not exhaustive or pinned to a specific Windows
+  version/edition, and not a code-signing or hash check.** It only flags
+  a *known* task path whose action executable falls outside that entry's
+  expected location(s) -- an unlisted task path (including legitimate
+  third-party or line-of-business tasks) is never compared, and a task
+  matching a listed path/location pair is never verified against the
+  actual binary's signature or hash.
 - **nginx vs. Apache vs. Tomcat cannot be reliably told apart from the log
   line alone.** Common/Combined Log Format is byte-identical across all
   three servers' default configurations; `log_type` for these is a
@@ -308,17 +326,14 @@ not oversights -- documented so they're easy to revisit later.
   query not already known to be small. The CLI (`query`/`table`/`tasks`/
   `timeline`) uses the chunked path automatically for both `--out` and
   the console preview.
-- **Ingest does not yet have the same bounded-memory property for the
-  non-EVTX log families.** The EVTX pipeline streams to disk per file and
-  bulk-flattens via DuckDB's own streaming `read_ndjson()`, so it never
-  holds more than one file's records as a Python list at a time. The
-  Scheduled Tasks/IIS/web/Exchange/Linux (syslog/auditd/journal) pipeline
-  (`ingest/logsources/orchestrator.py`) parses each file to a Python
-  `list[dict]` and accumulates every file's rows per table in memory
-  across the whole ingest batch before writing Parquet -- fine at the
-  volumes exercised so far, but a single ingest run processing enough log
-  files to reach terabyte scale *in one batch* would need the same
-  stage-to-disk-then-bulk-flatten treatment the EVTX
-  pipeline already has. Not yet implemented; this is specifically an
-  ingest-time boundary, separate from (and not fixed by) the query-side
-  chunking above.
+- **Ingest is bounded-memory per file, not per pathologically large
+  individual file.** Both pipelines now stage each file to NDJSON on disk
+  and bulk-flatten via DuckDB reading straight off disk, so coordinator
+  memory during ingest is bounded by (one file's parse footprint) x
+  `--workers`, not by total batch size -- see "Why not Dask" in
+  `docs/architecture.md` for the mechanism. What's *not* bounded: each
+  worker still reads one whole file into memory to parse it (EVTX
+  streams to NDJSON as it parses, but the non-EVTX parsers need the whole
+  file for encoding detection first), so a single individual file large
+  enough on its own to exceed available memory is still a per-file risk,
+  independent of batch size or worker count.

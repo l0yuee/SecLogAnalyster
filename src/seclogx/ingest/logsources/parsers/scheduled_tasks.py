@@ -19,6 +19,8 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ..sniff import _decode_text
+
 TASK_NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
 
 
@@ -68,11 +70,21 @@ def parse_task_xml(path: Path, host: str) -> dict:
     """Raises RejectedTaskXmlError / ValueError on anything that can't be
     trusted as a task definition; the caller reports this as a failed file,
     never a silent skip."""
-    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    # Task Scheduler XML is typically UTF-16 on a live system, but forensic
+    # exports/locale-specific content vary -- _decode_text tries UTF-8,
+    # UTF-16, then GB18030 (Chinese-locale authors/descriptions) before an
+    # always-succeeds Latin-1 fallback, rather than assuming UTF-8.
+    text = _decode_text(path.read_bytes())
     if "<!DOCTYPE" in text[:4096]:
         raise RejectedTaskXmlError("rejected: DOCTYPE declaration present (XXE guard)")
 
-    root = ET.fromstring(text)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as e:
+        # A wrong encoding guess or genuinely malformed/truncated XML lands
+        # here -- reported as a failed file by the caller, never an
+        # uncaught crash of the whole ingest run.
+        raise RejectedTaskXmlError(f"malformed task XML: {e}") from e
     if _strip_ns(root.tag) != "Task":
         raise ValueError(f"root element is <{root.tag}>, expected <Task>")
 
@@ -105,6 +117,18 @@ def parse_task_xml(path: Path, host: str) -> dict:
             trigger.update(_elem_to_dict(trigger_el) or {})
             triggers.append(trigger)
 
+    # First-class Exec-action columns, derived from the same `actions` list
+    # above -- lets an analyst filter/group directly (e.g.
+    # `df.action_command.str.contains(...)`) without parsing the `actions`
+    # JSON blob first. Most tasks have exactly one action; the first Exec
+    # action is the common/representative case.
+    first_exec = next((a for a in actions if a.get("type") == "Exec"), None)
+    action_command = first_exec.get("Command") if first_exec else None
+    action_arguments = first_exec.get("Arguments") if first_exec else None
+    action_working_directory = first_exec.get("WorkingDirectory") if first_exec else None
+    action_types = ",".join(a["type"] for a in actions) or None
+    trigger_types = ",".join(t["type"] for t in triggers) or None
+
     return {
         "host": host,
         "task_path": _derive_task_path(path),
@@ -117,6 +141,11 @@ def parse_task_xml(path: Path, host: str) -> dict:
         "principal_user_id": principal_user_id,
         "principal_run_level": principal_run_level,
         "principal_logon_type": principal_logon_type,
+        "action_command": action_command,
+        "action_arguments": action_arguments,
+        "action_working_directory": action_working_directory,
+        "action_types": action_types,
+        "trigger_types": trigger_types,
         "actions": json.dumps(actions),
         "triggers": json.dumps(triggers),
     }

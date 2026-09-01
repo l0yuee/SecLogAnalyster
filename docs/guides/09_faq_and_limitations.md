@@ -108,9 +108,11 @@ likely to come up in day-to-day use:
 - Non-EVTX format detection is content-based, not guaranteed --
   nonstandard log headers can be misclassified as unrecognized (reported,
   never silently dropped).
-- Ingest for the non-EVTX log families (Scheduled Tasks/IIS/web/Exchange)
-  is not yet bounded-memory the way EVTX ingest and query/delivery are --
-  see [08. Performance & scale](08_performance_and_scale.md).
+- Ingest is bounded-memory per file (one file's parse footprint x
+  `--workers`), not per whole batch -- but each worker still reads one
+  whole file at a time, so a single pathologically large file is still a
+  per-file memory cost. See
+  [08. Performance & scale](08_performance_and_scale.md).
 - `.query()`/`.table()`/`.web_logs()`/etc. materialize the full result as
   one DataFrame; use the `_chunks` sibling for anything not already
   filtered/aggregated down to something small (see

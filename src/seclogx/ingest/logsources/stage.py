@@ -2,9 +2,19 @@
 worker process (files are independent), dispatches on the classification
 from discover_and_classify(), and never raises: any parse exception is
 caught and reported as a failed file.
+
+Parsed rows are written straight to a per-file NDJSON staging file (same
+pattern as `ingest/evtx/stage.py`) rather than returned in-memory -- so the
+coordinator never has to hold every row of every file in a batch at once,
+and only a small manifest object crosses the worker/coordinator boundary
+(over IPC locally, or over the job queue in distributed mode).
 """
 
 from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
 
 from .discovery import ClassifiedFile, sha256_file
 from .manifest import AuxStagedFile, StageStatus, now_iso
@@ -33,7 +43,11 @@ from .sniff import (
 )
 
 
-def stage_aux_file(cf: ClassifiedFile) -> AuxStagedFile:
+def _short_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+
+
+def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
     try:
         file_sha256 = sha256_file(cf.path)
     except OSError as e:
@@ -98,6 +112,19 @@ def stage_aux_file(cf: ClassifiedFile) -> AuxStagedFile:
     else:
         status = StageStatus.OK
 
+    ndjson_out: str | None = None
+    if rows:
+        host_dir = staging_dir / cf.host
+        host_dir.mkdir(parents=True, exist_ok=True)
+        # Hash suffix avoids collisions when files with the same basename
+        # are discovered under the same host from different acquisition
+        # paths (same scheme as ingest/evtx/stage.py).
+        ndjson_path = host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson"
+        with ndjson_path.open("w") as out:
+            for row in rows:
+                out.write(json.dumps(row, default=str) + "\n")
+        ndjson_out = str(ndjson_path)
+
     return AuxStagedFile(
         source_path=str(cf.path),
         source_file=cf.path.name,
@@ -110,7 +137,7 @@ def stage_aux_file(cf: ClassifiedFile) -> AuxStagedFile:
         record_count=ok_count,
         error_count=error_count,
         error_message=(f"{error_count} row(s) rejected (format mismatch)" if error_count else None),
-        rows=rows,
+        ndjson_path=ndjson_out,
         staged_at=now_iso(),
     )
 

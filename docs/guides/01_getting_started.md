@@ -94,8 +94,13 @@ Everything revolves around a **case** -- a named workspace under
 ```
 cases/<name>/
   case.json                     # hosts, source paths, ingest run history
+<<<<<<< HEAD
   staging/<host>/*.ndjson.gz       # intermediate parsed EVTX records, gzipped (kept by default)
   staging_aux/<host>/*.ndjson.gz   # intermediate parsed non-EVTX records, gzipped (kept by default)
+=======
+  staging/<host>/*.ndjson       # intermediate parsed EVTX records (kept by default)
+  staging_aux/<host>/*.ndjson   # intermediate parsed non-EVTX records (kept by default)
+>>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
   logs/ingest_<batch_id>.log    # reconciliation report per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows Event Log

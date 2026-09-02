@@ -63,6 +63,7 @@
   Per-file parsing itself (needed for encoding detection) still reads a
   whole file at a time, so a single pathologically large individual file
   is still a per-file, not per-batch, memory cost.
+<<<<<<< HEAD
 - Staged NDJSON (`staging/`, `staging_aux/`) is gzip-compressed (level 1)
   rather than written as plain text, and is kept by default (see
   `--keep-staging` in [05. CLI reference](05_cli_reference.md)) so a case
@@ -90,6 +91,8 @@
   is used for a file with no table to attach provenance to; only files
   that actually match a supported format pay the cost of a full read for
   hashing.
+=======
+>>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
 
 Next: [09. FAQ & limitations](09_faq_and_limitations.md) for
 troubleshooting and the full known-limitations pointer.

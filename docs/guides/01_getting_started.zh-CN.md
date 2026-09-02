@@ -62,8 +62,13 @@ seclogx --help
 ```
 cases/<name>/
   case.json                     # 已导入的主机列表、导入运行历史
+<<<<<<< HEAD
   staging/<host>/*.ndjson.gz       # 中间解析结果，已 gzip 压缩（EVTX，默认保留）
   staging_aux/<host>/*.ndjson.gz   # 中间解析结果，已 gzip 压缩（非 EVTX 日志类型，默认保留）
+=======
+  staging/<host>/*.ndjson       # 中间解析结果（EVTX，默认保留）
+  staging_aux/<host>/*.ndjson   # 中间解析结果（非 EVTX 日志类型，默认保留）
+>>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
   logs/ingest_<batch_id>.log    # 每次导入的核对报告
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows 事件日志

@@ -1,7 +1,45 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from seclogx.case import Case
 from seclogx.config import BUNDLED_SIGMA_RULES_DIR
+
+_GBK_RULE_TEMPLATE = """\
+title: GBK Encoded Rule
+id: 11111111-1111-1111-1111-111111111111
+status: test
+description: 检测可疑进程创建行为
+author: 测试作者
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\\\\cmd.exe'
+    condition: selection
+level: medium
+"""
+
+
+def test_load_rules_handles_non_utf8_locale_encoded_rule_file(tmp_path: Path):
+    """A Sigma rule file saved in a non-UTF-8 encoding (e.g. GBK, as a
+    Chinese-locale text editor might save it) must not crash `load_rules`
+    -- and by extension `hunt()`, which calls it first thing -- with an
+    uncaught UnicodeDecodeError. Regression test for the bug reported
+    against `hunt()`: rule files were read with `Path.read_text()`, which
+    decodes using the OS locale's default codec rather than UTF-8."""
+    from seclogx.detect.rules import load_rules
+
+    rule_path = tmp_path / "gbk_rule.yml"
+    rule_path.write_bytes(_GBK_RULE_TEMPLATE.encode("gb18030"))
+
+    result = load_rules(tmp_path)
+
+    assert not result.skipped, f"unexpected skipped rules: {result.skipped}"
+    assert len(result.rules) == 1
+    assert result.rules[0].description == "检测可疑进程创建行为"
+    assert str(result.rules[0].author) == "测试作者"
 
 
 def test_bundled_rules_all_convert():

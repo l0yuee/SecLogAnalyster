@@ -74,7 +74,7 @@ via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md)
 |---|---|---|
 | `web_logs` | **Access logs**: IIS, nginx, Apache, and Tomcat HTTP access logs, unified | `log_type`, `client_ip`, `method`, `uri_stem`, `uri_query`, `status`, `user_agent`, `referer` |
 | `web_error_logs` | **Error/diagnostic logs**: nginx, Apache, Tomcat, and IIS HTTP.sys (HTTPERR) -- the other major web-application log category, unified | `log_type`, `severity`, `client_ip`, `message`, plus IIS HTTPERR's `method`/`uri`/`status` |
-| `scheduled_tasks` | On-disk Task Scheduler task definitions (`System32\Tasks\**`) -- a persistence artifact, distinct from the Task Scheduler *event log* (already in `events`) | `task_path`, `author`, `enabled`, `hidden`, `actions` (JSON), `triggers` (JSON) |
+| `scheduled_tasks` | On-disk Task Scheduler task definitions (`System32\Tasks\**`) -- a persistence artifact, distinct from the Task Scheduler *event log* (already in `events`) | `task_path`, `author`, `enabled`, `hidden`, `action_command`, `action_arguments`, `action_types`, `trigger_types`, `actions` (JSON), `triggers` (JSON) |
 | `exchange_message_tracking` | Exchange mail flow (who sent what to whom) | `sender_address`, `recipient_address`, `message_subject`, `event_id` (Exchange's own, not a Windows Event ID) |
 | `exchange_logs` | Every other Exchange CSV log type (HttpProxy, ActiveSync, EWS, ...), fields preserved verbatim | `log_type`, `fields` (JSON, query with `fields ->> 'field-name'`) |
 | `syslog` | Generic BSD/RFC-3164 and RFC 5424 syslog: `/var/log/syslog`, `messages`, `kern.log`, `auth.log`/`secure`, etc., unified | `app_name`, `hostname`, `facility`, `severity`, `message`, `structured_data` (JSON, RFC5424 only) |
@@ -175,7 +175,13 @@ What to actually look for in each, at a glance (full recipes in
   in `web_logs` at all.
 - **`scheduled_tasks`** -- persistence hunting: hidden or unauthored
   tasks, actions invoking a LOLBin, action paths under Temp/AppData/
-  Public. `suspicious_tasks()` runs this heuristic for you.
+  Public, or a known Microsoft task path whose action doesn't match its
+  expected executable location (a hijacked/masqueraded legitimate task,
+  MITRE ATT&CK T1053.005). `suspicious_tasks()` runs all of this for you
+  and explains *why* each row was flagged via a `suspicion_reasons`
+  column; `scheduled_tasks()` returns the full table (including
+  first-class `action_command`/`action_arguments`/`action_types` columns
+  derived from the raw `actions` JSON) for open-ended analysis.
 - **`exchange_message_tracking`** -- phishing and mail-based
   exfiltration: sender/recipient/subject sweeps, unexpected external
   mail flow, a sender domain that doesn't match its claimed identity.
@@ -254,7 +260,7 @@ vary):
 | `events` (always available, any channel) | `channel`, `event_id`, `host`, `computer`, `time_created`, `user_sid` |
 | `web_logs` | `uri_stem`, `uri_query`, `status`, `method`, `client_ip`, `user_agent`, `referer`, `log_type` |
 | `web_error_logs` | `severity`, `message`, `client_ip`; IIS HTTPERR only: `method`, `uri`, `status` |
-| `scheduled_tasks` | `author`, `hidden`, `enabled`, `actions`, `triggers`, `task_path`, `principal_user_id` |
+| `scheduled_tasks` | `author`, `hidden`, `enabled`, `action_command`, `action_arguments`, `actions`, `triggers`, `task_path`, `principal_user_id` |
 | `exchange_message_tracking` | `sender_address`, `recipient_address`, `message_subject`, `recipient_status`, `event_id` |
 | `exchange_logs` | `log_type` first (to see what kind of Exchange log you actually have), then `seclogx fields` for that log type's real field names |
 | `syslog` | `app_name`, `message`, `hostname`, `facility`/`severity` (NULL unless the source has `<PRI>`) |

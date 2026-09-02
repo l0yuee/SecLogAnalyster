@@ -57,19 +57,23 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
   `LOGSOURCE_ROUTES` unless that category also needs an added condition).
 - `seclogx hunt` only ever runs bundled + user-supplied Sigma rules
   against `events` and `web_logs` in v1 -- `scheduled_tasks`,
-  `web_error_logs`, and `exchange_message_tracking`/`exchange_logs` have
-  no Sigma logsource category that fits (Sigma's scheduled-task
-  detections target the event log, not on-disk task definitions; there's
-  no standard Sigma category for web error/diagnostic logs either), so
-  they're queried directly via SQL or the lightweight
-  `Case.suspicious_tasks()` heuristic instead.
+  `web_error_logs`, `exchange_message_tracking`/`exchange_logs`, and the
+  three Linux tables (`syslog`/`auditd_logs`/`journal_logs`) have no
+  Sigma logsource category that fits (Sigma's scheduled-task detections
+  target the event log, not on-disk task definitions; there's no
+  standard Sigma category for web error/diagnostic logs or for these
+  Linux formats either), so they're queried directly via SQL/`search()`,
+  or via the lightweight `Case.suspicious_tasks()` / `Case.auth_events()`
+  heuristics instead.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
   `seclogx hunt <case> --rules <dir>` against a case with known-good data
-  to sanity check real matches (see the mimikatz-record test in this
-  project's development history for the pattern: hand-craft one
-  synthetic NDJSON record shaped like a real match, flatten it into a
-  throwaway case, and confirm exactly the expected rule fires).
+  to sanity check real matches (see
+  `test_hunt_catches_mimikatz_and_not_the_benign_record` in
+  `tests/unit/test_hunt.py`, and the `synth_case` fixture it uses in
+  `tests/conftest.py`, for the pattern: hand-craft one synthetic NDJSON
+  record shaped like a real match, flatten it into a throwaway case, and
+  confirm exactly the expected rule fires).
 
 ## Adding more bundled rules
 

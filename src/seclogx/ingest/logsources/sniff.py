@@ -15,6 +15,8 @@ import json
 import re
 from pathlib import Path
 
+from ...textdecode import decode_text as _decode_text
+
 KIND_SCHEDULED_TASK = "scheduled_task"
 KIND_IIS = "iis"
 KIND_IIS_HTTPERR = "iis_httperr"
@@ -53,12 +55,7 @@ def _peek(path: Path) -> bytes:
 
 
 def _decode_lines(raw: bytes) -> list[str]:
-    for encoding in ("utf-8-sig", "utf-16"):
-        try:
-            return raw.decode(encoding).splitlines()
-        except UnicodeError:
-            continue
-    return raw.decode("latin-1", errors="replace").splitlines()
+    return _decode_text(raw).splitlines()
 
 
 def classify_file(path: Path) -> str | None:

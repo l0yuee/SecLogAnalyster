@@ -43,7 +43,7 @@ class HuntResults:
         return self.matches
 
     def save(self, path: str | Path) -> None:
-        self.matches.to_csv(path, index=False)
+        self.matches.to_csv(path, index=False, encoding="utf-8")
 
     def summary_text(self) -> str:
         lines = [

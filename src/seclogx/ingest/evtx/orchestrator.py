@@ -73,6 +73,10 @@ def run_ingest(
 
     log_path = case_dir / "logs" / f"ingest_{batch_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(report.summary_text())
+    # encoding="utf-8" is explicit: source paths/error messages embedded in
+    # the summary can carry non-ASCII content from the evidence itself, and
+    # write_text()'s default encoding otherwise follows the OS locale (e.g.
+    # GBK/cp936 on Chinese-locale Windows), which can't represent everything.
+    log_path.write_text(report.summary_text(), encoding="utf-8")
 
     return report

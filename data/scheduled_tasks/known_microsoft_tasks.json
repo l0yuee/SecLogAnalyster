@@ -1,0 +1,200 @@
+{
+  "_note": "Curated reference of well-known default Windows Task Scheduler tasks (Windows 10/11), used by Case.suspicious_tasks() to flag a known task path whose action executable points somewhere it shouldn't -- the way T1053.005 (masquerading as / hijacking an existing scheduled task) is usually spotted. NOT exhaustive, NOT pinned to a specific Windows build/edition, and NOT a code-signing or hash check -- purely a task-path + expected-executable-location heuristic. Matching is case-insensitive and normalizes common %SystemRoot%/%windir%/%ProgramFiles%/%SystemDrive% environment-variable forms before comparison. See docs/known_limitations.md.",
+  "tasks": [
+    {
+      "task_path": "\\Microsoft\\Windows\\UpdateOrchestrator\\Schedule Scan",
+      "expected_command_prefixes": ["c:\\windows\\system32\\usoclient.exe", "c:\\windows\\system32\\mousocoreworker.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\UpdateOrchestrator\\Schedule Wake To Work",
+      "expected_command_prefixes": ["c:\\windows\\system32\\usoclient.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\UpdateOrchestrator\\Reboot",
+      "expected_command_prefixes": ["c:\\windows\\system32\\usoclient.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\UpdateOrchestrator\\Report policies",
+      "expected_command_prefixes": ["c:\\windows\\system32\\usoclient.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\WindowsUpdate\\Scheduled Start",
+      "expected_command_prefixes": ["c:\\windows\\system32\\usoclient.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Windows Defender\\Windows Defender Scheduled Scan",
+      "expected_command_prefixes": ["c:\\program files\\windows defender\\mpcmdrun.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Windows Defender\\Windows Defender Cache Maintenance",
+      "expected_command_prefixes": ["c:\\program files\\windows defender\\mpcmdrun.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Windows Defender\\Windows Defender Cleanup",
+      "expected_command_prefixes": ["c:\\program files\\windows defender\\mpcmdrun.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Windows Defender\\Windows Defender Verification",
+      "expected_command_prefixes": ["c:\\program files\\windows defender\\mpcmdrun.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Defrag\\ScheduledDefrag",
+      "expected_command_prefixes": ["c:\\windows\\system32\\defrag.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser",
+      "expected_command_prefixes": ["c:\\windows\\system32\\compattelrunner.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater",
+      "expected_command_prefixes": ["c:\\windows\\system32\\compattelrunner.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Application Experience\\StartupAppTask",
+      "expected_command_prefixes": ["c:\\windows\\system32\\wsqmcons.exe", "c:\\windows\\system32\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Customer Experience Improvement Program\\Consolidator",
+      "expected_command_prefixes": ["c:\\windows\\system32\\wsqmcons.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Customer Experience Improvement Program\\KernelCeipTask",
+      "expected_command_prefixes": ["c:\\windows\\system32\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Customer Experience Improvement Program\\UsbCeip",
+      "expected_command_prefixes": ["c:\\windows\\system32\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\.NET Framework\\.NET Framework NGEN v4.0.30319",
+      "expected_command_prefixes": ["c:\\windows\\microsoft.net\\framework\\v4.0.30319\\ngen.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\.NET Framework\\.NET Framework NGEN v4.0.30319 64",
+      "expected_command_prefixes": ["c:\\windows\\microsoft.net\\framework64\\v4.0.30319\\ngen.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Chkdsk\\ProactiveScan",
+      "expected_command_prefixes": ["c:\\windows\\system32\\chkdsk.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\DiskCleanup\\SilentCleanup",
+      "expected_command_prefixes": ["c:\\windows\\system32\\cleanmgr.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Maintenance\\WinSAT",
+      "expected_command_prefixes": ["c:\\windows\\system32\\winsat.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\TaskScheduler\\Maintenance Configurator",
+      "expected_command_prefixes": ["c:\\windows\\system32\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Time Synchronization\\SynchronizeTime",
+      "expected_command_prefixes": ["c:\\windows\\system32\\sc.exe", "c:\\windows\\system32\\w32tm.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Time Synchronization\\ForceSynchronizeTime",
+      "expected_command_prefixes": ["c:\\windows\\system32\\sc.exe", "c:\\windows\\system32\\w32tm.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Windows Error Reporting\\QueueReporting",
+      "expected_command_prefixes": ["c:\\windows\\system32\\wermgr.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Registry\\RegIdleBackup",
+      "expected_command_prefixes": ["c:\\windows\\system32\\regidle.dll", "c:\\windows\\system32\\rundll32.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Servicing\\StartComponentCleanup",
+      "expected_command_prefixes": ["c:\\windows\\system32\\dism.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\SystemRestore\\SR",
+      "expected_command_prefixes": ["c:\\windows\\system32\\srtasks.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Autochk\\Proxy",
+      "expected_command_prefixes": ["c:\\windows\\system32\\autochk"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector",
+      "expected_command_prefixes": ["c:\\windows\\system32\\dfdwiz.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\MUI\\LPRemove",
+      "expected_command_prefixes": ["c:\\windows\\system32\\lpremove.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\NetTrace\\GatherNetworkInfo",
+      "expected_command_prefixes": ["c:\\windows\\system32\\netsh.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Power Efficiency Diagnostics\\AnalyzeSystem",
+      "expected_command_prefixes": ["c:\\windows\\system32\\powercfg.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Bluetooth\\UninstallDeviceTask",
+      "expected_command_prefixes": ["c:\\windows\\system32\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Shell\\FamilySafetyMonitor",
+      "expected_command_prefixes": ["c:\\program files\\microsoft family safety\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Shell\\FamilySafetyRefresh",
+      "expected_command_prefixes": ["c:\\program files\\microsoft family safety\\"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\WOF\\WIM-Hash-Management",
+      "expected_command_prefixes": ["c:\\windows\\system32\\wimserv.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\WDI\\ResolutionHost",
+      "expected_command_prefixes": ["c:\\windows\\system32\\resolutionhost.exe", "c:\\windows\\system32\\dllhost.exe"],
+      "expected_author": "Microsoft Corporation"
+    },
+    {
+      "task_path": "\\Microsoft\\Windows\\Device Setup\\Metadata Refresh",
+      "expected_command_prefixes": ["c:\\windows\\system32\\devicecensus.exe", "c:\\windows\\system32\\"],
+      "expected_author": "Microsoft Corporation"
+    }
+  ]
+}

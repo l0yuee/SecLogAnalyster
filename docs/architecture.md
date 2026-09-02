@@ -2,7 +2,8 @@
 
 seclogx turns scattered forensic acquisitions -- `.evtx`, on-disk
 Scheduled Task definitions, IIS/nginx/Apache/Tomcat access and error
-logs, Exchange CSV logs -- into one queryable, huntable case workspace,
+logs, Exchange CSV logs, and Linux syslog/auditd/systemd-journal exports
+-- into one queryable, huntable case workspace,
 favoring set-based DuckDB SQL over per-record Python wherever possible
 (validated during design: the `evtx` package's real bottleneck is
 per-record Python marshaling, not parsing). This is two parallel
@@ -21,7 +22,7 @@ produced, with no distinction between them at the query layer.
  [1] discovery + parallel staging  (ingest/evtx/discovery.py, ingest/evtx/stage.py, ingest/evtx/orchestrator.py)
         |  ProcessPoolExecutor, one worker per file
         v
- cases/<name>/staging/<host>/*.ndjson   (+ staging/manifest via IngestReport)
+ cases/<name>/staging/<host>/*.ndjson.gz   (+ staging/manifest via IngestReport)
         |
         v
  [2] DuckDB bulk flatten  (ingest/evtx/flatten.py, schema.py)
@@ -49,17 +50,24 @@ families" below).
 (`ingest/evtx/orchestrator.py` coordinates via `ProcessPoolExecutor` --
 files are independent and parsing is CPU/IO-bound, so this is where
 parallelism buys speed). Each worker streams `PyEvtxParser.records_json()`
-straight to `staging/<host>/<file>.ndjson` with minimal Python-side
-transformation.
+straight to `staging/<host>/<file>.ndjson.gz` with minimal Python-side
+transformation. Staged NDJSON is gzipped (level 1): rendered-as-JSON EVTX
+records run considerably larger than the source binary `.evtx` (verbose
+field names, string-encoded binary values), and `staging/` is kept by
+default (see "Case workspace layout" below) -- uncompressed, that
+combination was the dominant driver of a case directory growing to
+several times the source evidence size. DuckDB's `read_ndjson`/
+`read_ndjson_auto` (Stage 2) decompress `.gz` input transparently, so
+nothing downstream treats compressed and uncompressed staging
+differently.
 
-Corrupted chunks are a real, observed failure mode (see
-`docs/known_limitations.md`): the parser raises at the generator level
-rather than yielding a per-record error, so a bad chunk aborts the rest
-of that file's parse. Staging catches this at the file level and records
-a `partial` status with the exact number of records recovered --
-`ingest/evtx/manifest.py`'s `StagedFile`/`IngestReport` never let a partial
-read pass as a silent success, which is the direct fix for the "ELK
-silently drops records on import" pain point this tool exists to solve.
+Staging catches parse failures at the file level and records a `partial`
+status with the exact number of records recovered, rather than letting a
+partial read pass as a silent success -- `ingest/evtx/manifest.py`'s
+`StagedFile`/`IngestReport` are the direct fix for the "ELK silently
+drops records on import" pain point this tool exists to solve. See
+`docs/known_limitations.md`'s "Ingestion / schema" section for exactly
+when this triggers (a corrupted chunk partway through a file).
 (`ingest/common.py` also holds the `StageStatus` vocabulary and `now_iso()`
 helper both pipelines' manifests share.)
 
@@ -86,14 +94,17 @@ transparently on read -- verified empirically.
 under `lake/` (`read_parquet(..., hive_partitioning=true,
 union_by_name=true)` each) -- `events` for Windows Event Log, plus
 whichever of `web_logs`/`web_error_logs`/`scheduled_tasks`/
-`exchange_message_tracking`/`exchange_logs` the case has data for -- and
-exposes `.sql()`, a generic `.table(name)` (full contents of any table as
-a DataFrame), and a handful of convenience filters, always returning
-pandas DataFrames. `Case` mirrors this with a named, DataFrame-returning
-accessor per log family (`web_logs()`, `web_error_logs()`,
-`scheduled_tasks()`, `exchange_message_tracking()`, `exchange_logs()`) --
-the same first-class treatment `events` gets via `summary()`/`hosts()`/
-`channels()`, so no log family requires raw SQL just to get a DataFrame.
+`exchange_message_tracking`/`exchange_logs`/`syslog`/`auditd_logs`/
+`journal_logs` the case has data for -- and exposes `.sql()`, a generic
+`.table(name)` (full contents of any table as a DataFrame), and a handful
+of convenience filters, always returning pandas DataFrames. `Case`
+mirrors this with a named, DataFrame-returning accessor per log family
+(`web_logs()`, `web_error_logs()`, `scheduled_tasks()`,
+`exchange_message_tracking()`, `exchange_logs()`, `syslog()`,
+`auditd_logs()`, `journal_logs()`) -- the same first-class treatment
+`events` gets via `summary()`/`hosts()`/`channels()`, so no log family
+requires raw SQL just to get a DataFrame. See `docs/schema.md` for every
+table's full column list.
 
 ### Bounded-memory delivery: `.sql()`/`.table()` vs. `.sql_chunks()`/`.table_chunks()`
 
@@ -107,9 +118,10 @@ is the actual bottleneck, independent of how lazy the query engine
 underneath is. `.sql_chunks()`/`.table_chunks()` use DuckDB's
 `fetch_df_chunk()` on a dedicated cursor instead, yielding an
 `Iterator[pd.DataFrame]` of roughly `chunksize`-row chunks -- bounded
-memory regardless of total result size. Verified empirically: reading 5M
-rows via chunks added ~190MB of peak RSS against ~2.7GB for `fetchdf()`
-on the same query (bounded vs. proportional-to-data-size).
+memory regardless of total result size. See "Bounded-memory access for
+large tables" in
+[03. Querying & search](guides/03_querying_and_search.md) for the full
+mechanism and a worked before/after memory measurement.
 
 Every DataFrame-returning accessor -- `CaseDB`'s and `Case`'s alike -- has
 a `_chunks` sibling built the same way (`Case.query_chunks()`,
@@ -138,14 +150,19 @@ run, in three steps:
    column here is physically stored as VARCHAR (see schema.py's
    `event_data` comment), so asking DuckDB "is this column's type JSON"
    always says no. Content-sniffing the catalog instead (sample a value,
-   check it looks like `{...}`) was the first approach tried and it broke
-   silently whenever a JSON-object column was all-NULL in a given case;
-   reading the declared type doesn't have that failure mode. JSON *array*
+   check it looks like `{...}`) breaks silently whenever a JSON-object
+   column is all-NULL in a given case; reading the declared type doesn't
+   have that failure mode. JSON *array*
    columns (`scheduled_tasks.actions`/`triggers`) are excluded from this
    even though they're declared JSON too -- keyed extraction doesn't
    apply to a list the same way. An unresolvable field raises
    `UnknownFieldError` listing the table's actual columns, rather than a
-   raw "column not found" from DuckDB.
+   raw "column not found" from DuckDB -- but only on a table with no
+   JSON-object catchall to fall back to (e.g. `scheduled_tasks`); on a
+   table that has one (`events`, `web_logs`, ...) an unknown key is
+   indistinguishable from "a real key just not present in this data,"
+   and both correctly return zero matches instead (see
+   `docs/known_limitations.md`'s "Plain-language search" section).
 2. **Operator compilation** (`_condition_sql`): `equals` casts both sides
    to VARCHAR and compares (optionally via `LOWER()` for the default
    case-insensitive behavior) -- deliberately always a text comparison so
@@ -211,8 +228,7 @@ and systemd journal export)
 (`ingest/logsources/discovery.py`, `ingest/logsources/stage.py`,
 `ingest/logsources/orchestrator.py` + `ingest/logsources/flatten.py` --
 this second pair mirrors the EVTX pipeline's own orchestrator/flatten
-split, unlike in earlier versions of this project where both lived in
-one `logsources/ingest.py` file), orchestrated from `Case.ingest()`
+split), orchestrated from `Case.ingest()`
 alongside the EVTX pipeline; see `docs/known_limitations.md` for what
 happens when a source has one but not the other.
 
@@ -229,15 +245,17 @@ happens when a source has one but not the other.
    | journal_export | unknown
         |
         v
- [2] parse      (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal}.py)
+ [2] parse + stage  (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal}.py)
         |  dispatched by ingest/logsources/orchestrator.py's
-        |  ProcessPoolExecutor, one worker per file -- straight to Python
-        |  dicts (these formats are already line/element-oriented text,
-        |  unlike EVTX, so no NDJSON staging step is needed)
+        |  ProcessPoolExecutor, one worker per file -- parses to Python
+        |  dicts, then writes them to a per-file NDJSON staging file
+        |  under staging_aux/<host>/, the same pattern EVTX stage 1 uses
         v
  [3] flatten    (ingest/logsources/flatten.py, ingest/logsources/schema.py)
-        |  explicit TRY_CAST per column per table -- same union_by_name
-        |  stable-typing discipline as schema.py's event_data fix
+        |  DuckDB reads each table's staged NDJSON straight off disk
+        |  (read_ndjson_auto, out-of-core) and applies an explicit
+        |  TRY_CAST per column -- same union_by_name stable-typing
+        |  discipline as schema.py's event_data fix
         v
  cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs,syslog,auditd_logs,journal_logs}/host=<h>/[log_type=<t>/]*.parquet
 ```
@@ -255,10 +273,7 @@ uses over `scheduled_tasks`, not a separate ingest-time table.
 Access logs (`web_logs`) and error/diagnostic logs (`web_error_logs`) are
 each web applications' two major log categories, and are kept as
 separate tables since they're structurally unrelated (access logs have a
-request/response shape; error logs are severity + free text). Unlike
-access-log format, nginx/Apache/Tomcat error-log format *is*
-engine-specific and unambiguous, so classification for those is a real
-detection, not the path/filename heuristic access logs need.
+request/response shape; error logs are severity + free text).
 
 Unlike EVTX, classification never trusts a file's name or extension --
 only content (see `sniff.classify_file`) -- because these artifacts are
@@ -269,17 +284,20 @@ supported formats is reported as `unrecognized`, never silently dropped
 
 IIS and Exchange logs are both self-describing (`#Fields:` header naming
 the columns actually enabled for that site/log), so the parsers read the
-header rather than assuming a fixed field set. nginx/Apache/Tomcat
-Combined/Common Log Format is not self-describing and is
-byte-identical across all three servers, so the specific server label is
-a path/filename heuristic (`sniff.guess_web_log_type`), not a detection.
+header rather than assuming a fixed field set. nginx/Apache/Tomcat access
+logs are not self-describing this way (unlike their *error* logs, which
+are engine-specific and unambiguous) -- see `docs/known_limitations.md`'s
+"Non-EVTX log ingestion" section for exactly which formats get a real
+detection versus a best-effort path/filename heuristic
+(`sniff.guess_web_log_type`).
 
 ## Case workspace layout
 
 ```
 cases/<case_name>/
   case.json                     # hosts, source paths, ingest run history
-  staging/<host>/*.ndjson       # raw records_json() output, one file per source .evtx
+  staging/<host>/*.ndjson.gz       # gzipped records_json() output, one file per source .evtx
+  staging_aux/<host>/*.ndjson.gz   # gzipped staged non-EVTX rows, one file per source file, named <table>.<file>.<hash>.ndjson.gz
   logs/ingest_<batch_id>.log    # reconciliation summary per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet
@@ -288,6 +306,9 @@ cases/<case_name>/
     scheduled_tasks/host=<h>/*.parquet
     exchange_message_tracking/host=<h>/*.parquet
     exchange_logs/host=<h>/log_type=<t>/*.parquet
+    syslog/host=<h>/*.parquet
+    auditd_logs/host=<h>/record_type=<r>/*.parquet
+    journal_logs/host=<h>/*.parquet
 ```
 
 `query.py`'s `CaseDB` creates a view per subdirectory of `lake/` that
@@ -297,8 +318,8 @@ family only needs a lake subdirectory to become queryable -- no changes
 to `query.py` itself.
 
 Only `lake/` is affected by cluster mode's storage backend (see below) --
-`case.json`, `staging/`, and `logs/` always stay on whatever local/NFS
-directory `--case-root` points at, in every mode.
+`case.json`, `staging/`, `staging_aux/`, and `logs/` always stay on
+whatever local/NFS directory `--case-root` points at, in every mode.
 
 ## Why not Dask / a distributed query engine -- and what got distributed instead
 
@@ -355,20 +376,21 @@ of whether cluster mode is ever turned on:
   once a broker is configured (more reliable than a POSIX file lock over a
   network filesystem for coordinating genuinely separate machines).
 
-**Ingest is not yet bounded-memory the same way query is.** The EVTX
-pipeline is fine at real-world scale (stage 1 streams to NDJSON on disk
-per file; stage 2's flatten reads that back via DuckDB's own streaming
-`read_ndjson()`, never loading every record into a Python list at once).
-The non-EVTX pipeline (`ingest/logsources/orchestrator.py`) does not have this
-property yet: each worker parses a file straight to a Python
-`list[dict]`, and `run_aux_ingest()` accumulates every file's rows for a
-given table in memory (`by_table[table].extend(rows)`) across the whole
-ingest batch before writing Parquet, rather than streaming to disk
-per-file the way EVTX staging does. This is fine at the volumes exercised
-so far (a batch of moderately-sized log files); an ingest batch
-processing enough web/error/Exchange log files to reach real-world
-terabyte-scale *in one run* would need the same stage-to-disk-then-bulk-
-flatten treatment stage 2 already gives EVTX. Not yet implemented --
-flagged here as the known boundary of "bounded memory," which currently
-covers query/delivery (`.sql_chunks()`/`.table_chunks()`) but not this
-specific ingest path.
+**Ingest is now bounded-memory across a batch, the same way EVTX always
+was.** The EVTX pipeline stages to NDJSON on disk per file, then flattens
+by reading that back via DuckDB's own streaming `read_ndjson()`, never
+loading every record into a Python list at once. The non-EVTX pipeline
+(`ingest/logsources/orchestrator.py`) now follows the same pattern: each
+worker still parses a file straight to a Python `list[dict]` (bounded to
+that one file's size), but writes it to a per-file NDJSON staging file
+instead of returning it in-memory, and `run_aux_ingest()` groups staged
+*file paths* by table rather than accumulating rows -- `flatten_table()`
+reads each table's staged files via `read_ndjson_auto()`, out-of-core,
+instead of building one `pd.DataFrame` from every row in the batch.
+Coordinator-side peak memory during ingest is now bounded by (one file's
+parse footprint) x `workers`, not by total batch size across every file
+of a given table. What's still per-file, not per-batch: each worker's own
+whole-file read (needed for encoding detection, see
+`ingest/logsources/sniff._decode_text`) means a single pathologically
+large individual file is still a per-file memory cost, same as EVTX
+staging.

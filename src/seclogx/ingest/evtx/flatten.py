@@ -20,7 +20,7 @@ import duckdb
 import pandas as pd
 
 from ...distributed.config import ClusterConfig
-from ...distributed.storage import get_storage_backend
+from ...distributed.storage import ensure_hive_partition_dirs, get_storage_backend
 from ...schema import CORE_COLUMNS, EXTRACTION_SQL
 from .manifest import StagedFile
 
@@ -89,12 +89,17 @@ def flatten_case(
     JOIN manifest_df m ON raw.filename = m.ndjson_path
     """
 
+    select_query = f"SELECT {select_sql} {from_sql}"
+    partition_columns = ("host", "channel")
+    partition_rows = con.execute(
+        f"SELECT DISTINCT {', '.join(partition_columns)} FROM ({select_query})"
+    ).fetchall()
+    ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+
     (row_count,) = con.execute(
         f"""
         COPY (
-          SELECT
-          {select_sql}
-          {from_sql}
+          {select_query}
         ) TO '{backend.copy_target(lake_location)}' (
           FORMAT PARQUET, PARTITION_BY (host, channel), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
         )

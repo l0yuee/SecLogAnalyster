@@ -34,8 +34,10 @@ def test_concurrent_flatten_calls_do_not_collide(tmp_path: Path):
     filenames gave no uniqueness guarantee across independent COPY
     invocations, so two concurrent flatten calls into the same host=
     partition (exactly what distributed ingest workers do) could
-    overwrite each other's Parquet file. Runs two flushes into the same
-    partition concurrently and confirms no rows are lost."""
+    overwrite each other's Parquet file. DuckDB can also race while creating
+    that shared partition directory on Windows. Runs two flushes into the
+    same initially-absent partition concurrently and confirms neither
+    failure mode loses rows."""
     case = Case.create("concurrency", case_root=tmp_path / "cases")
     case_dir = case.case_dir
 

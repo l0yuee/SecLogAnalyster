@@ -6,7 +6,12 @@ import duckdb
 import pytest
 
 from seclogx.distributed.config import ClusterConfig
-from seclogx.distributed.storage import LocalStorageBackend, S3StorageBackend, get_storage_backend
+from seclogx.distributed.storage import (
+    LocalStorageBackend,
+    S3StorageBackend,
+    ensure_hive_partition_dirs,
+    get_storage_backend,
+)
 from seclogx.errors import ClusterConfigError
 
 
@@ -62,6 +67,18 @@ class TestLocalStorageBackend:
         loc = backend.table_location(case_dir, "syslog")
         assert backend.parquet_glob(loc) == str(Path(loc) / "**" / "*.parquet")
         assert backend.copy_target(loc) == loc
+
+    def test_ensure_hive_partition_dirs_matches_duckdb_encoding(self, tmp_path):
+        backend = LocalStorageBackend()
+        table = backend.table_location(tmp_path / "cases" / "c1", "events")
+        ensure_hive_partition_dirs(
+            backend,
+            table,
+            ("host", "channel"),
+            [("lab 03", "Microsoft-Windows/Sysmon"), ("中文", None)],
+        )
+        assert (Path(table) / "host=lab%2003" / "channel=Microsoft-Windows%2FSysmon").is_dir()
+        assert (Path(table) / "host=%E4%B8%AD%E6%96%87" / "channel=__HIVE_DEFAULT_PARTITION__").is_dir()
 
     def test_configure_duckdb_is_a_noop(self):
         con = duckdb.connect()
@@ -132,13 +149,29 @@ class TestS3StorageBackend:
 
     def test_configure_duckdb_sets_s3_pragmas(self, s3_bucket):
         backend = S3StorageBackend(self._config(s3_endpoint_url="http://127.0.0.1:9999"))
-        con = duckdb.connect()
+
+        # Keep this a deterministic unit test: INSTALL httpfs otherwise
+        # writes to the user's DuckDB extension directory and may access the
+        # network. The real S3 integration path is documented as a manual
+        # end-to-end test in this class's docstring.
+        class RecordingConnection:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, query, parameters=None):
+                self.calls.append((query, parameters))
+                return self
+
+        con = RecordingConnection()
         backend.configure_duckdb(con)
-        assert con.execute("SELECT current_setting('s3_region')").fetchone()[0] == "us-east-1"
-        assert con.execute("SELECT current_setting('s3_endpoint')").fetchone()[0] == "127.0.0.1:9999"
-        assert con.execute("SELECT current_setting('s3_access_key_id')").fetchone()[0] == "testing"
-        assert con.execute("SELECT current_setting('s3_url_style')").fetchone()[0] == "path"
-        con.close()
+        assert ("INSTALL httpfs", None) in con.calls
+        assert ("LOAD httpfs", None) in con.calls
+        assert ("SET s3_region=?", ["us-east-1"]) in con.calls
+        assert ("SET s3_endpoint=?", ["127.0.0.1:9999"]) in con.calls
+        assert ("SET s3_access_key_id=?", ["testing"]) in con.calls
+        assert ("SET s3_secret_access_key=?", ["testing"]) in con.calls
+        assert ("SET s3_use_ssl=?", [False]) in con.calls
+        assert ("SET s3_url_style='path'", None) in con.calls
 
     def test_get_storage_backend_returns_s3_when_configured(self, s3_bucket):
         assert isinstance(get_storage_backend(self._config()), S3StorageBackend)

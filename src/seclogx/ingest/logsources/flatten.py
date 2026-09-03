@@ -16,7 +16,7 @@ from pathlib import Path
 import duckdb
 
 from ...distributed.config import ClusterConfig
-from ...distributed.storage import get_storage_backend
+from ...distributed.storage import ensure_hive_partition_dirs, get_storage_backend
 from .schema import TABLES, cast_sql_for
 
 
@@ -69,13 +69,22 @@ def flatten_table(
         select_exprs.append(f"{expr} AS {col}")
     select_sql = ",\n  ".join(select_exprs)
 
-    partition_by = ", ".join(table_def["partition_by"])
+    partition_columns = table_def["partition_by"]
+    partition_by = ", ".join(partition_columns)
+    select_query = f"SELECT {select_sql} {from_sql}"
+
+    # DuckDB creates Hive partition directories as part of COPY. Two
+    # concurrent writers targeting the same new partition can race on
+    # Windows, where the losing CreateDirectory call is an error. Python's
+    # mkdir(exist_ok=True) handles this race, so initialize the finite set of
+    # partitions before COPY; this is a no-op for object storage.
+    partition_rows = con.execute(f"SELECT DISTINCT {partition_by} FROM ({select_query})").fetchall()
+    ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+
     (row_count,) = con.execute(
         f"""
         COPY (
-          SELECT
-          {select_sql}
-          {from_sql}
+          {select_query}
         ) TO '{backend.copy_target(lake_location)}' (
           FORMAT PARQUET, PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
         )

@@ -35,6 +35,7 @@ KIND_MYSQL_SLOW = "mysql_slow"
 KIND_POSTGRESQL = "postgresql"
 KIND_MSSQL = "mssql"
 KIND_ORACLE_ALERT = "oracle_alert"
+KIND_REGISTRY_HIVE = "registry_hive"
 
 WEB_ERROR_KINDS = {KIND_WEB_ERROR_NGINX: "nginx", KIND_WEB_ERROR_APACHE: "apache", KIND_WEB_ERROR_TOMCAT: "tomcat"}
 
@@ -86,6 +87,14 @@ def classify_file(path: Path) -> str | None:
         return None
     if not raw:
         return None
+
+    # Windows Registry hive -- the literal 4-byte "regf" magic at the very
+    # start of the file is a strictly more reliable signature than any of
+    # the text-format heuristics below, and hive files are binary/NUL-heavy
+    # (UTF-16 names, padding), so this must be checked before the
+    # NUL-byte-density bailout further down would otherwise catch it first.
+    if raw[:4] == b"regf":
+        return KIND_REGISTRY_HIVE
 
     stripped = raw.lstrip()
     if stripped.startswith(b"<?xml") or stripped.startswith(b"<Task"):

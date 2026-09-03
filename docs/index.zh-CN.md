@@ -9,7 +9,7 @@ journal 日志。
 ## 指南
 
 1. **[快速上手](guides/01_getting_started.zh-CN.md)** -- seclogx 是做什么的、如何安装、案例工作区，以及快速上手示例。
-2. **[日志类型与模式](guides/02_log_types_and_schema.zh-CN.md)** -- 十张表分别存放什么、该看什么、该查哪些字段。
+2. **[日志类型与模式](guides/02_log_types_and_schema.zh-CN.md)** -- 十一张表分别存放什么、该看什么、该查哪些字段。
 3. **[查询与搜索](guides/03_querying_and_search.zh-CN.md)** -- 原生 SQL、免 SQL 的 `search()` 接口，以及有界内存交付。
 4. **[威胁狩猎](guides/04_threat_hunting.zh-CN.md)** -- Sigma 规则、ATT&CK 标签，以及扩展检测能力。
 5. **[命令行参考](guides/05_cli_reference.zh-CN.md)** -- 每一个 `seclogx` 子命令。

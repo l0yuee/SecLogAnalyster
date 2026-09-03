@@ -86,6 +86,9 @@ c.syslog()                             # generic syslog, incl. auth.log/secure c
 c.auditd_logs()                        # Linux Audit Framework
 c.journal_logs()                       # systemd journal export
 c.db_logs(log_type="mysql_slow")       # MySQL/MariaDB, PostgreSQL, MSSQL, Oracle logs
+c.registry()                           # Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/NTUSER/...
+c.registry(hive_type="software")
+c.suspicious_registry()                # high-entropy values + Run/services/COM/IFEO persistence heuristics
 
 # The CaseDB convenience methods are available via c.db
 c.db.by_event_id([4624, 4625])
@@ -126,9 +129,10 @@ with Case.open("incident42") as c:
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |
-| Per-log-family accessors | `c.events()` / `c.events_chunks()`, `c.web_logs(log_type=)` / `_chunks`, `c.web_error_logs(log_type=)` / `_chunks`, `c.scheduled_tasks()` / `_chunks`, `c.exchange_message_tracking()` / `_chunks`, `c.exchange_logs(log_type=)` / `_chunks`, `c.syslog()` / `_chunks`, `c.auditd_logs()` / `_chunks`, `c.journal_logs()` / `_chunks`, `c.db_logs(log_type=)` / `_chunks` |
+| Per-log-family accessors | `c.events()` / `c.events_chunks()`, `c.web_logs(log_type=)` / `_chunks`, `c.web_error_logs(log_type=)` / `_chunks`, `c.scheduled_tasks()` / `_chunks`, `c.exchange_message_tracking()` / `_chunks`, `c.exchange_logs(log_type=)` / `_chunks`, `c.syslog()` / `_chunks`, `c.auditd_logs()` / `_chunks`, `c.journal_logs()` / `_chunks`, `c.db_logs(log_type=)` / `_chunks`, `c.registry(hive_type=)` / `_chunks` |
 | Scheduled Task triage | `c.suspicious_tasks()` |
 | Auth event triage (over `syslog`) | `c.auth_events()` |
+| Registry triage | `c.suspicious_registry(entropy_threshold=7.0, min_size=32)` |
 | Detection | `c.hunt(rules_dir=, min_level=)` -> `HuntResults` |
 | Timeline | `c.timeline(start=, end=, host=, channel=, event_id=)` / `c.timeline_chunks(...)` |
 | `CaseDB` (`c.db`) | `.tables`, `.table(name)` / `.table_chunks(name)`, `.sql(query)` / `.sql_chunks(query)`, `.by_event_id(ids)`, `.by_host(host)`, `.search(text)`, `.estimate(query)` -> `ResultSizeEstimate` |

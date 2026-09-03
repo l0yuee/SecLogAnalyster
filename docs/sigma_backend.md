@@ -58,13 +58,17 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
 - `seclogx hunt` only ever runs bundled + user-supplied Sigma rules
   against `events` and `web_logs` in v1 -- `scheduled_tasks`,
   `web_error_logs`, `exchange_message_tracking`/`exchange_logs`, the
-  three Linux tables (`syslog`/`auditd_logs`/`journal_logs`), and
-  `db_logs` have no Sigma logsource category that fits (Sigma's
+  three Linux tables (`syslog`/`auditd_logs`/`journal_logs`), `db_logs`,
+  and `registry` have no Sigma logsource category that fits (Sigma's
   scheduled-task detections target the event log, not on-disk task
   definitions; there's no standard Sigma category for web error/
-  diagnostic logs, these Linux formats, or database server logs either),
-  so they're queried directly via SQL/`search()`, or via the lightweight
-  `Case.suspicious_tasks()` / `Case.auth_events()` heuristics instead.
+  diagnostic logs, these Linux formats, or database server logs either;
+  Sigma's `registry_event`/`registry_add`/etc. categories model *live*
+  registry-monitoring telemetry -- Sysmon EventID 12/13/14 fields like
+  `TargetObject`/`EventType` -- not a static offline hive dump, so they
+  don't fit `registry` either), so they're queried directly via
+  SQL/`search()`, or via the lightweight `Case.suspicious_tasks()` /
+  `Case.auth_events()` / `Case.suspicious_registry()` heuristics instead.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
   `seclogx hunt <case> --rules <dir>` against a case with known-good data

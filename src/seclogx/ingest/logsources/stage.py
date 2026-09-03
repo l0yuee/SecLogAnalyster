@@ -31,6 +31,7 @@ from .parsers.dblogs import (
 from .parsers.exchange import parse_exchange_csv
 from .parsers.iis import parse_iis_file
 from .parsers.journal import parse_journal_file
+from .parsers.registry import parse_registry_hive_file
 from .parsers.scheduled_tasks import parse_task_xml
 from .parsers.syslog import parse_syslog_file
 from .parsers.webaccess import parse_web_access_file
@@ -48,6 +49,7 @@ from .sniff import (
     KIND_MYSQL_SLOW,
     KIND_ORACLE_ALERT,
     KIND_POSTGRESQL,
+    KIND_REGISTRY_HIVE,
     KIND_SCHEDULED_TASK,
     KIND_SYSLOG,
     KIND_WEB_ACCESS,
@@ -224,4 +226,7 @@ def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
     if cf.kind == KIND_ORACLE_ALERT:
         rows, ok, err = parse_oracle_alert_file(cf.path, cf.host)
         return rows, "db_logs", ok, err
+    if cf.kind == KIND_REGISTRY_HIVE:
+        rows, ok, err = parse_registry_hive_file(cf.path, cf.host)
+        return rows, "registry", ok, err
     raise ValueError(f"no parser registered for kind {cf.kind!r}")

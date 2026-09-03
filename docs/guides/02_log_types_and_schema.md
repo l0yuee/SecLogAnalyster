@@ -60,7 +60,7 @@ If you don't know the exact field name for something, `CaseDB.search()`
 search across it -- see [07. Recipes](07_recipes.md) -- or read on for
 `seclogx fields`, which lists real field names directly from your data.
 
-## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`
+## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `registry`
 
 Windows Event Log isn't the only artifact `ingest` normalizes. Each of
 these is fundamentally a different shape, so each gets its own table
@@ -81,6 +81,7 @@ via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md)
 | `auditd_logs` | Linux Audit Framework (`/var/log/audit/audit.log`), one row per line | `record_type`, `audit_serial`, `syscall`, `exe`, `comm`, `auid`, `key`, `fields` (JSON) |
 | `journal_logs` | systemd journal export format (`journalctl -o json`) | `unit`, `syslog_identifier`, `priority`, `comm`, `exe`, `message`, `fields` (JSON) |
 | `db_logs` | Database server logs: MySQL/MariaDB (error, general query, slow query), PostgreSQL, MSSQL, Oracle alert log, unified | `log_type`, `severity`, `error_code`, `thread_id`, `user_name`, `query_time_sec`, `rows_examined`, `message` |
+| `registry` | Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/UsrClass/AmCache, one row per value | `hive_type`, `full_path`, `value_name`, `value_type`, `value_text`, `value_int`, `entropy` |
 
 A few things worth knowing before you query these:
 
@@ -137,6 +138,15 @@ A few things worth knowing before you query these:
   general/slow query logs and Oracle's alert log each depend on a
   marker/header/timestamp line appearing early in the file -- see
   `docs/known_limitations.md` if a database log doesn't get picked up.
+- **`registry` is not a live merged registry** -- no `HKLM`/`HKCU`
+  aliasing, no volatile keys. Each row is rooted at its own hive's real
+  logical path (`hive_root` + `key_path`, e.g.
+  `HKEY_LOCAL_MACHINE\SOFTWARE\...`, `HKEY_USERS\<user>\...`) -- the same
+  per-hive presentation forensic registry tools already use. One row per
+  value, plus one row per key with zero values (so key existence/
+  last-write-time isn't lost); `entropy` is populated only for
+  binary-typed values. See `docs/known_limitations.md` for the
+  transaction-log-recovery and hive-type-identification caveats.
 - See [07. Recipes](07_recipes.md) for recipes, and `docs/known_limitations.md`
   for the full list of scope decisions.
 
@@ -164,6 +174,7 @@ gets on top of that.
 | Linux Audit Framework (auditd) | `auditd_logs` | none -- use `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | No -- query directly |
 | systemd journal export | `journal_logs` | none -- use `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | No -- query directly |
 | Database logs (MySQL/MariaDB/PostgreSQL/MSSQL/Oracle) | `db_logs` | none -- use `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | No -- query directly |
+| Windows Registry hives | `registry` | `registry [--suspicious] [--hive-type]` | `registry(hive_type=)` / `registry_chunks(hive_type=)`, `suspicious_registry()` (heuristic) | No -- use `suspicious_registry()` / query directly |
 
 `seclogx sources <case>` isn't table-specific -- it's the one command to
 run first, before any of the above: a row count per table so you know
@@ -222,6 +233,15 @@ What to actually look for in each, at a glance (full recipes in
   exfiltration via a full-table scan); `message` text for SQL injection
   patterns reaching the database layer. Filter by `log_type` first --
   the six sub-formats have very different columns populated.
+- **`registry`** -- `suspicious_registry()` runs first: Run/RunOnce
+  startup items, service `ImagePath`/`ServiceDll`, COM CLSID
+  `InprocServer32` hijacking, Winlogon `Shell`/`Userinit`/`Notify`
+  tampering, `AppInit_DLLs`, Image File Execution Options `Debugger`
+  hijacks, and high-`entropy` binary values (`WHERE entropy > 7.5` finds
+  likely encoded/packed payloads stashed in a registry value directly).
+  For open-ended digging, `full_path`/`value_name` sweeps by known
+  persistence locations, or `key_last_write_time` to spot recently
+  modified keys around an incident window.
 
 ## Which fields can I search on?
 
@@ -287,6 +307,7 @@ vary):
 | `auditd_logs` | `record_type`, `key`, `exe`, `comm`, `auid`, `audit_serial` (to correlate related lines) |
 | `journal_logs` | `unit`, `syslog_identifier`, `message`, `priority` |
 | `db_logs` | `log_type` first, then `severity`, `error_code`, `message`; `mysql_slow` rows also have `query_time_sec`, `rows_examined` |
+| `registry` | `full_path`, `value_name`, `value_text`, `entropy`, `hive_type` |
 
 For `events` specifically, note that which fields exist depends on the
 *channel* -- `Image`/`CommandLine` are Sysmon fields and won't appear on

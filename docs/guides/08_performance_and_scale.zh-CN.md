@@ -26,7 +26,7 @@
   200MB 可用，而不是假设机器内存无限。见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)中的“内存安全检查”。
 - `--keep-raw` 会使被应用文件的导入耗时与峰值内存大致翻倍——建议只在需要完整 XML
   保真度的特定证据上选择性使用，而不要对整个大型案例默认开启。
-- 计划任务/IIS/Web 访问/Exchange/syslog/auditd/journal/数据库日志现在也和 EVTX
+- 计划任务/IIS/Web 访问/Exchange/syslog/auditd/journal/数据库/注册表日志现在也和 EVTX
   一样，先按文件暂存为 NDJSON，再由 DuckDB 直接从磁盘读取（`read_ndjson_auto`）后写入
   Parquet，而不再是把某张表在整个批次范围内的所有已解析行都累积在 Python 内存中。导入时的峰值内存现在由
   “单个文件的解析开销 × `workers` 数”决定，而不再由整个批次的总大小决定——即便一个批次的文件多到总量达到

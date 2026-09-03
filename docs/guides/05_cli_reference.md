@@ -36,9 +36,9 @@ seclogx case info incident42
 Discovers, classifies, and normalizes every supported file under the
 given source paths into the case in one pass: `.evtx`, Scheduled Task
 definitions, IIS/nginx/Apache/Tomcat access logs, Exchange CSV logs,
-Linux syslog/`auth.log`, auditd, and systemd journal export logs, and
-MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs. This is the core
-command.
+Linux syslog/`auth.log`, auditd, and systemd journal export logs,
+MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, and raw Windows
+Registry hive files. This is the core command.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -162,8 +162,8 @@ Sysmon was running).
 Row count per table currently in the case -- `events`, `web_logs`,
 `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`,
 `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`,
-whichever are present. The quickest way to see what log families a case
-actually has before writing queries against them.
+`registry`, whichever are present. The quickest way to see what log
+families a case actually has before writing queries against them.
 
 ```bash
 seclogx sources incident42
@@ -263,6 +263,26 @@ already-ingested `syslog` data, the `auth.log`/`secure` equivalent of
 ```bash
 seclogx auth incident42
 seclogx auth incident42 --out auth_events.csv
+```
+
+## `seclogx registry <case> [--suspicious] [--hive-type TYPE]`
+
+Lists ingested registry keys/values from `registry`. With `--suspicious`,
+runs `Case.suspicious_registry()` instead -- the built-in persistence/
+entropy heuristics (see [02. Log types & schema](02_log_types_and_schema.md)
+for exactly what's covered), same "heuristic filter, not Sigma" pattern
+as `tasks --suspicious`/`auth`.
+
+| Option | Meaning |
+|---|---|
+| `--suspicious` | Only entries flagged by the built-in heuristics |
+| `--hive-type TYPE` | Filter to one hive type (`system`/`software`/`sam`/`security`/`default`/`ntuser`/`usrclass`/`amcache`/`bcd`) |
+| `--out FILE.csv` | Export the full result |
+
+```bash
+seclogx registry incident42 --hive-type software
+seclogx registry incident42 --suspicious
+seclogx registry incident42 --suspicious --out suspicious_registry.csv
 ```
 
 ## `seclogx hunt <case>`

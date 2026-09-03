@@ -290,6 +290,38 @@ DB_LOGS_COLUMNS: list[tuple[str, str]] = [
 ]
 DB_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
 
+# Windows Registry hives -- SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
+# per-user NTUSER.DAT/UsrClass.dat, and (a bonus, since the underlying
+# regipy dependency already supports it) AmCache.hve/BCD. One row per
+# value, plus one row per key with zero values so key existence and
+# last-write-time aren't lost. `hive_root` + `key_path` together give
+# each hive's own logical position (e.g. `HKEY_LOCAL_MACHINE\SOFTWARE`,
+# `HKEY_USERS\<user>\Run`) -- seclogx does not simulate a live merged
+# registry (no HKLM/HKCU aliasing); see docs/known_limitations.md.
+REGISTRY_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("hive_type", "VARCHAR"),  # system|software|sam|security|default|ntuser|usrclass|amcache|bcd|unknown
+    ("hive_root", "VARCHAR"),  # e.g. 'HKEY_LOCAL_MACHINE\SOFTWARE', 'HKEY_USERS\alice\_Classes'
+    ("key_path", "VARCHAR"),  # path within the hive, e.g. '\Microsoft\Windows\CurrentVersion\Run'
+    ("full_path", "VARCHAR"),  # hive_root + key_path, denormalized for display/search
+    ("key_last_write_time", "TIMESTAMP"),
+    ("value_name", "VARCHAR"),  # NULL only for the synthetic zero-values-key row
+    ("value_type", "VARCHAR"),  # REG_SZ/REG_BINARY/REG_DWORD/REG_MULTI_SZ/REG_EXPAND_SZ/REG_QWORD/...; NULL for the key-only row
+    ("value_text", "VARCHAR"),  # decoded string (REG_SZ/REG_EXPAND_SZ direct; REG_MULTI_SZ newline-joined)
+    ("value_int", "BIGINT"),  # REG_DWORD/REG_QWORD
+    ("value_data_hex", "VARCHAR"),  # hex of the raw bytes for REG_BINARY/REG_NONE/other binary types, capped for storage
+    ("value_size", "INTEGER"),  # full, untruncated byte length of the value's raw data
+    ("entropy", "DOUBLE"),  # Shannon entropy (0-8 bits/byte) of the full raw bytes; NULL for non-binary types
+    ("transaction_log_applied", "BOOLEAN"),  # whether sibling .LOG1/.LOG2 recovery was applied before parsing
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+REGISTRY_PARTITION_COLUMNS = ["host", "hive_type"]
+
 TABLES: dict[str, dict] = {
     "web_logs": {"columns": WEB_LOGS_COLUMNS, "partition_by": WEB_LOGS_PARTITION_COLUMNS},
     "web_error_logs": {"columns": WEB_ERROR_LOGS_COLUMNS, "partition_by": WEB_ERROR_LOGS_PARTITION_COLUMNS},
@@ -303,6 +335,7 @@ TABLES: dict[str, dict] = {
     "auditd_logs": {"columns": AUDITD_LOGS_COLUMNS, "partition_by": AUDITD_LOGS_PARTITION_COLUMNS},
     "journal_logs": {"columns": JOURNAL_LOGS_COLUMNS, "partition_by": JOURNAL_LOGS_PARTITION_COLUMNS},
     "db_logs": {"columns": DB_LOGS_COLUMNS, "partition_by": DB_LOGS_PARTITION_COLUMNS},
+    "registry": {"columns": REGISTRY_COLUMNS, "partition_by": REGISTRY_PARTITION_COLUMNS},
 }
 
 # Columns holding JSON-serialized text (lists/dicts) or otherwise needing an

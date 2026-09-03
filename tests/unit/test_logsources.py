@@ -28,6 +28,7 @@ from seclogx.ingest.logsources.sniff import (
     KIND_MYSQL_SLOW,
     KIND_ORACLE_ALERT,
     KIND_POSTGRESQL,
+    KIND_REGISTRY_HIVE,
     KIND_SCHEDULED_TASK,
     KIND_WEB_ACCESS,
     KIND_WEB_ERROR_APACHE,
@@ -40,6 +41,7 @@ from seclogx.ingest.logsources.sniff import (
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources"
 LINUX_FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources_linux"
 DB_FIXTURES = Path(__file__).parent.parent / "fixtures" / "db_logs"
+REGISTRY_FIXTURES = Path(__file__).parent.parent / "fixtures" / "registry"
 
 
 # -- classification -----------------------------------------------------------
@@ -81,6 +83,10 @@ def test_classify_db_logs():
     assert classify_file(DB_FIXTURES / "postgresql.log") == KIND_POSTGRESQL
     assert classify_file(DB_FIXTURES / "mssql_errorlog") == KIND_MSSQL
     assert classify_file(DB_FIXTURES / "oracle_alert.log") == KIND_ORACLE_ALERT
+
+
+def test_classify_registry_hive():
+    assert classify_file(REGISTRY_FIXTURES / "SOFTWARE") == KIND_REGISTRY_HIVE
 
 
 def test_classify_unknown_returns_none(tmp_path: Path):
@@ -444,3 +450,67 @@ def test_case_db_logs_accessor_and_chunks_match(tmp_path: Path):
     assert isinstance(empty_df, pd.DataFrame)
     assert empty_df.empty
     assert list(empty_case.db_logs_chunks()) == []
+
+
+# -- registry hives: end-to-end aux ingest -------------------------------------------
+
+
+def test_run_aux_ingest_writes_registry_table(tmp_path: Path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    report = run_aux_ingest(case_dir, [SourceSpec(path=REGISTRY_FIXTURES, host="LAB01")], workers=1)
+
+    assert report.files_discovered == 1
+    assert report.files_ok == 1
+    assert report.files_failed == 0
+    assert report.rows_written.get("registry") == 8
+
+
+def test_case_registry_accessor_and_chunks_match(tmp_path: Path):
+    import pandas as pd
+    from seclogx.case import Case
+
+    case = Case.create("registryparity", case_root=tmp_path / "cases")
+    case.ingest([f"{REGISTRY_FIXTURES}:LAB01"])
+
+    all_rows = case.registry()
+    assert len(all_rows) == 8
+    assert set(all_rows["hive_type"]) == {"software"}
+
+    combined = pd.concat(list(case.registry_chunks()), ignore_index=True)
+    assert len(combined) == len(all_rows)
+
+    software_only = case.registry(hive_type="software")
+    assert len(software_only) == 8
+    assert list(case.registry_chunks(hive_type="nonexistent_type")) == []
+
+    empty_case = Case.create("registryempty", case_root=tmp_path / "cases")
+    assert empty_case.registry().empty
+    assert list(empty_case.registry_chunks()) == []
+
+
+def test_case_suspicious_registry_flags_run_key_and_high_entropy_value(tmp_path: Path):
+    from seclogx.case import Case
+
+    case = Case.create("registrysuspicious", case_root=tmp_path / "cases")
+    case.ingest([f"{REGISTRY_FIXTURES}:LAB01"])
+
+    flagged = case.suspicious_registry()
+    flagged_names = set(flagged["value_name"].dropna())
+
+    # Run key values (both the plain one and the high-entropy one) and the
+    # Services\TestSvc ImagePath value are flagged; the low-entropy
+    # control value under \Plain is not.
+    assert "Updater" in flagged_names
+    assert "Payload" in flagged_names
+    assert "Data" not in flagged_names
+
+    payload_row = flagged[flagged["value_name"] == "Payload"].iloc[0]
+    assert any("entropy" in r for r in payload_row["suspicion_reasons"])
+
+    updater_row = flagged[flagged["value_name"] == "Updater"].iloc[0]
+    assert any("startup item" in r for r in updater_row["suspicion_reasons"])
+
+    empty_case = Case.create("registrysuspiciousempty", case_root=tmp_path / "cases")
+    assert empty_case.suspicious_registry().empty

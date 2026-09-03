@@ -27,9 +27,11 @@ ATT&CK 技术名称/战术信息来自一个内置的小型查询表（`data/att
 
 `hunt` 同样支持 Sigma 的 `category: webserver` 规则（针对 `web_logs`，即**访问日志**运行），方便你自行提供
 IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。目前没有针对磁盘上计划任务定义、Web
-应用**错误日志**（`web_error_logs`）、Exchange 邮件跟踪日志或数据库日志（`db_logs`）的 Sigma 日志来源类别，因此这些数据不属于 Sigma
+应用**错误日志**（`web_error_logs`）、Exchange 邮件跟踪日志、数据库日志（`db_logs`）或
+Windows 注册表（`registry`——Sigma 的注册表类别针对的是*实时*监控遥测数据，而不是离线的静态配置单元转储）的 Sigma 日志来源类别，因此这些数据不属于 Sigma
 狩猎的范围；请改用 `Case.suspicious_tasks()` / `seclogx tasks --suspicious`
-排查计划任务，`web_error_logs`、Exchange 与 `db_logs` 数据则用原生 SQL 或 `search()`（见[《7. 常用查询》](07_recipes.zh-CN.md)）。
+排查计划任务，`Case.suspicious_registry()` / `seclogx registry --suspicious`
+排查注册表，`web_error_logs`、Exchange 与 `db_logs` 数据则用原生 SQL 或 `search()`（见[《7. 常用查询》](07_recipes.zh-CN.md)）。
 
 ## 扩展检测能力：自定义规则与字段映射
 

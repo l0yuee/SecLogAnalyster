@@ -237,4 +237,19 @@ WHERE error_code IS NOT NULL                          -- MySQL 的 MY-xxxxx / Or
 ORDER BY time_created
 ```
 
+**注册表：找出所有配置单元中熵值偏高的二进制值（可能是藏在注册表值里的编码/打包载荷），以及一次快速的持久化排查：**
+
+```python
+c.registry().query("entropy > 7.5 and value_size >= 64").sort_values("entropy", ascending=False)
+
+c.suspicious_registry()[["host", "full_path", "value_name", "suspicion_reasons"]]
+```
+
+```sql
+SELECT host, hive_type, full_path, value_name, entropy, value_size
+FROM registry
+WHERE entropy > 7.5 AND value_size >= 64
+ORDER BY entropy DESC
+```
+
 下一步：[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)，看看这些查询在真实规模的案例上表现如何。

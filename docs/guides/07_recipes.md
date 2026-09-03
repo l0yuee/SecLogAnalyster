@@ -250,5 +250,22 @@ WHERE error_code IS NOT NULL                          -- MySQL MY-xxxxx / Oracle
 ORDER BY time_created
 ```
 
+**Registry: high-entropy binary values across every hive (possible
+encoded/packed payloads stashed in a value), and a quick persistence
+sweep:**
+
+```python
+c.registry().query("entropy > 7.5 and value_size >= 64").sort_values("entropy", ascending=False)
+
+c.suspicious_registry()[["host", "full_path", "value_name", "suspicion_reasons"]]
+```
+
+```sql
+SELECT host, hive_type, full_path, value_name, entropy, value_size
+FROM registry
+WHERE entropy > 7.5 AND value_size >= 64
+ORDER BY entropy DESC
+```
+
 Next: [08. Performance & scale](08_performance_and_scale.md) for how
 these queries behave at real-world case volumes.

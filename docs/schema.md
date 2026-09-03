@@ -6,7 +6,7 @@ and every other log family's schema further down (`## Non-EVTX log
 tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 `web_logs`, `web_error_logs`, `scheduled_tasks`,
 `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`,
-`journal_logs`, `db_logs`. See "Quick reference: analyzing each log type" in
+`journal_logs`, `db_logs`, `registry`. See "Quick reference: analyzing each log type" in
 [`docs/guides/02_log_types_and_schema.md`](guides/02_log_types_and_schema.md)
 for how to actually query each one, and `docs/architecture.md` for how
 they're ingested.
@@ -308,4 +308,33 @@ caveats specific to each sub-format. Partition columns: `host, log_type`.
 | `rows_examined` | `BIGINT` | mysql_slow's `Rows_examined`; NULL elsewhere |
 | `message` | `VARCHAR` | Free-text message / SQL statement text / mysql_general's argument |
 | `extra` | `JSON` | Catchall (e.g. mysql_slow's `lock_time`/`rows_sent`) |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `registry`
+
+Windows Registry hives -- SYSTEM, SOFTWARE, SAM, SECURITY, DEFAULT,
+per-user `NTUSER.DAT`/`UsrClass.dat`, and (a bonus, since the underlying
+`regipy` dependency already supports it) AmCache.hve/BCD. One row per
+value, plus one row per key with zero values so key existence and
+last-write-time aren't lost. **Not a live merged registry** -- each row
+is rooted at its own hive's real logical path (`hive_root` + `key_path`),
+not aliased into a simulated `HKLM`/`HKCU` tree; see
+`docs/known_limitations.md`. Partition columns: `host, hive_type`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `hive_type` | `VARCHAR` | `system`\|`software`\|`sam`\|`security`\|`default`\|`ntuser`\|`usrclass`\|`amcache`\|`bcd`\|`unknown` (partition key) |
+| `hive_root` | `VARCHAR` | Logical root, e.g. `HKEY_LOCAL_MACHINE\SOFTWARE`, `HKEY_USERS\alice\_Classes` |
+| `key_path` | `VARCHAR` | Path within the hive, e.g. `\Microsoft\Windows\CurrentVersion\Run` |
+| `full_path` | `VARCHAR` | `hive_root` + `key_path`, denormalized for display/search |
+| `key_last_write_time` | `TIMESTAMP` | The key's real, forensically-useful last-modified time |
+| `value_name` | `VARCHAR` | The default value is reported as literal `(default)`; NULL only for the synthetic zero-values-key row |
+| `value_type` | `VARCHAR` | `REG_SZ`/`REG_BINARY`/`REG_DWORD`/`REG_MULTI_SZ`/`REG_EXPAND_SZ`/`REG_QWORD`/...; NULL for the key-only row |
+| `value_text` | `VARCHAR` | Decoded string (REG_SZ/REG_EXPAND_SZ direct; REG_MULTI_SZ newline-joined) |
+| `value_int` | `BIGINT` | REG_DWORD/REG_QWORD |
+| `value_data_hex` | `VARCHAR` | Hex of the raw bytes for REG_BINARY/REG_NONE/other binary types, capped at 8KB of hex for storage |
+| `value_size` | `INTEGER` | Full, **untruncated** byte length of the value's raw data |
+| `entropy` | `DOUBLE` | Shannon entropy (0-8 bits/byte) of the full raw bytes; NULL for non-binary types |
+| `transaction_log_applied` | `BOOLEAN` | Whether sibling `.LOG1`/`.LOG2` recovery was applied before parsing this hive |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |

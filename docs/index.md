@@ -12,7 +12,7 @@ journal logs.
 1. **[Getting started](guides/01_getting_started.md)** -- what seclogx is
    for, installation, the case workspace, and a quickstart.
 2. **[Log types and schema](guides/02_log_types_and_schema.md)** -- what
-   each of the ten tables holds, what to look for, and which fields to
+   each of the eleven tables holds, what to look for, and which fields to
    search on.
 3. **[Querying and search](guides/03_querying_and_search.md)** -- raw
    SQL, the no-SQL `search()` interface, and bounded-memory delivery.

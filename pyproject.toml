@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "seclogx contributors" }]
 dependencies = [
     "evtx>=0.9",
+    "regipy>=6.0",
     "duckdb>=1.0",
     "pandas>=2.0",
     "pyarrow>=15.0",

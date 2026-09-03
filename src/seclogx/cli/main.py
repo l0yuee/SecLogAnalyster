@@ -11,6 +11,7 @@ from .cluster_cmds import cluster_app
 from .hunt_cmd import hunt_command
 from .ingest_cmd import ingest_command
 from .query_cmd import channels_command, query_command, sources_command, summary_command, table_command
+from .registry_cmd import registry_command
 from .rules_cmd import rules_app
 from .search_cmd import fields_command, search_command
 from .tasks_cmd import tasks_command
@@ -60,6 +61,7 @@ app.command("hunt")(hunt_command)
 app.command("timeline")(timeline_command)
 app.command("tasks")(tasks_command)
 app.command("auth")(auth_command)
+app.command("registry")(registry_command)
 app.command("worker")(worker_command)
 
 

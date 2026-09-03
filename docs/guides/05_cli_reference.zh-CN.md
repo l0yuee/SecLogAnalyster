@@ -32,7 +32,8 @@ seclogx case info incident42
 
 在来源路径下一次性发现、分类并归一化所有支持的文件，导入到案例中：`.evtx`、计划任务定义、IIS/nginx/Apache/Tomcat
 访问日志、Exchange CSV 日志、Linux syslog/`auth.log`、auditd 与 systemd
-journal 导出日志，以及 MySQL/MariaDB/PostgreSQL/MSSQL/Oracle 数据库日志。这是核心命令。
+journal 导出日志、MySQL/MariaDB/PostgreSQL/MSSQL/Oracle 数据库日志，以及原始
+Windows 注册表配置单元文件。这是核心命令。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
@@ -134,7 +135,7 @@ seclogx query incident42 "SELECT * FROM web_logs WHERE status >= 400" --out web_
 
 ## `seclogx sources <case>`
 
-列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
+列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`registry`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
 
 ```bash
 seclogx sources incident42
@@ -224,6 +225,25 @@ Sigma 规则——是对已导入 `syslog` 数据的启发式筛选，相当于
 ```bash
 seclogx auth incident42
 seclogx auth incident42 --out auth_events.csv
+```
+
+## `seclogx registry <case> [--suspicious] [--hive-type TYPE]`
+
+列出已导入的注册表键/值（来自 `registry`）。加上 `--suspicious`
+则改为运行 `Case.suspicious_registry()`——内置的持久化/熵值启发式检测（具体覆盖哪些内容见[《2.
+日志类型与模式》](02_log_types_and_schema.zh-CN.md)），与 `tasks --suspicious`/`auth`
+一样，是"启发式筛选，不是 Sigma"。
+
+| 参数 | 含义 |
+|---|---|
+| `--suspicious` | 只显示被内置启发式规则标记的条目 |
+| `--hive-type TYPE` | 只看某一类配置单元（`system`/`software`/`sam`/`security`/`default`/`ntuser`/`usrclass`/`amcache`/`bcd`） |
+| `--out FILE.csv` | 导出完整结果 |
+
+```bash
+seclogx registry incident42 --hive-type software
+seclogx registry incident42 --suspicious
+seclogx registry incident42 --suspicious --out suspicious_registry.csv
 ```
 
 ## `seclogx hunt <case>`

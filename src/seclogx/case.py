@@ -35,6 +35,24 @@ from .search import search_to_csv as _search_to_csv
 from .timeline import build_timeline, build_timeline_chunks
 
 
+# Narrows `registry` (which can have hundreds of thousands of rows) down
+# to a small candidate set before Case.suspicious_registry() explains it
+# in pandas -- see that method's docstring. ILIKE / LOWER() throughout
+# since registry path/value-name casing isn't guaranteed consistent.
+_REGISTRY_SUSPICION_SQL = """
+SELECT * FROM registry WHERE
+     full_path ILIKE '%\\CurrentVersion\\Run%'
+  OR (full_path ILIKE '%\\Services\\%' AND LOWER(value_name) IN ('imagepath', 'servicedll'))
+  OR (full_path ILIKE '%\\CLSID\\%' AND full_path ILIKE '%InprocServer32%')
+  OR (full_path ILIKE '%\\Winlogon' AND LOWER(value_name) IN ('shell', 'userinit', 'notify'))
+  OR (full_path ILIKE '%\\Windows' AND LOWER(value_name) IN ('appinit_dlls', 'appcertdlls')
+      AND value_text IS NOT NULL AND value_text != '')
+  OR (full_path ILIKE '%Image File Execution Options%' AND LOWER(value_name) = 'debugger')
+  OR (entropy >= ? AND value_size >= ?)
+ORDER BY full_path
+"""
+
+
 def _hosts_from_lake(case_dir: Path, cluster_config: ClusterConfig | None = None) -> set[str]:
     """Hosts present in the Parquet lake, read directly off the Hive
     `host=<value>` partition folder names (percent-decoded) -- covers every
@@ -388,6 +406,82 @@ class Case:
 
     def db_logs_chunks(self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
         return self._log_type_chunks("db_logs", log_type, chunksize)
+
+    def registry(self, hive_type: str | None = None) -> pd.DataFrame:
+        """Every discovered registry key/value, normalized across every
+        ingested hive (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/
+        UsrClass/AmCache), one row per value (or per key, for a key with
+        none). Not a live merged registry -- each row is rooted at its own
+        hive's real logical path (`hive_root`); see
+        docs/known_limitations.md. `hive_type`: 'system' | 'software' |
+        'sam' | 'security' | 'default' | 'ntuser' | 'usrclass' |
+        'amcache' | 'bcd' | 'unknown'."""
+        if hive_type is None:
+            return self.db.table("registry", order_by="full_path")
+        if "registry" not in self.db.tables:
+            return pd.DataFrame()
+        return self.db.sql("SELECT * FROM registry WHERE hive_type = ? ORDER BY full_path", [hive_type])
+
+    def registry_chunks(
+        self, hive_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE
+    ) -> Iterator[pd.DataFrame]:
+        if hive_type is None:
+            return self.db.table_chunks("registry", order_by="full_path", chunksize=chunksize)
+        if "registry" not in self.db.tables:
+            return iter(())
+        return self.db.sql_chunks(
+            "SELECT * FROM registry WHERE hive_type = ? ORDER BY full_path", [hive_type], chunksize=chunksize
+        )
+
+    def suspicious_registry(self, entropy_threshold: float = 7.0, min_size: int = 32) -> pd.DataFrame:
+        """Curated, non-exhaustive heuristic pass over `registry`:
+        Run/RunOnce-style startup items, service ImagePath/ServiceDll,
+        COM CLSID InprocServer32 hijacking, Winlogon Shell/Userinit/Notify
+        tampering, AppInit_DLLs/AppCertDLLs injection, Image File
+        Execution Options Debugger hijacking, and high-entropy binary
+        values (possible encoded/packed payloads). Narrows down with SQL
+        first -- a real hive can have hundreds of thousands of values, far
+        more than `suspicious_tasks()`'s table, too big to pandas-filter
+        wholesale -- then explains the small filtered result with a
+        `suspicion_reasons` column, same UX as `suspicious_tasks()`. Not
+        exhaustive; see docs/known_limitations.md for known gaps (WMI
+        subscriptions, more LSA provider keys, LSP hijacking, ...)."""
+        if "registry" not in self.db.tables:
+            return pd.DataFrame()
+        df = self.db.sql(_REGISTRY_SUSPICION_SQL, [entropy_threshold, min_size])
+        if df.empty:
+            return df
+
+        def _reasons(row) -> list[str]:
+            reasons: list[str] = []
+            full_path = (row["full_path"] if pd.notna(row["full_path"]) else "").lower()
+            value_name = row["value_name"] if pd.notna(row["value_name"]) else ""
+            value_text = (row["value_text"] if pd.notna(row["value_text"]) else "").lower()
+
+            if "\\currentversion\\run" in full_path:
+                reason = "startup item (Run/RunOnce key)"
+                if any(h in value_text for h in SUSPICIOUS_ACTION_PATH_HINTS):
+                    reason = "startup item pointing at a user-writable/temp-like path"
+                elif any(h in value_text for h in SUSPICIOUS_COMMAND_HINTS):
+                    reason = "startup item invoking a common LOLBin"
+                reasons.append(reason)
+            if "\\services\\" in full_path and value_name.lower() in ("imagepath", "servicedll"):
+                reasons.append(f"service {value_name} -- verify it points where the service name implies")
+            if "\\clsid\\" in full_path and "inprocserver32" in full_path:
+                reasons.append("COM CLSID InprocServer32 -- possible COM hijacking")
+            if full_path.endswith("\\winlogon") and value_name.lower() in ("shell", "userinit", "notify"):
+                reasons.append(f"Winlogon {value_name} -- verify against the expected default")
+            if full_path.endswith("\\windows") and value_name.lower() in ("appinit_dlls", "appcertdlls"):
+                reasons.append(f"{value_name} is set -- rarely legitimate")
+            if "image file execution options" in full_path and value_name.lower() == "debugger":
+                reasons.append("IFEO Debugger hijack")
+            entropy, size = row["entropy"], row["value_size"]
+            if pd.notna(entropy) and entropy >= entropy_threshold and pd.notna(size) and size >= min_size:
+                reasons.append(f"high-entropy binary value ({entropy:.2f} bits/byte, {int(size)} bytes)")
+            return reasons
+
+        df["suspicion_reasons"] = df.apply(_reasons, axis=1)
+        return df
 
     def auth_events(self) -> pd.DataFrame:
         """Derived heuristic triage over `syslog`: recognizes SSH

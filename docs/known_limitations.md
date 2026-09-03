@@ -209,6 +209,59 @@ not oversights -- documented so they're easy to revisit later.
   significantly different layout (e.g. a heavily customized trace flag
   configuration) may not match.
 
+## Windows Registry hive ingestion
+
+- **Not a live merged registry.** seclogx does not simulate a running
+  Windows OS's in-memory registry (no `HKLM`/`HKCU` aliasing, no
+  volatile/`HKEY_CURRENT_CONFIG` keys, no class-name resolution). Every
+  discovered hive file is parsed completely and normalized into the
+  `registry` table rooted at its own real logical path (`hive_root` +
+  `key_path`, e.g. `HKEY_LOCAL_MACHINE\SOFTWARE\...`,
+  `HKEY_USERS\<user>\...`) -- the standard way forensic registry tools
+  (Registry Explorer, RegRipper, RECmd) already present hives, not a
+  literal live registry object graph.
+- **Binary hive parsing is delegated to `regipy`**, the same "trust a
+  battle-tested library for a complex binary forensic format" choice
+  already made for `.evtx` (via the `evtx` dependency) -- see
+  `ingest/logsources/parsers/registry.py`.
+- **Transaction-log (`.LOG1`/`.LOG2`) recovery is best-effort.** If a
+  sibling `.LOG1` file is found next to a hive, seclogx tries to replay
+  it (and `.LOG2`, if present) before parsing; if that fails for any
+  reason (missing/corrupted log, unsupported log format), it falls back
+  to parsing the raw hive as collected -- reported explicitly via
+  `registry.transaction_log_applied = False`, not silently. A hive
+  collected "dirty" (writes pending in a transaction log that couldn't be
+  replayed) may be missing its most recent changes.
+- **Hive-type identification trusts the hive's own embedded original
+  path** (stored in the hive header itself, e.g.
+  `\SystemRoot\System32\Config\SOFTWARE`), not the on-disk filename --
+  same "trust content, not filename" model every other seclogx parser
+  uses, but note this means a hive whose embedded header has been
+  tampered with (unusual, but possible) could misidentify.
+- **`Case.suspicious_registry()` is a curated, non-exhaustive heuristic
+  set** -- covers Run/RunOnce-style startup items, service ImagePath/
+  ServiceDll, COM CLSID InprocServer32 hijacking, Winlogon Shell/
+  Userinit/Notify tampering, AppInit_DLLs/AppCertDLLs injection, Image
+  File Execution Options Debugger hijacking, and high-entropy binary
+  values. Known gaps: WMI event subscriptions, additional LSA
+  authentication/notification provider keys beyond the ones checked,
+  Winsock LSP hijacking, and browser extension/COM add-in persistence
+  paths not covered above -- same honesty standard as
+  `SUSPICIOUS_ACTION_PATH_HINTS`/the Microsoft-task baseline for
+  `scheduled_tasks`.
+- **`entropy` is computed only for binary-typed values** (`REG_BINARY`,
+  `REG_NONE`, and the resource-list types) from the full, untruncated raw
+  bytes -- always populated regardless of size, but small values (a few
+  bytes) can trivially read as "high entropy" purely from sample-size
+  noise; `suspicious_registry()`'s `min_size` parameter (default 32
+  bytes) exists specifically to filter that noise out before flagging.
+- **`value_data_hex` is capped at 8KB of hex text for storage** (a
+  pathologically large payload's hex isn't stored in full), but
+  `entropy`/`value_size` are always computed from the complete,
+  uncapped raw bytes first -- the analysis-relevant numbers are never
+  affected by the storage cap, only how much of the raw hex you can page
+  through directly in that column.
+
 ## Linux log ingestion (syslog / auth.log / auditd / systemd journal)
 
 - **Format is detected by content, not filename or extension** -- same
@@ -388,7 +441,10 @@ not oversights -- documented so they're easy to revisit later.
   streams to NDJSON as it parses, but the non-EVTX parsers need the whole
   file for encoding detection first), so a single individual file large
   enough on its own to exceed available memory is still a per-file risk,
-  independent of batch size or worker count.
+  independent of batch size or worker count. A large `SOFTWARE` hive from
+  a busy, long-lived machine is a concrete, realistic case of this (not
+  just a hypothetical pathological one) -- it can hold hundreds of
+  thousands of values, all parsed into one Python list before staging.
 - **Staged NDJSON (`staging/`, `staging_aux/`) is gzip-compressed and kept
   by default, trading some ingest CPU time for a much smaller on-disk
   case relative to an uncompressed-and-kept staging directory.** Without

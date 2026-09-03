@@ -53,8 +53,8 @@
 - `--keep-raw` roughly doubles ingest cost (time and peak memory) for
   the files it's applied to -- use it selectively on evidence that
   needs full XML fidelity, not by default on an entire large case.
-- Scheduled Tasks/IIS/web access/Exchange/syslog/auditd/journal logs now
-  stage to per-file NDJSON the same way EVTX does, and flatten via DuckDB
+- Scheduled Tasks/IIS/web access/Exchange/syslog/auditd/journal/database
+  logs now stage to per-file NDJSON the same way EVTX does, and flatten via DuckDB
   reading straight off disk (`read_ndjson_auto`) instead of accumulating
   every parsed row for a table in Python across the whole batch. Peak
   ingest-time memory is now bounded by (one file's parse footprint) x

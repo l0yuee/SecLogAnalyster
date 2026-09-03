@@ -29,6 +29,12 @@ KIND_WEB_ERROR_TOMCAT = "web_error_tomcat"
 KIND_SYSLOG = "syslog"
 KIND_AUDITD = "auditd"
 KIND_JOURNAL_EXPORT = "journal_export"
+KIND_MYSQL_ERROR = "mysql_error"
+KIND_MYSQL_GENERAL = "mysql_general"
+KIND_MYSQL_SLOW = "mysql_slow"
+KIND_POSTGRESQL = "postgresql"
+KIND_MSSQL = "mssql"
+KIND_ORACLE_ALERT = "oracle_alert"
 
 WEB_ERROR_KINDS = {KIND_WEB_ERROR_NGINX: "nginx", KIND_WEB_ERROR_APACHE: "apache", KIND_WEB_ERROR_TOMCAT: "tomcat"}
 
@@ -41,6 +47,21 @@ _TOMCAT_ERROR_RE = re.compile(rb"^\d{2}-\w{3}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3} (?:
 _AUDITD_RE = re.compile(rb"^type=\S+\s+msg=audit\(\d+\.\d+:\d+\):")
 _SYSLOG_5424_RE = re.compile(rb"^<\d{1,3}>\d\s")
 _SYSLOG_BSD_RE = re.compile(rb"^(?:<\d{1,3}>)?\w{3}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}\s\S+\s")
+
+# Database logs. mysql_slow/mysql_general aren't reliably identifiable from
+# a single first data line (slow log entries open with a '#'-prefixed
+# marker; general log continuation lines don't repeat the timestamp), so
+# those are detected via marker/header lines in the scan loop below instead
+# -- see KIND_MYSQL_SLOW/KIND_MYSQL_GENERAL handling in classify_file.
+_MYSQL_ERROR_NEW_RE = re.compile(rb"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+\d+\s+\[(?:System|Note|Warning|ERROR)\]")
+_MYSQL_ERROR_OLD_RE = re.compile(rb"^\d{6}\s+\d{1,2}:\d{2}:\d{2}\s+\[(?:Note|Warning|ERROR)\]")
+_MYSQL_SLOW_MARKER_RE = re.compile(rb"^# (?:Time|Query_time):")
+_MYSQL_GENERAL_HEADER_RE = re.compile(rb"^Time\s+Id\s+Command\s+Argument\s*$")
+_POSTGRESQL_RE = re.compile(
+    rb"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\s+\S+\s+\[\d+\].*\s(?:LOG|ERROR|WARNING|FATAL|PANIC|NOTICE|DETAIL|HINT|STATEMENT|DEBUG[1-5]?):\s"
+)
+_MSSQL_RE = re.compile(rb"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{2}\s+\S+\s{2,}\S")
+_ORACLE_ALERT_RE = re.compile(rb"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2}$")
 
 _MESSAGE_TRACKING_FIELDS = {"message-id", "recipient-address"}
 # journald's "trusted", double-underscore-prefixed fields -- reliable,
@@ -98,8 +119,12 @@ def classify_file(path: Path) -> str | None:
         if line.startswith("#Software:"):
             software_line = line[len("#Software:") :].strip()
             continue
+        if _MYSQL_SLOW_MARKER_RE.match(line.encode("utf-8", errors="replace")):
+            return KIND_MYSQL_SLOW
         if line.startswith("#"):
             continue
+        if _MYSQL_GENERAL_HEADER_RE.match(line.encode("utf-8", errors="replace")):
+            return KIND_MYSQL_GENERAL
         first_data_line = line
         break
 
@@ -136,6 +161,14 @@ def classify_file(path: Path) -> str | None:
             return KIND_WEB_ERROR_APACHE
         if _TOMCAT_ERROR_RE.match(encoded):
             return KIND_WEB_ERROR_TOMCAT
+        if _MYSQL_ERROR_NEW_RE.match(encoded) or _MYSQL_ERROR_OLD_RE.match(encoded):
+            return KIND_MYSQL_ERROR
+        if _POSTGRESQL_RE.match(encoded):
+            return KIND_POSTGRESQL
+        if _MSSQL_RE.match(encoded):
+            return KIND_MSSQL
+        if _ORACLE_ALERT_RE.match(encoded):
+            return KIND_ORACLE_ALERT
         if _CLF_RE.match(encoded):
             return KIND_WEB_ACCESS
         if _AUDITD_RE.match(encoded):

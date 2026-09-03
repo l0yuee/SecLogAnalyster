@@ -1,0 +1,5 @@
+2024-01-01T00:00:00.123456+00:00
+Starting ORACLE instance (normal)
+LICENSE_MAX_SESSION = 0
+2024-01-01T00:05:00.654321+00:00
+ORA-01017: invalid username/password; logon denied

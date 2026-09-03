@@ -22,6 +22,12 @@ from seclogx.ingest.logsources.sniff import (
     KIND_EXCHANGE_MESSAGE_TRACKING,
     KIND_IIS,
     KIND_IIS_HTTPERR,
+    KIND_MSSQL,
+    KIND_MYSQL_ERROR,
+    KIND_MYSQL_GENERAL,
+    KIND_MYSQL_SLOW,
+    KIND_ORACLE_ALERT,
+    KIND_POSTGRESQL,
     KIND_SCHEDULED_TASK,
     KIND_WEB_ACCESS,
     KIND_WEB_ERROR_APACHE,
@@ -33,6 +39,7 @@ from seclogx.ingest.logsources.sniff import (
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources"
 LINUX_FIXTURES = Path(__file__).parent.parent / "fixtures" / "logsources_linux"
+DB_FIXTURES = Path(__file__).parent.parent / "fixtures" / "db_logs"
 
 
 # -- classification -----------------------------------------------------------
@@ -65,6 +72,15 @@ def test_classify_web_error_logs():
     assert classify_file(FIXTURES / "sample_apache_error.log") == KIND_WEB_ERROR_APACHE
     assert classify_file(FIXTURES / "sample_tomcat_error.log") == KIND_WEB_ERROR_TOMCAT
     assert classify_file(FIXTURES / "sample_iis_httperr.log") == KIND_IIS_HTTPERR
+
+
+def test_classify_db_logs():
+    assert classify_file(DB_FIXTURES / "mysql_error.log") == KIND_MYSQL_ERROR
+    assert classify_file(DB_FIXTURES / "mysql_general.log") == KIND_MYSQL_GENERAL
+    assert classify_file(DB_FIXTURES / "mysql_slow.log") == KIND_MYSQL_SLOW
+    assert classify_file(DB_FIXTURES / "postgresql.log") == KIND_POSTGRESQL
+    assert classify_file(DB_FIXTURES / "mssql_errorlog") == KIND_MSSQL
+    assert classify_file(DB_FIXTURES / "oracle_alert.log") == KIND_ORACLE_ALERT
 
 
 def test_classify_unknown_returns_none(tmp_path: Path):
@@ -382,3 +398,49 @@ def test_case_linux_table_accessors_and_chunks_match(tmp_path: Path):
         assert not eager.empty
         combined = pd.concat(list(chunked), ignore_index=True)
         assert len(combined) == len(eager)
+
+
+# -- database logs: end-to-end aux ingest -------------------------------------------
+
+
+def test_run_aux_ingest_writes_db_log_tables(tmp_path: Path):
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+
+    report = run_aux_ingest(case_dir, [SourceSpec(path=DB_FIXTURES, host="LAB01")], workers=1)
+
+    assert report.files_discovered == 6
+    assert report.files_ok == 2  # mysql_slow.log + oracle_alert.log have no rejected lines
+    assert report.files_partial == 4  # the other 4 fixtures each have one deliberately malformed line
+    assert report.files_failed == 0
+    # 4 mysql_error + 4 mysql_general + 2 mysql_slow + 3 postgresql + 4 mssql + 2 oracle
+    assert report.rows_written.get("db_logs") == 19
+
+
+def test_case_db_logs_accessor_and_chunks_match(tmp_path: Path):
+    import pandas as pd
+    from seclogx.case import Case
+
+    case = Case.create("dblogsparity", case_root=tmp_path / "cases")
+    case.ingest([f"{DB_FIXTURES}:LAB01"])
+
+    all_rows = case.db_logs()
+    assert len(all_rows) == 19
+    assert set(all_rows["log_type"]) == {
+        "mysql_error", "mysql_general", "mysql_slow", "postgresql", "mssql", "oracle",
+    }
+
+    slow_only = case.db_logs(log_type="mysql_slow")
+    assert len(slow_only) == 2
+    assert set(slow_only["log_type"]) == {"mysql_slow"}
+    assert slow_only["query_time_sec"].notna().all()
+
+    combined = pd.concat(list(case.db_logs_chunks()), ignore_index=True)
+    assert len(combined) == len(all_rows)
+
+    # a case with no db_logs data returns an empty, correctly-shaped frame
+    empty_case = Case.create("dblogsempty", case_root=tmp_path / "cases")
+    empty_df = empty_case.db_logs()
+    assert isinstance(empty_df, pd.DataFrame)
+    assert empty_df.empty
+    assert list(empty_case.db_logs_chunks()) == []

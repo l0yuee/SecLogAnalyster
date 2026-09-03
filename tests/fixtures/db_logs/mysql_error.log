@@ -1,0 +1,5 @@
+2024-01-01T00:00:00.000123Z 0 [System] [MY-010931] [Server] Basedir set to /usr/.
+2024-01-01T00:00:01.500000Z 8 [Warning] [MY-010897] [Repl] Storing MySQL user name or password information in the master info repository is not secure.
+2024-01-01T00:05:00.123456Z 12 [ERROR] [MY-013183] [InnoDB] Assertion failure in file storage/innobase/xyz.cc
+170101 12:34:56 [Note] Server socket created on IP: '0.0.0.0'.
+this is not a mysql error log line

@@ -221,4 +221,20 @@ WHERE unit = 'sshd.service' AND CAST(priority AS INTEGER) <= 4
 ORDER BY time_created
 ```
 
+**数据库日志：`rows_examined` 最高的 MySQL 慢查询（可能是数据泄露式的大范围扫描），以及所有引擎上的数据库认证失败/错误：**
+
+```python
+slow = c.db_logs(log_type="mysql_slow").sort_values("rows_examined", ascending=False)
+slow[["time_created", "host", "user_name", "client_address", "query_time_sec", "rows_examined", "message"]].head(20)
+```
+
+```sql
+SELECT time_created, host, log_type, severity, error_code, message
+FROM db_logs
+WHERE error_code IS NOT NULL                          -- MySQL 的 MY-xxxxx / Oracle 的 ORA-xxxxx
+   OR severity IN ('ERROR', 'FATAL')                   -- PostgreSQL
+   OR message ILIKE '%login failed%'                   -- MSSQL（没有结构化的严重级别字段）
+ORDER BY time_created
+```
+
 下一步：[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)，看看这些查询在真实规模的案例上表现如何。

@@ -29,13 +29,15 @@ seclogx exists to make the first hours of triage fast:
   access logs *and* error/diagnostic logs (both major log categories a
   web application produces, including IIS HTTP.sys/HTTPERR),
   **Exchange** CSV logs (Message Tracking gets first-class columns;
-  every other Exchange log type lands in a nothing-dropped catchall), and
+  every other Exchange log type lands in a nothing-dropped catchall),
   **Linux** syslog (BSD/RFC-3164 and RFC 5424 -- `auth.log`/`secure`
   content included), the Linux Audit Framework (auditd), and systemd
-  journal export logs. Each format is detected by content, not filename,
-  so renamed/relocated evidence still works. See
+  journal export logs, and **database** logs (MySQL/MariaDB error/
+  general/slow query logs, PostgreSQL, MSSQL, Oracle alert log). Each
+  format is detected by content, not filename, so renamed/relocated
+  evidence still works. See
   [02. Log types & schema](02_log_types_and_schema.md) for the full
-  nine-table picture.
+  ten-table picture.
 - You get a `pandas.DataFrame`-native interface throughout (CLI
   tables/CSV, or a Python `Case` object for a notebook) plus built-in
   Sigma-rule threat hunting with MITRE ATT&CK tagging, covering both
@@ -107,6 +109,7 @@ cases/<name>/
     syslog/host=<h>/*.parquet                                    # generic syslog, incl. auth.log/secure
     auditd_logs/host=<h>/record_type=<r>/*.parquet                # Linux Audit Framework
     journal_logs/host=<h>/*.parquet                              # systemd journal export
+    db_logs/host=<h>/log_type=<t>/*.parquet                       # MySQL/PostgreSQL/MSSQL/Oracle logs
 ```
 
 `lake/` can live on S3-compatible object storage instead of local disk
@@ -138,7 +141,7 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 Where to go next:
 
 - **[02. Log types & schema](02_log_types_and_schema.md)** -- what each of
-  the nine tables holds and what to look for in it.
+  the ten tables holds and what to look for in it.
 - **[03. Querying & search](03_querying_and_search.md)** -- SQL, the
   no-SQL `search()` interface, and bounded-memory delivery.
 - **[04. Threat hunting](04_threat_hunting.md)** -- Sigma rules and ATT&CK

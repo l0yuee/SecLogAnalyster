@@ -20,6 +20,14 @@ from pathlib import Path
 from .discovery import ClassifiedFile, sha256_file
 from .manifest import AuxStagedFile, StageStatus, now_iso
 from .parsers.auditd import parse_auditd_file
+from .parsers.dblogs import (
+    parse_mssql_file,
+    parse_mysql_error_file,
+    parse_mysql_general_file,
+    parse_mysql_slow_file,
+    parse_oracle_alert_file,
+    parse_postgresql_file,
+)
 from .parsers.exchange import parse_exchange_csv
 from .parsers.iis import parse_iis_file
 from .parsers.journal import parse_journal_file
@@ -34,6 +42,12 @@ from .sniff import (
     KIND_IIS,
     KIND_IIS_HTTPERR,
     KIND_JOURNAL_EXPORT,
+    KIND_MSSQL,
+    KIND_MYSQL_ERROR,
+    KIND_MYSQL_GENERAL,
+    KIND_MYSQL_SLOW,
+    KIND_ORACLE_ALERT,
+    KIND_POSTGRESQL,
     KIND_SCHEDULED_TASK,
     KIND_SYSLOG,
     KIND_WEB_ACCESS,
@@ -192,4 +206,22 @@ def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
     if cf.kind == KIND_JOURNAL_EXPORT:
         rows, ok, err = parse_journal_file(cf.path, cf.host)
         return rows, "journal_logs", ok, err
+    if cf.kind == KIND_MYSQL_ERROR:
+        rows, ok, err = parse_mysql_error_file(cf.path, cf.host)
+        return rows, "db_logs", ok, err
+    if cf.kind == KIND_MYSQL_GENERAL:
+        rows, ok, err = parse_mysql_general_file(cf.path, cf.host)
+        return rows, "db_logs", ok, err
+    if cf.kind == KIND_MYSQL_SLOW:
+        rows, ok, err = parse_mysql_slow_file(cf.path, cf.host)
+        return rows, "db_logs", ok, err
+    if cf.kind == KIND_POSTGRESQL:
+        rows, ok, err = parse_postgresql_file(cf.path, cf.host)
+        return rows, "db_logs", ok, err
+    if cf.kind == KIND_MSSQL:
+        rows, ok, err = parse_mssql_file(cf.path, cf.host)
+        return rows, "db_logs", ok, err
+    if cf.kind == KIND_ORACLE_ALERT:
+        rows, ok, err = parse_oracle_alert_file(cf.path, cf.host)
+        return rows, "db_logs", ok, err
     raise ValueError(f"no parser registered for kind {cf.kind!r}")

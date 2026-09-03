@@ -6,7 +6,7 @@ and every other log family's schema further down (`## Non-EVTX log
 tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 `web_logs`, `web_error_logs`, `scheduled_tasks`,
 `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`,
-`journal_logs`. See "Quick reference: analyzing each log type" in
+`journal_logs`, `db_logs`. See "Quick reference: analyzing each log type" in
 [`docs/guides/02_log_types_and_schema.md`](guides/02_log_types_and_schema.md)
 for how to actually query each one, and `docs/architecture.md` for how
 they're ingested.
@@ -279,4 +279,33 @@ Partition column: `host`.
 | `comm`, `exe` | `VARCHAR` | `_COMM` / `_EXE` |
 | `message` | `VARCHAR` | `MESSAGE` |
 | `fields` | `JSON` | Every other journal field verbatim (`_TRANSPORT`, `_BOOT_ID`, custom structured-logging fields, ...) |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `db_logs`
+
+Database server logs: MySQL/MariaDB (error log, general query log, and
+slow query log), PostgreSQL (stderr-format log), MSSQL (`ERRORLOG`), and
+Oracle (alert log). Each sub-format is unambiguous from its own content
+but structurally different from the others -- same reasoning as
+`web_error_logs` unifying nginx/Apache/Tomcat/IIS HTTPERR -- so they
+share one table with a `log_type` discriminator rather than one table
+per engine. See `docs/known_limitations.md` for the content-sniffing
+caveats specific to each sub-format. Partition columns: `host, log_type`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `log_type` | `VARCHAR` | `mysql_error` \| `mysql_general` \| `mysql_slow` \| `postgresql` \| `mssql` \| `oracle` (partition key) |
+| `time_created` | `TIMESTAMP` | Log entry timestamp |
+| `severity` | `VARCHAR` | mysql_error: `Note`/`Warning`/`ERROR`/`System`; postgresql: `LOG`/`ERROR`/`WARNING`/`FATAL`/... ; NULL for mysql_general/mysql_slow/mssql/oracle |
+| `component` | `VARCHAR` | mysql_error's subsystem tag (e.g. `InnoDB`); mssql's spid/component token; mysql_general's `Command` (`Query`/`Connect`/...); NULL elsewhere |
+| `error_code` | `VARCHAR` | mysql_error's `MY-XXXXX` code; oracle's `ORA-#####` extracted from the alert message text; NULL elsewhere |
+| `thread_id` | `VARCHAR` | mysql thread/connection `Id`; postgresql's pid; mssql's spid digits; NULL for oracle |
+| `user_name` | `VARCHAR` | mysql_slow's `User@Host` user; postgresql's connected user; NULL elsewhere |
+| `database_name` | `VARCHAR` | postgresql's connected database; NULL elsewhere |
+| `client_address` | `VARCHAR` | mysql_slow's `User@Host` host/IP part; NULL elsewhere |
+| `query_time_sec` | `DOUBLE` | mysql_slow's `Query_time`, in seconds; NULL elsewhere |
+| `rows_examined` | `BIGINT` | mysql_slow's `Rows_examined`; NULL elsewhere |
+| `message` | `VARCHAR` | Free-text message / SQL statement text / mysql_general's argument |
+| `extra` | `JSON` | Catchall (e.g. mysql_slow's `lock_time`/`rows_sent`) |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |

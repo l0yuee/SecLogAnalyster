@@ -50,7 +50,7 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 `seclogx query ... event_data::VARCHAR ILIKE '%...%'` 对其做全文检索（见[《7. 常用查询》](07_recipes.zh-CN.md)），或继续往下看
 `seclogx fields`——它能直接从你的数据里列出真实字段名。
 
-## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`
+## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`
 
 Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每一类数据的形态都与事件日志本质不同，因此各自拥有独立的表，而不是硬塞进
 `events` 里——完整列参考见 `docs/schema.md`。其中每一张表也都有对应的 `Case`
@@ -67,6 +67,7 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 | `syslog` | 通用 BSD/RFC-3164 与 RFC 5424 syslog：`/var/log/syslog`、`messages`、`kern.log`、`auth.log`/`secure` 等，统一存放 | `app_name`、`hostname`、`facility`、`severity`、`message`、`structured_data`（JSON，仅 RFC5424） |
 | `auditd_logs` | Linux 审计框架（`/var/log/audit/audit.log`），每行一条记录 | `record_type`、`audit_serial`、`syscall`、`exe`、`comm`、`auid`、`key`、`fields`（JSON） |
 | `journal_logs` | systemd journal 导出格式（`journalctl -o json`） | `unit`、`syslog_identifier`、`priority`、`comm`、`exe`、`message`、`fields`（JSON） |
+| `db_logs` | 数据库服务器日志：MySQL/MariaDB（错误日志、通用查询日志、慢查询日志）、PostgreSQL、MSSQL、Oracle 告警日志，统一存放 | `log_type`、`severity`、`error_code`、`thread_id`、`user_name`、`query_time_sec`、`rows_examined`、`message` |
 
 在查询这些表之前，有几点需要了解：
 
@@ -95,6 +96,14 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   `audit_serial` 自行筛选即可看到完整全貌。
 - **`journal_logs` 解析的是 journal *导出*格式**（`journalctl -o
   json`），而不是二进制 journal 本身（`/var/log/journal/**`）——后者不具备可移植性，未被导入。
+- **`db_logs` 通过 `log_type` 统一了六种子格式**：`mysql_error`、
+  `mysql_general`、`mysql_slow`、`postgresql`、`mssql`、`oracle`。只有
+  `mysql_slow` 会写入 `query_time_sec`/`rows_examined`/`user_name`/
+  `client_address`；只有 `mysql_error`/`oracle` 会写入
+  `error_code`；某个引擎不产生的列，对应行就直接为 NULL——各子格式具体写入哪些列见
+  `docs/schema.md`。检测方式与本页其他表一样基于内容，但 MySQL
+  的通用查询日志、慢查询日志与 Oracle 告警日志都依赖文件早期出现的标记行/头部行/时间戳行——如果某个数据库日志没有被正确识别，见
+  `docs/known_limitations.md`。
 - 常用查询见[《7. 常用查询》](07_recipes.zh-CN.md)，完整的取舍决定见 `docs/known_limitations.md`。
 
 ## 速查表：如何分析每一类日志
@@ -116,6 +125,7 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 | Linux syslog（含 `auth.log`/`secure`） | `syslog` | `auth`（经过筛选的 SSH/sudo/PAM 视图） | `syslog()` / `syslog_chunks()`，`auth_events()`（启发式） | 不支持——用 `auth_events()` 或直接查询 |
 | Linux 审计框架（auditd） | `auditd_logs` | 无——用 `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | 不支持——直接查询 |
 | systemd journal 导出 | `journal_logs` | 无——用 `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | 不支持——直接查询 |
+| 数据库日志（MySQL/MariaDB/PostgreSQL/MSSQL/Oracle） | `db_logs` | 无——用 `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | 不支持——直接查询 |
 
 `seclogx sources <case>`并不针对某一张具体的表——它是在使用上述任何一种接口之前，最值得先运行的一个命令：给出每张表的行数统计，让你在决定具体查哪张表之前，先了解案例里实际有什么。
 
@@ -149,6 +159,12 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 - **`journal_logs`**——在分析人员导出了 `journalctl -o json`（而非仅有转发的
   syslog 文件，或与之并存）的主机上，这是 `syslog` 的 systemd 原生等价物；按
   `unit`/`syslog_identifier` 排查，可以看到某个服务记录的全部内容。
+- **`db_logs`**——通过 `error_code`（MySQL 的 `MY-XXXXX`、Oracle 的
+  `ORA-#####`——例如 `ORA-01017` 表示凭据无效，是暴力破解的信号）或
+  `severity`（PostgreSQL 中的 `ERROR`/`FATAL`）排查认证失败与错误；
+  `mysql_slow` 中 `rows_examined` 相对正常流量明显偏高的记录（可能是通过全表扫描进行的数据泄露）；对
+  `message` 文本排查到达数据库层的 SQL 注入特征。先按 `log_type`
+  筛选——六种子格式实际写入的列差异很大。
 
 ## 我能查询哪些字段？
 
@@ -203,6 +219,7 @@ c.fields("web_logs")   # -> status、uri_stem、client_ip 等（真实列）
 | `syslog` | `app_name`、`message`、`hostname`、`facility`/`severity`（源日志没有 `<PRI>` 时为 NULL） |
 | `auditd_logs` | `record_type`、`key`、`exe`、`comm`、`auid`、`audit_serial`（用于关联相关记录） |
 | `journal_logs` | `unit`、`syslog_identifier`、`message`、`priority` |
+| `db_logs` | 先看 `log_type`，再看 `severity`、`error_code`、`message`；`mysql_slow` 行还有 `query_time_sec`、`rows_examined` |
 
 特别是对 `events` 而言，注意有哪些字段存在取决于具体的*通道（channel）*——`Image`/`CommandLine`
 是 Sysmon 的字段，不会出现在 Security 通道的登录事件里，反过来

@@ -1,0 +1,5 @@
+2024-01-01 00:00:00.12 Server      Microsoft SQL Server 2019 (RTM) - 15.0.2000.5 (X64)
+2024-01-01 00:00:00.15 spid5s      Starting up database 'master'.
+2024-01-01 00:05:00.20 Logon       Error: 18456, Severity: 14, State: 8.
+2024-01-01 00:05:00.20 Logon       Login failed for user 'sa'. Reason: Password did not match. [CLIENT: 10.0.0.9]
+this is not an mssql errorlog line

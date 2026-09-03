@@ -255,6 +255,41 @@ JOURNAL_LOGS_COLUMNS: list[tuple[str, str]] = [
 ]
 JOURNAL_LOGS_PARTITION_COLUMNS = ["host"]
 
+# Database server logs -- MySQL/MariaDB (error, general query, and slow
+# query logs), PostgreSQL (stderr-format log), MSSQL (ERRORLOG), and
+# Oracle (alert log). Each engine/sub-format is unambiguous from its own
+# content but structurally different from the others (free-text error
+# lines vs. tab-separated query lines vs. multi-line slow-query blocks vs.
+# timestamp-delimited alert blocks), so -- same as WEB_ERROR_LOGS_COLUMNS
+# unifying nginx/Apache/Tomcat/IIS HTTPERR -- they land in one table with
+# a `log_type` discriminator rather than one table per engine. See
+# docs/known_limitations.md for the content-sniffing caveats specific to
+# each sub-format (PostgreSQL log_line_prefix, MySQL general/slow log
+# marker-line dependence, Oracle alert log banner-before-timestamp).
+DB_LOGS_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("log_type", "VARCHAR"),  # 'mysql_error' | 'mysql_general' | 'mysql_slow' | 'postgresql' | 'mssql' | 'oracle'
+    ("time_created", "TIMESTAMP"),
+    ("severity", "VARCHAR"),  # mysql_error: Note/Warning/ERROR/System; postgresql: LOG/ERROR/WARNING/...; NULL elsewhere
+    ("component", "VARCHAR"),  # mysql_error subsystem tag; mssql spid/component token; mysql_general Command; NULL elsewhere
+    ("error_code", "VARCHAR"),  # mysql_error 'MY-XXXXX'; oracle 'ORA-#####' extracted from message; NULL elsewhere
+    ("thread_id", "VARCHAR"),  # mysql thread/connection Id; postgresql pid; mssql spid digits; NULL for oracle
+    ("user_name", "VARCHAR"),  # mysql_slow User@Host user; postgresql user; NULL elsewhere
+    ("database_name", "VARCHAR"),  # postgresql database; NULL elsewhere
+    ("client_address", "VARCHAR"),  # mysql_slow User@Host host part; NULL elsewhere
+    ("query_time_sec", "DOUBLE"),  # mysql_slow Query_time; NULL elsewhere
+    ("rows_examined", "BIGINT"),  # mysql_slow Rows_examined; NULL elsewhere
+    ("message", "VARCHAR"),  # free-text message / SQL statement text / general-log argument
+    ("extra", "JSON"),  # catchall (e.g. mysql_slow's lock_time/rows_sent)
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+DB_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
+
 TABLES: dict[str, dict] = {
     "web_logs": {"columns": WEB_LOGS_COLUMNS, "partition_by": WEB_LOGS_PARTITION_COLUMNS},
     "web_error_logs": {"columns": WEB_ERROR_LOGS_COLUMNS, "partition_by": WEB_ERROR_LOGS_PARTITION_COLUMNS},
@@ -267,6 +302,7 @@ TABLES: dict[str, dict] = {
     "syslog": {"columns": SYSLOG_COLUMNS, "partition_by": SYSLOG_PARTITION_COLUMNS},
     "auditd_logs": {"columns": AUDITD_LOGS_COLUMNS, "partition_by": AUDITD_LOGS_PARTITION_COLUMNS},
     "journal_logs": {"columns": JOURNAL_LOGS_COLUMNS, "partition_by": JOURNAL_LOGS_PARTITION_COLUMNS},
+    "db_logs": {"columns": DB_LOGS_COLUMNS, "partition_by": DB_LOGS_PARTITION_COLUMNS},
 }
 
 # Columns holding JSON-serialized text (lists/dicts) or otherwise needing an

@@ -75,6 +75,7 @@ c.exchange_logs(log_type="HttpProxy")
 c.syslog()                             # 通用 syslog，含 auth.log/secure 的内容
 c.auditd_logs()                        # Linux 审计框架
 c.journal_logs()                       # systemd journal 导出
+c.db_logs(log_type="mysql_slow")       # MySQL/MariaDB、PostgreSQL、MSSQL、Oracle 日志
 
 # CaseDB 的便捷方法可通过 c.db 访问
 c.db.by_event_id([4624, 4625])
@@ -115,7 +116,7 @@ with Case.open("incident42") as c:
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
 | 原生 SQL | `c.query(sql)`、`c.query_chunks(sql, chunksize=)`、`c.db.table(name)`、`c.db.table_chunks(name, chunksize=)` |
-| 各日志家族的专属访问器 | `c.events()` / `c.events_chunks()`，`c.web_logs(log_type=)` / `_chunks`，`c.web_error_logs(log_type=)` / `_chunks`，`c.scheduled_tasks()` / `_chunks`，`c.exchange_message_tracking()` / `_chunks`，`c.exchange_logs(log_type=)` / `_chunks`，`c.syslog()` / `_chunks`，`c.auditd_logs()` / `_chunks`，`c.journal_logs()` / `_chunks` |
+| 各日志家族的专属访问器 | `c.events()` / `c.events_chunks()`，`c.web_logs(log_type=)` / `_chunks`，`c.web_error_logs(log_type=)` / `_chunks`，`c.scheduled_tasks()` / `_chunks`，`c.exchange_message_tracking()` / `_chunks`，`c.exchange_logs(log_type=)` / `_chunks`，`c.syslog()` / `_chunks`，`c.auditd_logs()` / `_chunks`，`c.journal_logs()` / `_chunks`，`c.db_logs(log_type=)` / `_chunks` |
 | 计划任务排查 | `c.suspicious_tasks()` |
 | 登录事件排查（基于 `syslog`） | `c.auth_events()` |
 | 检测 | `c.hunt(rules_dir=, min_level=)` -> `HuntResults` |

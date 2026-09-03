@@ -17,9 +17,10 @@ seclogx 的目标就是让排查的最初几个小时变得高效：
 - 同一次导入过程中，它还会发现并归一化：磁盘上的**计划任务**定义（一种持久化痕迹）、**IIS/nginx/Apache/Tomcat**
   的访问日志*以及*错误/诊断日志（Web 应用会产生的两大日志类别都覆盖，包括 IIS 的
   HTTP.sys/HTTPERR）、**Exchange** CSV 日志（邮件跟踪日志拥有一等列，其余 Exchange
-  日志类型进入一个不丢弃任何数据的兜底表），以及 **Linux** syslog（BSD/RFC-3164 与 RFC
+  日志类型进入一个不丢弃任何数据的兜底表）、**Linux** syslog（BSD/RFC-3164 与 RFC
   5424，含 `auth.log`/`secure` 的内容）、Linux 审计框架（auditd）与 systemd journal
-  导出日志。每种格式都是根据内容而非文件名判断的，因此被重命名或迁移过的证据文件同样能被正确识别。完整的九张表全貌见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)。
+  导出日志，以及**数据库**日志（MySQL/MariaDB 错误/通用查询/慢查询日志、PostgreSQL、
+  MSSQL、Oracle 告警日志）。每种格式都是根据内容而非文件名判断的，因此被重命名或迁移过的证据文件同样能被正确识别。完整的十张表全貌见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)。
 - 你得到的是从头到尾原生的 `pandas.DataFrame` 接口（命令行表格/CSV 导出，或在 notebook
   中使用的 Python `Case` 对象），并内置基于 Sigma 规则的威胁狩猎能力，自动打上 MITRE
   ATT&CK 标签，覆盖 Windows 事件日志与 Web 访问日志两类数据。**同样不需要写 SQL**：
@@ -75,6 +76,7 @@ cases/<name>/
     syslog/host=<h>/*.parquet                                    # 通用 syslog，含 auth.log/secure
     auditd_logs/host=<h>/record_type=<r>/*.parquet                # Linux 审计框架
     journal_logs/host=<h>/*.parquet                              # systemd journal 导出
+    db_logs/host=<h>/log_type=<t>/*.parquet                       # MySQL/PostgreSQL/MSSQL/Oracle 日志
 ```
 
 `lake/` 可以存放在 S3 兼容的对象存储上，而不局限于本地磁盘（`SECLOGX_STORAGE_BACKEND=s3`
@@ -99,7 +101,7 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 
 接下来可以看：
 
-- **[2. 日志类型与模式](02_log_types_and_schema.zh-CN.md)** -- 九张表各自存放什么，该看什么。
+- **[2. 日志类型与模式](02_log_types_and_schema.zh-CN.md)** -- 十张表各自存放什么，该看什么。
 - **[3. 查询与搜索](03_querying_and_search.zh-CN.md)** -- SQL、免 SQL 的 `search()` 接口，以及有界内存交付。
 - **[4. 威胁狩猎](04_threat_hunting.zh-CN.md)** -- Sigma 规则与 ATT&CK 标签。
 - **[5. 命令行参考](05_cli_reference.zh-CN.md)** / **[6. Python API](06_python_api.zh-CN.md)** -- 完整的命令/方法参考。

@@ -1,0 +1,4 @@
+2024-01-01 00:00:00.123 UTC [12345] LOG:  database system is ready to accept connections
+2024-01-01 00:00:05.456 UTC [12401] appuser@appdb LOG:  statement: SELECT * FROM accounts
+2024-01-01 00:00:07.789 UTC [12401] appuser@appdb ERROR:  relation "secrets" does not exist at character 15
+this is not a postgresql log line

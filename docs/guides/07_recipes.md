@@ -232,5 +232,23 @@ WHERE unit = 'sshd.service' AND CAST(priority AS INTEGER) <= 4
 ORDER BY time_created
 ```
 
+**Database logs: MySQL slow queries with the most rows examined
+(possible data-exfiltration-sized scans), and database auth
+failures/errors across every engine at once:**
+
+```python
+slow = c.db_logs(log_type="mysql_slow").sort_values("rows_examined", ascending=False)
+slow[["time_created", "host", "user_name", "client_address", "query_time_sec", "rows_examined", "message"]].head(20)
+```
+
+```sql
+SELECT time_created, host, log_type, severity, error_code, message
+FROM db_logs
+WHERE error_code IS NOT NULL                          -- MySQL MY-xxxxx / Oracle ORA-xxxxx
+   OR severity IN ('ERROR', 'FATAL')                   -- PostgreSQL
+   OR message ILIKE '%login failed%'                   -- MSSQL (no structured severity)
+ORDER BY time_created
+```
+
 Next: [08. Performance & scale](08_performance_and_scale.md) for how
 these queries behave at real-world case volumes.

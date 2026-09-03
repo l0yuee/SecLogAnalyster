@@ -35,9 +35,10 @@ seclogx case info incident42
 
 Discovers, classifies, and normalizes every supported file under the
 given source paths into the case in one pass: `.evtx`, Scheduled Task
-definitions, IIS/nginx/Apache/Tomcat access logs, Exchange CSV logs, and
-Linux syslog/`auth.log`, auditd, and systemd journal export logs. This is
-the core command.
+definitions, IIS/nginx/Apache/Tomcat access logs, Exchange CSV logs,
+Linux syslog/`auth.log`, auditd, and systemd journal export logs, and
+MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs. This is the core
+command.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -160,9 +161,9 @@ Sysmon was running).
 
 Row count per table currently in the case -- `events`, `web_logs`,
 `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`,
-`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, whichever are
-present. The quickest way to see what log families a case actually has
-before writing queries against them.
+`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`,
+whichever are present. The quickest way to see what log families a case
+actually has before writing queries against them.
 
 ```bash
 seclogx sources incident42

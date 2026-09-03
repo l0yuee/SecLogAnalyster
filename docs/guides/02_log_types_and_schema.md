@@ -60,7 +60,7 @@ If you don't know the exact field name for something, `CaseDB.search()`
 search across it -- see [07. Recipes](07_recipes.md) -- or read on for
 `seclogx fields`, which lists real field names directly from your data.
 
-## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`
+## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`
 
 Windows Event Log isn't the only artifact `ingest` normalizes. Each of
 these is fundamentally a different shape, so each gets its own table
@@ -80,6 +80,7 @@ via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md)
 | `syslog` | Generic BSD/RFC-3164 and RFC 5424 syslog: `/var/log/syslog`, `messages`, `kern.log`, `auth.log`/`secure`, etc., unified | `app_name`, `hostname`, `facility`, `severity`, `message`, `structured_data` (JSON, RFC5424 only) |
 | `auditd_logs` | Linux Audit Framework (`/var/log/audit/audit.log`), one row per line | `record_type`, `audit_serial`, `syscall`, `exe`, `comm`, `auid`, `key`, `fields` (JSON) |
 | `journal_logs` | systemd journal export format (`journalctl -o json`) | `unit`, `syslog_identifier`, `priority`, `comm`, `exe`, `message`, `fields` (JSON) |
+| `db_logs` | Database server logs: MySQL/MariaDB (error, general query, slow query), PostgreSQL, MSSQL, Oracle alert log, unified | `log_type`, `severity`, `error_code`, `thread_id`, `user_name`, `query_time_sec`, `rows_examined`, `message` |
 
 A few things worth knowing before you query these:
 
@@ -126,6 +127,16 @@ A few things worth knowing before you query these:
 - **`journal_logs` parses the journal *export* format** (`journalctl -o
   json`), not the binary journal itself (`/var/log/journal/**`), which
   isn't portable across systems and isn't ingested.
+- **`db_logs` unifies six sub-formats behind `log_type`**: `mysql_error`,
+  `mysql_general`, `mysql_slow`, `postgresql`, `mssql`, `oracle`. Only
+  `mysql_slow` populates `query_time_sec`/`rows_examined`/`user_name`/
+  `client_address`; only `mysql_error`/`oracle` populate `error_code`;
+  columns an engine doesn't produce are simply NULL for its rows -- see
+  `docs/schema.md` for exactly which columns each sub-format fills in.
+  Detection is content-based like every other table here, but MySQL's
+  general/slow query logs and Oracle's alert log each depend on a
+  marker/header/timestamp line appearing early in the file -- see
+  `docs/known_limitations.md` if a database log doesn't get picked up.
 - See [07. Recipes](07_recipes.md) for recipes, and `docs/known_limitations.md`
   for the full list of scope decisions.
 
@@ -152,6 +163,7 @@ gets on top of that.
 | Linux syslog (incl. `auth.log`/`secure`) | `syslog` | `auth` (curated SSH/sudo/PAM view) | `syslog()` / `syslog_chunks()`, `auth_events()` (heuristic) | No -- use `auth_events()` / query directly |
 | Linux Audit Framework (auditd) | `auditd_logs` | none -- use `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | No -- query directly |
 | systemd journal export | `journal_logs` | none -- use `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | No -- query directly |
+| Database logs (MySQL/MariaDB/PostgreSQL/MSSQL/Oracle) | `db_logs` | none -- use `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | No -- query directly |
 
 `seclogx sources <case>` isn't table-specific -- it's the one command to
 run first, before any of the above: a row count per table so you know
@@ -202,6 +214,14 @@ What to actually look for in each, at a glance (full recipes in
   hosts where the analyst exported `journalctl -o json` instead of (or in
   addition to) a forwarded syslog file; sweep by `unit`/`syslog_identifier`
   to see everything one service logged.
+- **`db_logs`** -- authentication failures and errors surfaced by
+  `error_code` (MySQL's `MY-XXXXX`, Oracle's `ORA-#####` -- e.g.
+  `ORA-01017` is invalid credentials, a brute-force signal) or `severity`
+  (`ERROR`/`FATAL` in PostgreSQL); `mysql_slow` rows with a high
+  `rows_examined` relative to typical traffic (possible data
+  exfiltration via a full-table scan); `message` text for SQL injection
+  patterns reaching the database layer. Filter by `log_type` first --
+  the six sub-formats have very different columns populated.
 
 ## Which fields can I search on?
 
@@ -266,6 +286,7 @@ vary):
 | `syslog` | `app_name`, `message`, `hostname`, `facility`/`severity` (NULL unless the source has `<PRI>`) |
 | `auditd_logs` | `record_type`, `key`, `exe`, `comm`, `auid`, `audit_serial` (to correlate related lines) |
 | `journal_logs` | `unit`, `syslog_identifier`, `message`, `priority` |
+| `db_logs` | `log_type` first, then `severity`, `error_code`, `message`; `mysql_slow` rows also have `query_time_sec`, `rows_examined` |
 
 For `events` specifically, note that which fields exist depends on the
 *channel* -- `Image`/`CommandLine` are Sysmon fields and won't appear on

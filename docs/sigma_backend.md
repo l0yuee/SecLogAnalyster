@@ -57,14 +57,14 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
   `LOGSOURCE_ROUTES` unless that category also needs an added condition).
 - `seclogx hunt` only ever runs bundled + user-supplied Sigma rules
   against `events` and `web_logs` in v1 -- `scheduled_tasks`,
-  `web_error_logs`, `exchange_message_tracking`/`exchange_logs`, and the
-  three Linux tables (`syslog`/`auditd_logs`/`journal_logs`) have no
-  Sigma logsource category that fits (Sigma's scheduled-task detections
-  target the event log, not on-disk task definitions; there's no
-  standard Sigma category for web error/diagnostic logs or for these
-  Linux formats either), so they're queried directly via SQL/`search()`,
-  or via the lightweight `Case.suspicious_tasks()` / `Case.auth_events()`
-  heuristics instead.
+  `web_error_logs`, `exchange_message_tracking`/`exchange_logs`, the
+  three Linux tables (`syslog`/`auditd_logs`/`journal_logs`), and
+  `db_logs` have no Sigma logsource category that fits (Sigma's
+  scheduled-task detections target the event log, not on-disk task
+  definitions; there's no standard Sigma category for web error/
+  diagnostic logs, these Linux formats, or database server logs either),
+  so they're queried directly via SQL/`search()`, or via the lightweight
+  `Case.suspicious_tasks()` / `Case.auth_events()` heuristics instead.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
   `seclogx hunt <case> --rules <dir>` against a case with known-good data

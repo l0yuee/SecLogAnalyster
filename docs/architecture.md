@@ -2,8 +2,9 @@
 
 seclogx turns scattered forensic acquisitions -- `.evtx`, on-disk
 Scheduled Task definitions, IIS/nginx/Apache/Tomcat access and error
-logs, Exchange CSV logs, and Linux syslog/auditd/systemd-journal exports
--- into one queryable, huntable case workspace,
+logs, Exchange CSV logs, Linux syslog/auditd/systemd-journal exports, and
+MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs -- into one
+queryable, huntable case workspace,
 favoring set-based DuckDB SQL over per-record Python wherever possible
 (validated during design: the `evtx` package's real bottleneck is
 per-record Python marshaling, not parsing). This is two parallel
@@ -95,13 +96,14 @@ under `lake/` (`read_parquet(..., hive_partitioning=true,
 union_by_name=true)` each) -- `events` for Windows Event Log, plus
 whichever of `web_logs`/`web_error_logs`/`scheduled_tasks`/
 `exchange_message_tracking`/`exchange_logs`/`syslog`/`auditd_logs`/
-`journal_logs` the case has data for -- and exposes `.sql()`, a generic
-`.table(name)` (full contents of any table as a DataFrame), and a handful
-of convenience filters, always returning pandas DataFrames. `Case`
-mirrors this with a named, DataFrame-returning accessor per log family
-(`web_logs()`, `web_error_logs()`, `scheduled_tasks()`,
+`journal_logs`/`db_logs` the case has data for -- and exposes `.sql()`, a
+generic `.table(name)` (full contents of any table as a DataFrame), and a
+handful of convenience filters, always returning pandas DataFrames.
+`Case` mirrors this with a named, DataFrame-returning accessor per log
+family (`web_logs()`, `web_error_logs()`, `scheduled_tasks()`,
 `exchange_message_tracking()`, `exchange_logs()`, `syslog()`,
-`auditd_logs()`, `journal_logs()`) -- the same first-class treatment
+`auditd_logs()`, `journal_logs()`, `db_logs()`) -- the same first-class
+treatment
 `events` gets via `summary()`/`hosts()`/`channels()`, so no log family
 requires raw SQL just to get a DataFrame. See `docs/schema.md` for every
 table's full column list.
@@ -221,10 +223,11 @@ same `events` table.
 Every `--source` also gets a second discovery/staging/flatten pass, for
 artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
 IIS/nginx/Apache/Tomcat HTTP access **and** error/diagnostic logs, IIS
-HTTP.sys (HTTPERR) logs, Exchange's self-describing CSV logs, and three
+HTTP.sys (HTTPERR) logs, Exchange's self-describing CSV logs, three
 Linux log families (generic syslog -- which is also where `auth.log`/
 `secure` content lands, see below -- the Linux Audit Framework/auditd,
-and systemd journal export)
+and systemd journal export), and database server logs (MySQL/MariaDB
+error/general/slow query logs, PostgreSQL, MSSQL, Oracle alert log)
 (`ingest/logsources/discovery.py`, `ingest/logsources/stage.py`,
 `ingest/logsources/orchestrator.py` + `ingest/logsources/flatten.py` --
 this second pair mirrors the EVTX pipeline's own orchestrator/flatten
@@ -242,10 +245,11 @@ happens when a source has one but not the other.
         v
  scheduled_task | iis | web_access | web_error_{nginx,apache,tomcat} | iis_httperr
    | exchange_message_tracking | exchange_generic | syslog | auditd
-   | journal_export | unknown
+   | journal_export | mysql_error | mysql_general | mysql_slow
+   | postgresql | mssql | oracle_alert | unknown
         |
         v
- [2] parse + stage  (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal}.py)
+ [2] parse + stage  (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal,dblogs}.py)
         |  dispatched by ingest/logsources/orchestrator.py's
         |  ProcessPoolExecutor, one worker per file -- parses to Python
         |  dicts, then writes them to a per-file NDJSON staging file
@@ -257,7 +261,7 @@ happens when a source has one but not the other.
         |  TRY_CAST per column -- same union_by_name stable-typing
         |  discipline as schema.py's event_data fix
         v
- cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs,syslog,auditd_logs,journal_logs}/host=<h>/[log_type=<t>/]*.parquet
+ cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs,syslog,auditd_logs,journal_logs,db_logs}/host=<h>/[log_type=<t>/]*.parquet
 ```
 
 **`syslog` covers `auth.log`/`secure` too -- there's no separate sniff
@@ -309,6 +313,7 @@ cases/<case_name>/
     syslog/host=<h>/*.parquet
     auditd_logs/host=<h>/record_type=<r>/*.parquet
     journal_logs/host=<h>/*.parquet
+    db_logs/host=<h>/log_type=<t>/*.parquet
 ```
 
 `query.py`'s `CaseDB` creates a view per subdirectory of `lake/` that

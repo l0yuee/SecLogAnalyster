@@ -379,6 +379,16 @@ class Case:
     def journal_logs_chunks(self, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
         return self.db.table_chunks("journal_logs", order_by="time_created", chunksize=chunksize)
 
+    def db_logs(self, log_type: str | None = None) -> pd.DataFrame:
+        """MySQL/MariaDB (error, general query, and slow query logs),
+        PostgreSQL, MSSQL, and Oracle log entries. `log_type`: 'mysql_error'
+        | 'mysql_general' | 'mysql_slow' | 'postgresql' | 'mssql' |
+        'oracle'."""
+        return self._log_type_table("db_logs", log_type)
+
+    def db_logs_chunks(self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
+        return self._log_type_chunks("db_logs", log_type, chunksize)
+
     def auth_events(self) -> pd.DataFrame:
         """Derived heuristic triage over `syslog`: recognizes SSH
         (accepted/failed/invalid-user/disconnected), sudo command

@@ -1,0 +1,6 @@
+Time                 Id Command    Argument
+2024-01-01T00:00:00.000000Z		     5 Connect	root@localhost on  using Socket
+	    5 Query	SELECT * FROM users
+	    6 Init DB	test_db
+	    6 Quit
+this is garbage

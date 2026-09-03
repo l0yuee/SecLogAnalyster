@@ -171,6 +171,44 @@ not oversights -- documented so they're easy to revisit later.
   scope in v1** -- only the standard access (W3C/CLF/Combined) and error
   (HTTPERR / `error_log` / catalina) log categories are covered.
 
+## Database log ingestion (MySQL/MariaDB / PostgreSQL / MSSQL / Oracle)
+
+- **PostgreSQL parsing covers the common `%m [%p] %q%u@%d ` `log_line_prefix`
+  shape only, not arbitrary custom prefixes.** `log_line_prefix` is a
+  server-configurable setting; a Postgres instance configured with a
+  substantially different prefix format won't be recognized as
+  `postgresql` and its lines will be reported as parse errors, the same
+  "best-effort, not exhaustive" honesty standard as `guess_web_log_type`.
+- **MySQL general query log and slow query log classification depends on
+  a marker/header line being present in the ingested file** (the literal
+  `Time  Id  Command  Argument` header for general logs; a `# Time:`/`#
+  Query_time:` comment line for slow logs) **appearing before any other
+  non-comment content** -- only the *first* non-blank, non-comment line
+  peeked is checked (same single-first-line heuristic every other
+  content-sniffed format in this project uses). A slow-log file whose
+  captured content leads with mysqld's plain-text startup banner rather
+  than a query block may not be classified; a general log missing its
+  header (e.g. mid-file forensic extraction) likewise.
+- **Oracle alert log classification requires a timestamp-only line
+  (`YYYY-MM-DDTHH:MM:SS.ffffff+TZ:TZ` on its own line) within the first
+  16KB peeked.** A very long startup banner preceding the first timestamp
+  entry could defeat this, same class of limitation as the MySQL
+  marker-line dependence above.
+- **MySQL error log's `[MY-XXXXX]` error code and `[Subsystem]` tag are
+  only extracted for the 5.7+/8.0 bracketed format**; the older
+  `YYMMDD HH:MM:SS [Level] message` format has no equivalent fields
+  (`error_code`/`component`/`thread_id` are NULL for those rows).
+- **`db_logs.error_code` is populated two different ways depending on
+  `log_type`**: taken directly from a `[MY-XXXXX]` bracket for
+  mysql_error, but regex-extracted (`ORA-\d{5}`) from anywhere in the
+  accumulated message text for oracle -- not a parsed structured field
+  for Oracle, just the first matching substring.
+- **MSSQL `ERRORLOG` format is stable across recent versions but not
+  guaranteed identical across every edition/version** -- the parser
+  expects `<date> <time>.<cc>  <component>      <message>`; a
+  significantly different layout (e.g. a heavily customized trace flag
+  configuration) may not match.
+
 ## Linux log ingestion (syslog / auth.log / auditd / systemd journal)
 
 - **Format is detected by content, not filename or extension** -- same

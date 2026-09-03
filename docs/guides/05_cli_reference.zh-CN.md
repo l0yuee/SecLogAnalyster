@@ -31,8 +31,8 @@ seclogx case info incident42
 ## `seclogx ingest <case> --source PATH[:HOST] [--source ...]`
 
 在来源路径下一次性发现、分类并归一化所有支持的文件，导入到案例中：`.evtx`、计划任务定义、IIS/nginx/Apache/Tomcat
-访问日志、Exchange CSV 日志，以及 Linux syslog/`auth.log`、auditd 与 systemd
-journal 导出日志。这是核心命令。
+访问日志、Exchange CSV 日志、Linux syslog/`auth.log`、auditd 与 systemd
+journal 导出日志，以及 MySQL/MariaDB/PostgreSQL/MSSQL/Oracle 数据库日志。这是核心命令。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
@@ -134,7 +134,7 @@ seclogx query incident42 "SELECT * FROM web_logs WHERE status >= 400" --out web_
 
 ## `seclogx sources <case>`
 
-列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
+列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
 
 ```bash
 seclogx sources incident42

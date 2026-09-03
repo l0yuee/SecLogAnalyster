@@ -44,11 +44,11 @@ more.
 `web_logs`, i.e. **access** logs), for supplying your own IIS/nginx/Apache
 webshell or exploitation-pattern rules -- none are bundled by default in
 v1. There is no Sigma logsource category for on-disk Scheduled Task
-definitions, web application **error** logs (`web_error_logs`), or
-Exchange message tracking, so those aren't part of a Sigma hunt; use
-`Case.suspicious_tasks()` / `seclogx tasks --suspicious` for tasks, and
-plain SQL/search (see [07. Recipes](07_recipes.md)) for `web_error_logs`
-and Exchange.
+definitions, web application **error** logs (`web_error_logs`), Exchange
+message tracking, or database logs (`db_logs`), so those aren't part of a
+Sigma hunt; use `Case.suspicious_tasks()` / `seclogx tasks --suspicious`
+for tasks, and plain SQL/search (see [07. Recipes](07_recipes.md)) for
+`web_error_logs`, Exchange, and `db_logs`.
 
 ## Extending detection: custom rules and fields
 

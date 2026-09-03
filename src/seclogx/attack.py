@@ -19,7 +19,7 @@ from .config import BUNDLED_ATTACK_DATA
 def _techniques() -> dict[str, dict[str, str]]:
     if not BUNDLED_ATTACK_DATA.exists():
         return {}
-    return json.loads(BUNDLED_ATTACK_DATA.read_text())
+    return json.loads(BUNDLED_ATTACK_DATA.read_text(encoding="utf-8"))
 
 
 def lookup_technique(technique_id: str) -> dict[str, str] | None:

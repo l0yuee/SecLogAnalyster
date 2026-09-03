@@ -62,7 +62,8 @@ seclogx --help
 ```
 cases/<name>/
   case.json                     # 已导入的主机列表、导入运行历史
-  staging/<host>/*.ndjson       # 中间解析结果（仅 EVTX，默认保留）
+  staging/<host>/*.ndjson.gz       # 中间解析结果，已 gzip 压缩（EVTX，默认保留）
+  staging_aux/<host>/*.ndjson.gz   # 中间解析结果，已 gzip 压缩（非 EVTX 日志类型，默认保留）
   logs/ingest_<batch_id>.log    # 每次导入的核对报告
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows 事件日志
@@ -77,8 +78,8 @@ cases/<name>/
 ```
 
 `lake/` 可以存放在 S3 兼容的对象存储上，而不局限于本地磁盘（`SECLOGX_STORAGE_BACKEND=s3`
-——可选启用，见[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)）；`case.json`、`staging/`
-与 `logs/` 无论在哪种模式下都始终保留在本地/NFS。
+——可选启用，见[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)）；`case.json`、`staging/`、
+`staging_aux/` 与 `logs/` 无论在哪种模式下都始终保留在本地/NFS。
 
 你只需创建一次案例（`seclogx case init`），之后可以对它执行任意多次 `ingest`（导入）——来自不同的来源路径、不同的主机，甚至相隔数周也没问题。每次导入都是增量追加，并记录在
 `case.json` 中。一次 `ingest` 会在来源路径下一次性发现并导入所有支持的格式——不需要对每种日志类型分别导入。案例只会暴露它实际拥有数据的表；可用

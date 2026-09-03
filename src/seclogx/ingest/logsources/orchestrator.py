@@ -6,12 +6,15 @@ delegated to flatten.py, mirroring how the EVTX pipeline
 (`ingest/evtx/orchestrator.py` + `ingest/evtx/flatten.py`) splits the two
 responsibilities.
 
-Unlike the EVTX pipeline (NDJSON staging + one bulk DuckDB flatten, chosen
-because per-record Python marshaling was the bottleneck at EVTX's typical
-record volume), these formats are already line-oriented text or small XML
-files at far lower per-file record counts, so each worker parses straight
-to Python dicts and flatten.py batches them directly into Parquet -- no
-intermediate staging files needed.
+Each worker stages its parsed rows to a per-file NDJSON file on disk (same
+pattern as the EVTX pipeline) instead of returning them in-memory --
+flatten.py then reads every table's staged files via DuckDB, out-of-core,
+rather than the coordinator accumulating every row of a batch in Python
+first. This matters in practice: these formats were originally assumed
+low per-file record volume, but web access/error logs in particular can
+reach far larger scale in real evidence sets (see
+docs/known_limitations.md), so unbounded in-memory accumulation across a
+whole ingest batch was a real cost, not just a theoretical one.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ def run_aux_ingest(
     case_dir: Path,
     sources: list[SourceSpec],
     workers: int | None = None,
+    keep_staging: bool = True,
     cluster_config: ClusterConfig | None = None,
 ) -> AuxIngestReport:
     cluster_config = cluster_config or ClusterConfig.from_env()
@@ -52,8 +56,14 @@ def run_aux_ingest(
             problem_files=[],
         )
 
+    staging_dir = case_dir / "staging_aux"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # Distributed mode: staging_dir must be reachable by every `seclogx
+    # worker` process (a shared/NFS mount), same requirement as the EVTX
+    # pipeline's staging_dir -- see ingest/evtx/orchestrator.py.
     queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
-    staged: list[AuxStagedFile] = queue.submit_all(stage_aux_file, [(cf,) for cf in classified])
+    staged: list[AuxStagedFile] = queue.submit_all(stage_aux_file, [(cf, staging_dir) for cf in classified])
     staged.sort(key=lambda f: f.source_path)
 
     files_ok = sum(1 for f in staged if f.status == StageStatus.OK)
@@ -66,16 +76,21 @@ def run_aux_ingest(
         if f.status in (StageStatus.PARTIAL, StageStatus.FAILED)
     ]
 
-    by_table: dict[str, list[dict]] = {}
+    by_table: dict[str, list[str]] = {}
     for f in staged:
-        if f.table and f.rows:
-            by_table.setdefault(f.table, []).extend(f.rows)
+        if f.table and f.ndjson_path:
+            by_table.setdefault(f.table, []).append(f.ndjson_path)
 
     ingested_at = datetime.now(timezone.utc)
     rows_written = {
-        table: flatten_table(case_dir, table, rows, batch_id, ingested_at, cluster_config=cluster_config)
-        for table, rows in by_table.items()
+        table: flatten_table(case_dir, table, ndjson_paths, batch_id, ingested_at, cluster_config=cluster_config)
+        for table, ndjson_paths in by_table.items()
     }
+
+    if not keep_staging:
+        for f in staged:
+            if f.ndjson_path:
+                Path(f.ndjson_path).unlink(missing_ok=True)
 
     return AuxIngestReport(
         batch_id=batch_id,

@@ -126,12 +126,12 @@ def _aux_staged_file(status: str, table: str | None = "scheduled_tasks", error_m
         record_count=1 if status == StageStatus.OK else 0,
         error_count=0,
         error_message=error_message,
-        rows=[],
+        ndjson_path=None,
         staged_at="2026-01-01T00:00:00+00:00",
     )
 
 
-def test_aux_ingest_report_to_dataframe_excludes_rows_payload():
+def test_aux_ingest_report_to_dataframe_one_row_per_file():
     report = AuxIngestReport(
         batch_id="batch1",
         files_discovered=1,
@@ -146,7 +146,7 @@ def test_aux_ingest_report_to_dataframe_excludes_rows_payload():
     )
 
     df = report.to_dataframe()
-    assert "rows" not in df.columns
+    assert "ndjson_path" in df.columns
     assert len(df) == 1
     assert df.iloc[0]["status"] == StageStatus.OK
 

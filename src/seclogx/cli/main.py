@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import typer
 
 from .. import __version__
@@ -14,6 +16,27 @@ from .search_cmd import fields_command, search_command
 from .tasks_cmd import tasks_command
 from .timeline_cmd import timeline_command
 from .worker_cmd import worker_command
+
+
+def _force_utf8_streams() -> None:
+    """Force UTF-8 on stdout/stderr, with a can't-fail fallback for
+    anything still unencodable. Without this, output encoding follows
+    the OS locale (e.g. GBK/cp936 on Chinese-locale Windows), and
+    printing forensic content containing characters outside that
+    codepage -- rule titles, matched field values, anything sourced from
+    evidence rather than typed by us -- raises UnicodeEncodeError and
+    kills the command outright. Mirrors the same "never crash on
+    unexpected encoding" guarantee ingest already provides on the read
+    side (see ingest/logsources/sniff.py)."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_force_utf8_streams()
 
 app = typer.Typer(
     help="seclogx -- fast, pandas-friendly threat hunting over Windows Event Log, Scheduled Tasks, "

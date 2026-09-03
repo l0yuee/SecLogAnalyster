@@ -13,6 +13,7 @@ never silently treating a partial read as a clean success.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +23,17 @@ from evtx import PyEvtxParser
 from ..common import StageStatus, now_iso, sha256_file
 from .discovery import DiscoveredFile
 from .manifest import StagedFile
+
+# Rendered-as-JSON EVTX records are considerably larger than the source
+# binary .evtx (verbose field names, string-encoded binary values,
+# repeated keys per record); gzip brings staged NDJSON back down to
+# roughly source-file size or smaller, at a compression cost that's
+# small next to the parsing work already happening in this same worker.
+# level 1 trades a bit of ratio for speed -- log/event JSON is repetitive
+# enough that most of the size win comes for free even at low levels.
+# DuckDB's read_ndjson/read_ndjson_auto (see flatten.py) decompress
+# .gz input transparently, so nothing downstream needs to know.
+_GZIP_LEVEL = 1
 
 
 def _short_hash(text: str) -> str:
@@ -36,7 +48,7 @@ def stage_file(discovered: DiscoveredFile, staging_dir: Path, keep_raw: bool = F
 
     # Hash suffix avoids collisions when files with the same basename are
     # discovered under the same host from different acquisition paths.
-    ndjson_path = host_dir / f"{source_path.stem}.{_short_hash(str(source_path))}.ndjson"
+    ndjson_path = host_dir / f"{source_path.stem}.{_short_hash(str(source_path))}.ndjson.gz"
 
     try:
         file_sha256 = sha256_file(source_path)
@@ -92,7 +104,7 @@ def stage_file(discovered: DiscoveredFile, staging_dir: Path, keep_raw: bool = F
     error_message: str | None = None
 
     try:
-        with ndjson_path.open("w") as out:
+        with gzip.open(ndjson_path, "wt", compresslevel=_GZIP_LEVEL) as out:
             for rec in parser.records_json():
                 if not isinstance(rec, dict) or "data" not in rec or "event_record_id" not in rec:
                     error_count += 1

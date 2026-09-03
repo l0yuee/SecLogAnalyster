@@ -25,6 +25,7 @@ from .ingest import run_ingest, run_aux_ingest
 from .ingest.common import parse_source_arg
 from .ingest.evtx.manifest import IngestReport
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
+from .ingest.logsources.parsers.task_baseline import classify_against_baseline
 from .ingest.logsources.parsers.syslog import extract_auth_events
 from .query import DEFAULT_CHUNKSIZE, CaseDB
 from .search import Match, conditions_from_dicts, discover_fields
@@ -75,7 +76,7 @@ class Case:
             "hosts": [],
             "ingest_runs": [],
         }
-        (case_dir / "case.json").write_text(json.dumps(meta, indent=2))
+        (case_dir / "case.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return cls(name, case_dir, cluster_config=cluster_config)
 
     @classmethod
@@ -96,10 +97,10 @@ class Case:
 
     # -- metadata -----------------------------------------------------------
     def _load_meta(self) -> dict:
-        return json.loads((self.case_dir / "case.json").read_text())
+        return json.loads((self.case_dir / "case.json").read_text(encoding="utf-8"))
 
     def _save_meta(self, meta: dict) -> None:
-        (self.case_dir / "case.json").write_text(json.dumps(meta, indent=2))
+        (self.case_dir / "case.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def info(self) -> dict:
         return self._load_meta()
@@ -142,7 +143,9 @@ class Case:
                 records_flattened=0,
             )
 
-        report.aux = run_aux_ingest(self.case_dir, specs, workers=workers, cluster_config=self.cluster_config)
+        report.aux = run_aux_ingest(
+            self.case_dir, specs, workers=workers, keep_staging=keep_staging, cluster_config=self.cluster_config
+        )
 
         if report.files_discovered == 0 and report.aux.files_discovered == 0:
             raise NoSourcesFoundError(
@@ -405,23 +408,50 @@ class Case:
     def suspicious_tasks(self) -> pd.DataFrame:
         """Lightweight heuristic triage over `scheduled_tasks` -- flags tasks
         whose action executable lives under a user-writable/temp-like path,
-        or whose action invokes a common LOLBin (powershell/cmd/wscript/...).
-        Not a Sigma rule (Sigma has no logsource for on-disk task
-        definitions); a lower-effort convenience for a first pass."""
+        whose action invokes a common LOLBin (powershell/cmd/wscript/...),
+        that have no author, that are hidden, or that reuse a well-known
+        Microsoft task path (`data/scheduled_tasks/known_microsoft_tasks.json`)
+        while pointing their action at an unexpected executable location --
+        the way a legitimate task getting hijacked/modified for persistence
+        (MITRE ATT&CK T1053.005) usually looks. Not a Sigma rule (Sigma has
+        no logsource for on-disk task definitions); a lower-effort
+        convenience for a first pass. Adds a `suspicion_reasons` column
+        (list[str]) to the returned rows explaining *why* each was flagged,
+        rather than a bare filter -- see `.scheduled_tasks()` for the full,
+        unfiltered table."""
         df = self.scheduled_tasks()
         if df.empty:
             return df
 
-        def _is_suspicious(actions_json: str | None) -> bool:
+        def _hint_reasons(actions_json: str | None) -> list[str]:
             if not actions_json:
-                return False
+                return []
             haystack = actions_json.lower()
-            return any(h in haystack for h in SUSPICIOUS_ACTION_PATH_HINTS) or any(
-                h in haystack for h in SUSPICIOUS_COMMAND_HINTS
-            )
+            reasons = []
+            if any(h in haystack for h in SUSPICIOUS_ACTION_PATH_HINTS):
+                reasons.append("action executable under a user-writable/temp-like path")
+            if any(h in haystack for h in SUSPICIOUS_COMMAND_HINTS):
+                reasons.append("action invokes a common LOLBin")
+            return reasons
 
-        mask = df["actions"].apply(_is_suspicious) | df["author"].isna() | (df["hidden"] == True)  # noqa: E712
-        return df[mask]
+        def _reasons(row) -> list[str]:
+            reasons = _hint_reasons(row["actions"])
+            if pd.isna(row["author"]):
+                reasons.append("no author recorded")
+            if row["hidden"] == True:  # noqa: E712
+                reasons.append("task is hidden")
+            action_command = row.get("action_command")
+            action_command = None if pd.isna(action_command) else action_command
+            baseline_reason = classify_against_baseline(row["task_path"], action_command)
+            if baseline_reason:
+                reasons.append(baseline_reason)
+            return reasons
+
+        reasons_col = df.apply(_reasons, axis=1)
+        mask = reasons_col.apply(bool)
+        out = df[mask].copy()
+        out["suspicion_reasons"] = reasons_col[mask]
+        return out
 
     # -- detection ------------------------------------------------------------
     def hunt(self, rules_dir: Path | None = None, min_level: str | None = None) -> HuntResults:

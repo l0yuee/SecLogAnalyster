@@ -77,7 +77,8 @@ key 查找（在内置的表里，只有 `scheduled_tasks` 会遇到这种情况
 - Sigma 日志来源类别会被路由到其对应的 **Sysmon** 等价事件，而非原生 Security
   通道的等价事件（例如进程创建 -> Sysmon 事件 ID 1，而非 Security 4688）。
 - 非 EVTX 格式的判定基于内容而非绝对保证——不规范的日志头部可能被误判为无法识别（会被报告，绝不会静默丢弃）。
-- 非 EVTX 日志类别（计划任务/IIS/Web/Exchange）的导入流程尚未做到与 EVTX 导入以及查询/取回环节同等程度的有界内存——见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
+- 导入的有界内存是按单个文件计算的（单个文件的解析开销 × `--workers`），而不是按整个批次计算的——但每个 worker
+  仍然是一次性读入单个文件，所以单个异常巨大的文件仍然是按文件计算的内存开销。见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
 - `.query()`/`.table()`/`.web_logs()` 等方法会把完整结果物化成一个 DataFrame；对于尚未过滤/聚合到较小规模的场景，请改用对应的
   `_chunks` 方法（见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)）。
 

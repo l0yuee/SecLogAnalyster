@@ -11,6 +11,7 @@ from sigma.collection import SigmaCollection
 from sigma.exceptions import SigmaError
 from sigma.rule import SigmaRule
 
+from ..textdecode import decode_text
 from .pipeline import LOGSOURCE_TABLE
 
 
@@ -26,8 +27,16 @@ def load_rules(rules_dir: Path) -> RuleLoadResult:
 
     result = RuleLoadResult()
     for path in paths:
+        # decode_text() rather than path.read_text(): a bare read_text()
+        # decodes using the OS locale's preferred encoding (e.g. GBK/cp936
+        # on Chinese-locale Windows), and Sigma rule YAML -- bundled or
+        # analyst-supplied -- is conventionally UTF-8, so any non-ASCII
+        # content (references, non-English author names, etc.) not valid
+        # in that locale's codec raised an uncaught UnicodeDecodeError on
+        # every `hunt` run. decode_text() tries UTF-8 first and never
+        # raises (see textdecode.py).
         try:
-            collection = SigmaCollection.from_yaml(path.read_text())
+            collection = SigmaCollection.from_yaml(decode_text(path.read_bytes()))
         except SigmaError as e:
             result.skipped.append((str(path), f"parse error: {e}"))
             continue

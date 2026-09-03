@@ -1,7 +1,11 @@
-"""Flatten one non-EVTX log table's in-memory rows into the case's Parquet
-lake. Mirrors `ingest/evtx/flatten.py`'s role for the EVTX pipeline, at
-per-table rather than whole-batch granularity (see orchestrator.py, which
-calls this once per table present in a given ingest batch).
+"""Flatten one non-EVTX log table's staged NDJSON files into the case's
+Parquet lake. Mirrors `ingest/evtx/flatten.py`'s role for the EVTX
+pipeline, at per-table rather than whole-batch granularity (see
+orchestrator.py, which calls this once per table present in a given
+ingest batch), and the same "read via DuckDB straight off disk, don't
+materialize the whole table in Python first" approach -- every aux row
+already carries its own `host` (unlike EVTX's raw NDJSON records), so no
+manifest-join is needed here.
 """
 
 from __future__ import annotations
@@ -10,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 
 import duckdb
-import pandas as pd
 
 from ...distributed.config import ClusterConfig
 from ...distributed.storage import get_storage_backend
@@ -20,12 +23,12 @@ from .schema import TABLES, cast_sql_for
 def flatten_table(
     case_dir: Path,
     table: str,
-    rows: list[dict],
+    ndjson_paths: list[str],
     batch_id: str,
     ingested_at: datetime,
     cluster_config: ClusterConfig | None = None,
 ) -> int:
-    if not rows:
+    if not ndjson_paths:
         return 0
 
     table_def = TABLES[table]
@@ -35,8 +38,12 @@ def flatten_table(
 
     con = duckdb.connect()
     backend.configure_duckdb(con)
-    df = pd.DataFrame(rows)
-    con.register("raw", df)
+
+    paths_sql = "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in ndjson_paths) + "]"
+    # union_by_name: different staged files for the same table can have
+    # slightly different key sets (e.g. an Exchange log variant with extra
+    # '#Fields:' columns) -- union rather than requiring identical schemas.
+    from_sql = f"FROM read_ndjson_auto({paths_sql}, union_by_name=true) AS raw"
 
     cast_sql = cast_sql_for(table)
     overrides = {
@@ -44,29 +51,35 @@ def flatten_table(
         "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
         "schema_version": "1",
     }
+    # Columns DuckDB actually inferred from this batch's staged files -- a
+    # column every parser can emit but that happens to be absent from
+    # every row in this particular batch (e.g. no Exchange log variant
+    # with a given optional field) won't be in `raw`'s schema at all.
+    raw_columns = set(con.sql(f"SELECT * {from_sql}").columns)
 
     select_exprs = []
     for col, duckdb_type in table_def["columns"]:
         if col in overrides:
             expr = overrides[col]
-        elif col in df.columns:
-            expr = cast_sql[col]
         else:
-            expr = f"CAST(NULL AS {duckdb_type})"
+            # A column absent from every staged file for this batch isn't
+            # in DuckDB's inferred schema for `raw`; fall back to NULL
+            # rather than referencing a column that doesn't exist.
+            expr = f"CAST(NULL AS {duckdb_type})" if col not in raw_columns else cast_sql[col]
         select_exprs.append(f"{expr} AS {col}")
     select_sql = ",\n  ".join(select_exprs)
 
     partition_by = ", ".join(table_def["partition_by"])
-    con.execute(
+    (row_count,) = con.execute(
         f"""
         COPY (
           SELECT
           {select_sql}
-          FROM raw
+          {from_sql}
         ) TO '{backend.copy_target(lake_location)}' (
           FORMAT PARQUET, PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
         )
         """
-    )
+    ).fetchone()
     con.close()
-    return len(df)
+    return int(row_count)

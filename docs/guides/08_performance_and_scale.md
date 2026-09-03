@@ -53,17 +53,43 @@
 - `--keep-raw` roughly doubles ingest cost (time and peak memory) for
   the files it's applied to -- use it selectively on evidence that
   needs full XML fidelity, not by default on an entire large case.
-- Scheduled Tasks/IIS/web access/Exchange logs are parsed straight to
-  Python dicts per file (no intermediate NDJSON staging), and unlike the
-  EVTX pipeline, **ingest for these log families is not yet
-  bounded-memory**: a single ingest run accumulates every parsed row for
-  a given table in memory across the whole batch before writing Parquet.
-  Fine at the volumes exercised so far; a single ingest run processing
-  enough files to reach terabyte scale *in one batch* could exhaust
-  memory during ingest even though querying the resulting lake afterward
-  would be fine. This is specifically an ingest-time boundary, separate
-  from (and not fixed by) the query-side chunking above -- see
-  `docs/known_limitations.md`.
+- Scheduled Tasks/IIS/web access/Exchange/syslog/auditd/journal logs now
+  stage to per-file NDJSON the same way EVTX does, and flatten via DuckDB
+  reading straight off disk (`read_ndjson_auto`) instead of accumulating
+  every parsed row for a table in Python across the whole batch. Peak
+  ingest-time memory is now bounded by (one file's parse footprint) x
+  `workers`, not by total batch size -- a batch large enough to reach
+  terabyte scale no longer has to fit in memory at once during ingest.
+  Per-file parsing itself (needed for encoding detection) still reads a
+  whole file at a time, so a single pathologically large individual file
+  is still a per-file, not per-batch, memory cost.
+- Staged NDJSON (`staging/`, `staging_aux/`) is gzip-compressed (level 1)
+  rather than written as plain text, and is kept by default (see
+  `--keep-staging` in [05. CLI reference](05_cli_reference.md)) so a case
+  can be cheaply re-flattened without re-parsing evidence. Rendered-as-JSON
+  EVTX records in particular run considerably larger than the source
+  binary `.evtx` -- uncompressed and kept, this combination is what makes
+  a case directory land at several times the source evidence size rather
+  than a fraction of it; gzip brings the staging directory back down close
+  to (often smaller than) source size, at a compression cost that's small
+  next to the parsing work already happening in the same worker, and read
+  back transparently by DuckDB's `read_ndjson`/`read_ndjson_auto` with no
+  meaningful decompression overhead. If disk is still tighter than time,
+  `--no-keep-staging` drops the staging directory entirely once flattening
+  succeeds -- the tradeoff is losing cheap reprocessing (a schema fix or a
+  botched flatten then needs re-ingesting the source files, not just
+  re-running the flatten step).
+- Non-log content mixed into a source directory (PE/ELF binaries, memory
+  dumps, etc.) is cheap to rule out: known-binary extensions
+  (`.exe`/`.dll`/`.sys`/...) are skipped by extension before any file
+  read, and anything else goes through a 16KB content peek
+  (`sniff.classify_file`) to decide whether it's a supported format --
+  never a full-file read for classification. A file that doesn't match
+  any supported format (reported in `AuxIngestReport.unknown_samples`,
+  never silently dropped) is never hashed or staged either, since neither
+  is used for a file with no table to attach provenance to; only files
+  that actually match a supported format pay the cost of a full read for
+  hashing.
 
 Next: [09. FAQ & limitations](09_faq_and_limitations.md) for
 troubleshooting and the full known-limitations pointer.

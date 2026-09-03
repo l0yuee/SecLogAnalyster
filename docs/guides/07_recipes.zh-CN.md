@@ -161,13 +161,13 @@ WHERE CAST(fields AS VARCHAR) ILIKE '%<indicator>%'
 ORDER BY time_created
 ```
 
-**计划任务：找出所有作者不明、被隐藏、或调用了 LOLBin 的任务——与 `--suspicious`
-使用的是同一套启发式规则：**
+**计划任务：找出所有作者不明、被隐藏、调用了 LOLBin，或伪装成已知微软任务的任务——与
+`--suspicious` 使用的是同一套启发式规则，`suspicion_reasons` 会说明每一行具体是因为什么被标记的：**
 
 ```python
 from seclogx import Case
 c = Case.open("incident42")
-c.suspicious_tasks()[["host", "task_path", "author", "hidden", "actions"]]
+c.suspicious_tasks()[["host", "task_path", "author", "hidden", "action_command", "suspicion_reasons"]]
 ```
 
 **按来源 IP 统计所有主机上的 SSH 失败登录（排查暴力破解来源），再反查该

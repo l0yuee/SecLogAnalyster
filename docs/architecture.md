@@ -296,13 +296,8 @@ detection versus a best-effort path/filename heuristic
 ```
 cases/<case_name>/
   case.json                     # hosts, source paths, ingest run history
-<<<<<<< HEAD
   staging/<host>/*.ndjson.gz       # gzipped records_json() output, one file per source .evtx
   staging_aux/<host>/*.ndjson.gz   # gzipped staged non-EVTX rows, one file per source file, named <table>.<file>.<hash>.ndjson.gz
-=======
-  staging/<host>/*.ndjson       # raw records_json() output, one file per source .evtx
-  staging_aux/<host>/*.ndjson   # staged non-EVTX rows, one file per source file, named <table>.<file>.<hash>.ndjson
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
   logs/ingest_<batch_id>.log    # reconciliation summary per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet
@@ -371,8 +366,11 @@ of whether cluster mode is ever turned on:
   but a real collision risk once distributed ingest workers can flatten
   into the same case concurrently. Fixed via DuckDB's
   `FILENAME_PATTERN '{uuid}'` COPY option, so concurrent flatten calls can
-  never collide on a filename inside the same Hive partition -- no lock
-  needed for this piece.
+  never collide on a filename inside the same Hive partition. The finite
+  set of local Hive partition directories is also pre-created with
+  `mkdir(exist_ok=True)` before COPY, avoiding a Windows race when two
+  DuckDB connections create the same new partition simultaneously -- no
+  lock is needed for this piece.
 - `Case._load_meta`/`_save_meta`'s `case.json` read-modify-write had no
   lock at all -- a latent lost-update race even with two plain `seclogx
   ingest` runs on one machine, not just a cluster-mode concern. Now always
@@ -394,13 +392,8 @@ reads each table's staged files via `read_ndjson_auto()`, out-of-core,
 instead of building one `pd.DataFrame` from every row in the batch.
 Coordinator-side peak memory during ingest is now bounded by (one file's
 parse footprint) x `workers`, not by total batch size across every file
-<<<<<<< HEAD
 of a given table. What's still per-file, not per-batch: each worker's own
-=======
-of a given table -- the boundary this section used to flag as
-unaddressed. What's still per-file, not per-batch: each worker's own
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
 whole-file read (needed for encoding detection, see
-`ingest/logsources/sniff._decode_text`) means a single pathologically
+`textdecode.decode_text`) means a single pathologically
 large individual file is still a per-file memory cost, same as EVTX
 staging.

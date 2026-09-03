@@ -12,10 +12,7 @@ and only a small manifest object crosses the worker/coordinator boundary
 
 from __future__ import annotations
 
-<<<<<<< HEAD
 import gzip
-=======
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
 import hashlib
 import json
 from pathlib import Path
@@ -47,20 +44,16 @@ from .sniff import (
 )
 
 
-<<<<<<< HEAD
 # See ingest/evtx/stage.py for why staged NDJSON is gzipped and why
 # level 1 -- same tradeoff, same DuckDB-side transparency on read.
 _GZIP_LEVEL = 1
 
 
-=======
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
 def _short_hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
 
 
 def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
-<<<<<<< HEAD
     # Checked before hashing: an unrecognized file (PE/ELF binaries and
     # any other non-log content mixed into evidence, which sniff.py
     # already spent only a cheap 16KB peek on) is never staged, and its
@@ -86,8 +79,6 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
             staged_at=now_iso(),
         )
 
-=======
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
     try:
         file_sha256 = sha256_file(cf.path)
     except OSError as e:
@@ -143,13 +134,8 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
         # Hash suffix avoids collisions when files with the same basename
         # are discovered under the same host from different acquisition
         # paths (same scheme as ingest/evtx/stage.py).
-<<<<<<< HEAD
         ndjson_path = host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson.gz"
         with gzip.open(ndjson_path, "wt", compresslevel=_GZIP_LEVEL) as out:
-=======
-        ndjson_path = host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson"
-        with ndjson_path.open("w") as out:
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
             for row in rows:
                 out.write(json.dumps(row, default=str) + "\n")
         ndjson_out = str(ndjson_path)

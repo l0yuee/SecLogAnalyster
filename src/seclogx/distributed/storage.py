@@ -21,8 +21,9 @@ boundary.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import duckdb
 
@@ -219,6 +220,26 @@ class S3StorageBackend(StorageBackend):
             con.execute("SET s3_endpoint=?", [endpoint])
             con.execute("SET s3_use_ssl=?", [self.cluster_config.s3_endpoint_url.startswith("https://")])
             con.execute("SET s3_url_style='path'")  # required by MinIO and most non-AWS S3-compatible stores
+
+
+def ensure_hive_partition_dirs(
+    backend: StorageBackend,
+    table_location: str,
+    columns: Sequence[str],
+    rows: Iterable[Sequence[object]],
+) -> None:
+    """Pre-create local Hive partition directories before DuckDB COPY.
+
+    Concurrent DuckDB COPY statements can race while creating the same
+    partition directory on Windows. ``Path.mkdir(exist_ok=True)`` handles
+    that race correctly, while S3's ``ensure_dir`` remains a no-op.
+    """
+    for row in rows:
+        parts = []
+        for column, value in zip(columns, row, strict=True):
+            encoded = "__HIVE_DEFAULT_PARTITION__" if value is None else quote(str(value), safe="")
+            parts.append(f"{column}={encoded}")
+        backend.ensure_dir(backend.join(table_location, *parts))
 
 
 def get_storage_backend(cluster_config: ClusterConfig | None = None) -> StorageBackend:

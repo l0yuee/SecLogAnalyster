@@ -88,7 +88,6 @@ not oversights -- documented so they're easy to revisit later.
   safely parse it -- legitimate Task Scheduler exports never contain one.
 - **Text/XML decoding tries UTF-8, UTF-16, then GB18030 (a superset of
   GBK/GB2312) before an always-succeeds Latin-1 fallback**
-<<<<<<< HEAD
   (`textdecode.decode_text`, used by every aux parser including
   Scheduled Tasks XML, and by Sigma rule loading -- see below). This
   covers Simplified/Traditional Chinese-locale content and binary-ish
@@ -110,15 +109,6 @@ not oversights -- documented so they're easy to revisit later.
   is the first thing `hunt()` does). Console output (CLI stdout/stderr)
   is separately forced to UTF-8 with a replace-on-failure fallback at
   startup for the same reason.
-=======
-  (`ingest/logsources/sniff._decode_text`, used by every aux parser
-  including Scheduled Tasks XML). This covers Simplified/Traditional
-  Chinese-locale content and binary-ish data without crashing, but is
-  still a best-effort guess, not real charset detection -- content in an
-  encoding outside this list (e.g. Shift-JIS, Big5, KOI8-R) can still
-  decode as readable-looking but wrong text rather than being flagged as
-  misdecoded.
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4
 - **`Case.suspicious_tasks()`'s known-Microsoft-task baseline
   (`data/scheduled_tasks/known_microsoft_tasks.json`) is a curated,
   best-effort reference, not exhaustive or pinned to a specific Windows
@@ -361,7 +351,6 @@ not oversights -- documented so they're easy to revisit later.
   file for encoding detection first), so a single individual file large
   enough on its own to exceed available memory is still a per-file risk,
   independent of batch size or worker count.
-<<<<<<< HEAD
 - **Staged NDJSON (`staging/`, `staging_aux/`) is gzip-compressed and kept
   by default, trading some ingest CPU time for a much smaller on-disk
   case relative to an uncompressed-and-kept staging directory.** Without
@@ -376,5 +365,3 @@ not oversights -- documented so they're easy to revisit later.
   notes" in [08. Performance & scale](guides/08_performance_and_scale.md)
   for the full tradeoff and the companion fix (unrecognized files, e.g.
   PE/ELF binaries mixed into evidence, are never hashed or staged).
-=======
->>>>>>> d85ffe46e04a390724dab942e86787bf24fc8ea4

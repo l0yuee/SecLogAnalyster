@@ -35,9 +35,13 @@ def test_unknown_files_do_not_enter_worker_queue(tmp_path: Path, monkeypatch):
     queued: list[ClassifiedFile] = []
 
     class FakeQueue:
-        def submit_all(self, fn, args_list):
+        def submit_all(self, fn, args_list, on_result=None):
             queued.extend(args[0] for args in args_list)
-            return [fn(*args) for args in args_list]
+            results = [fn(*args) for args in args_list]
+            if on_result is not None:
+                for r in results:
+                    on_result(r)
+            return results
 
     monkeypatch.setattr(orchestrator, "get_job_queue", lambda *_args, **_kwargs: FakeQueue())
 

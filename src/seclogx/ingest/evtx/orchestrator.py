@@ -7,7 +7,8 @@ from ...distributed.config import ClusterConfig
 from ...distributed.queue import INGEST_QUEUE_NAME, get_job_queue
 from ...errors import NoSourcesFoundError
 from ..common import SourceSpec, StageStatus, now_iso
-from .discovery import discover_evtx_files
+from ..jobs import PHASE_FLATTENING, PHASE_STAGING, ProgressReporter
+from .discovery import DiscoveredFile, discover_evtx_files
 from .flatten import flatten_case
 from .manifest import IngestReport, StagedFile
 from .stage import stage_file
@@ -21,17 +22,25 @@ def run_ingest(
     keep_raw: bool = False,
     keep_staging: bool = True,
     cluster_config: ClusterConfig | None = None,
+    discovered: list[DiscoveredFile] | None = None,
+    progress: ProgressReporter | None = None,
 ) -> IngestReport:
     cluster_config = cluster_config or ClusterConfig.from_env()
     started_at = now_iso()
     batch_id = str(uuid.uuid4())
 
-    discovered = discover_evtx_files(sources)
+    if discovered is None:
+        # Not pre-scanned by Case.ingest() (e.g. called directly, as
+        # existing tests do) -- discover on our own, exactly as before.
+        discovered = discover_evtx_files(sources)
     if not discovered:
         raise NoSourcesFoundError("no .evtx files found under the given source path(s)")
 
     staging_dir = case_dir / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress:
+        progress.set_phase(PHASE_STAGING)
 
     # Distributed mode (cluster_config.is_distributed): one `stage_file`
     # task per discovered .evtx file is enqueued for `seclogx worker`
@@ -40,7 +49,10 @@ def run_ingest(
     # reachable from this coordinator process. Local mode (default):
     # identical ProcessPoolExecutor behavior as before this module existed.
     queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
-    staged_files: list[StagedFile] = queue.submit_all(stage_file, [(d, staging_dir, keep_raw) for d in discovered])
+    on_result = progress.on_evtx_result if progress else None
+    staged_files: list[StagedFile] = queue.submit_all(
+        stage_file, [(d, staging_dir, keep_raw) for d in discovered], on_result=on_result
+    )
 
     # Deterministic ordering for reproducible reports/logs.
     staged_files.sort(key=lambda f: f.source_path)
@@ -50,7 +62,11 @@ def run_ingest(
     files_partial = sum(1 for f in staged_files if f.status == StageStatus.PARTIAL)
     files_failed = sum(1 for f in staged_files if f.status == StageStatus.FAILED)
 
+    if progress:
+        progress.set_phase(PHASE_FLATTENING)
     records_flattened = flatten_case(case_dir, staged_files, batch_id, keep_raw=keep_raw, cluster_config=cluster_config)
+    if progress:
+        progress.on_table_flattened("events", records_flattened)
 
     if not keep_staging:
         for f in staged_files:

@@ -26,6 +26,38 @@
   counterproductive on many workstations. Set `--workers` explicitly to tune
   for fast NVMe storage or a tighter memory budget. Distributed mode still
   fans work out across the available `seclogx worker` processes.
+- The source tree is walked **once**, not twice. Before this was fixed,
+  `ingest` discovered `.evtx` files with one single-threaded tree walk,
+  then discovered and content-classified every other file with a
+  *second*, separate single-threaded tree walk -- for a real evidence set
+  (thousands of small/mixed files, some of them not a supported log type
+  at all), that second pass alone -- one Python loop, one thread, a 16KB
+  read plus a chain of regexes per candidate file (`sniff.classify_file`)
+  -- was the actual dominant wall-clock cost, not per-file parse
+  throughput, and it produced no output the entire time it ran.
+  `ingest.scan.scan_sources()` now walks each `--source` root exactly once
+  and classifies the non-`.evtx` candidates' content in parallel with a
+  thread pool (that peek is I/O-bound, so threads scale it even though
+  CPU-bound parsing needs separate processes). The `.evtx` pass and the
+  non-`.evtx` pass then run **concurrently** rather than back-to-back,
+  each still managing its own bounded worker pool -- when both have work
+  and `--workers` wasn't pinned explicitly, the default worker budget is
+  split between them rather than doubled, so peak concurrent worker
+  processes (and therefore peak memory) doesn't grow versus running one
+  pipeline at a time.
+- `ingest` shows a **live progress display** in the foreground (current
+  phase, files scanned so far, staged ok/partial/failed/unsupported
+  counts, rows written per table) instead of producing no output until
+  the whole run finishes. `--background`/`-b` detaches the import into a
+  separate process and returns immediately, printing the exact
+  `seclogx ingest-status <case> --watch` command to check on it --
+  useful for a large import an analyst doesn't want to babysit at a
+  terminal. Status is a small JSON snapshot at
+  `cases/<name>/jobs/<job_id>.json`, updated (throttled, not on every
+  single file) as the job runs and written atomically so a concurrent
+  `ingest-status` read never sees a half-written file; the background
+  job's captured stdout/stderr lands in the sibling `.log` file. See
+  [05. CLI reference](05_cli_reference.md).
 - Querying and hunting run through DuckDB directly against the
   Hive-partitioned Parquet lake, which gives lazy, out-of-core execution
   with predicate pushdown: a query filtered to one host/channel/event

@@ -115,6 +115,11 @@ install) so the bundled Sigma rules under `data/` are found.
 # name is used.
 seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
 
+# Large import: run it detached and check progress separately instead of
+# blocking the terminal
+seclogx ingest incident42 --source /evidence/full_kape_output --background
+seclogx ingest-status incident42 --watch
+
 # See what's in it
 seclogx summary incident42
 seclogx channels incident42
@@ -206,7 +211,8 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | Command | Purpose |
 |---|---|
 | `seclogx case init/list/info <name>` | Manage case workspaces |
-| `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case |
+| `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case (`--background` to run detached) |
+| `seclogx ingest-status <case> [job_id] [--watch]` | Check on a `--background` ingest job |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
 | `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, qcloud_logs, registry) |

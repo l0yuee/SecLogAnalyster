@@ -42,10 +42,15 @@ seclogx case info incident42
 | `--keep-raw` | 关闭 | 仅对 `.evtx` 来源生效：同时将每条记录的原始 XML 一并写入数据湖（`raw_xml` 列），适用于需要完整证据保真度的场景。会使被应用文件的导入耗时与内存占用大致翻倍。 |
 | `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留中间 NDJSON 文件——EVTX 来源存放在 `staging/` 下，其他所有日志类型存放在 `staging_aux/` 下。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
+| `--background` / `-b` | 关闭 | 将导入过程放到后台进程中执行并立即返回——见下文。 |
 
 如果 `<case>` 尚不存在，`ingest` 会自动创建它。只要来源路径下至少有一种受支持的非
 EVTX 产物（反之亦然），即使没有任何 `.evtx` 文件也不算错误——只有当两条通路都一无所获时，`ingest`
 才会报错。
+
+`.evtx` 通路与非 EVTX 通路现在会**并发**执行（各自仍然维护自己有上限的工作进程池），并且整棵来源目录树只会被遍历**一次**而不是两次——对每个候选文件的内容分类本身也做了并行化。默认的前台模式下，`ingest`
+会展示一个实时进度显示（当前阶段、已扫描/已暂存文件数、成功/部分/失败/不支持的计数），而不是在整个过程中保持沉默直到全部完成；具体原因见[《8.
+性能与规模》](08_performance_and_scale.zh-CN.md)。
 
 示例：
 
@@ -61,6 +66,10 @@ seclogx ingest incident42 \
 
 # 对一小部分高价值证据保留原始 XML；使用更多工作进程
 seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
+
+# 大批量导入：不要占用终端——用另一条命令单独查看进度
+seclogx ingest incident42 --source /evidence/full_kape_output --background
+seclogx ingest-status incident42 --watch
 ```
 
 每次导入结束后，seclogx 都会打印一份**核对报告（reconciliation report）**：发现的文件数、成功导入数、部分恢复数、失败数，以及暂存记录数与最终写入数据湖的行数是否一致。任何解析不完整的文件都会附带具体错误原因及失败点之前已恢复的记录数——该报告同时也会保存到
@@ -100,6 +109,27 @@ Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange
 
 与 EVTX 一侧的 `IngestReport.to_dataframe()` 相对应，`IngestReport.aux.to_dataframe()`（或直接使用
 `run_aux_ingest` 返回的 `AuxIngestReport`）同样能得到一份按文件维度的 DataFrame——每个被发现的文件一行，包含其状态、目标表、记录数/错误数。
+
+## `seclogx ingest-status <case> [job_id] [--watch]`
+
+查看一个 `seclogx ingest --background` 任务的状态：当前阶段（`scanning`/`staging`/`flattening`/`done`/`failed`）、目前已扫描的文件数、发现/暂存计数（成功/部分/失败/不支持），以及目前已写入各表的行数。读取的是
+`cases/<name>/jobs/<job_id>.json`——后台任务在运行过程中持续更新的一份小体积
+JSON 快照（见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)）。
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `job_id` | 最近一次任务 | 要查看哪个任务；省略则显示最近启动的那一个。 |
+| `--watch` | 关闭 | 每秒轮询一次，状态发生变化时重新打印，直到任务进入 `done` 或 `failed`。 |
+| `--case-root` | `./cases` | 案例工作区所在位置。 |
+
+```bash
+seclogx ingest-status incident42
+seclogx ingest-status incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f --watch
+```
+
+如果后台任务因为"没有发现受支持的文件"以外的原因崩溃，其状态会被记录为
+`failed` 并附带异常信息，而不会停留在崩溃前的某个阶段不再更新——完整的
+traceback 可以在 `cases/<name>/jobs/<job_id>.log`（该任务被捕获的标准输出/标准错误）中查看。
 
 ## `seclogx query <case> "<SQL>"`
 

@@ -410,6 +410,48 @@ not oversights -- documented so they're easy to revisit later.
   and `fits_in_memory()` falls back to a fixed 200MB absolute cap rather
   than assuming unlimited memory.
 
+## Background ingest jobs and progress reporting
+
+- **A `--background` job's on-disk status (`cases/<name>/jobs/<job_id>.json`)
+  reflects the last progress update the job process actually made -- there
+  is no separate liveness check.** If the background process is killed
+  outright (`kill -9`, an OOM kill, the machine losing power) rather than
+  raising a Python exception it can catch and record, `ingest-status` has
+  no way to distinguish "still running" from "died mid-run" -- it will
+  keep reporting whatever phase/counts were last written, indefinitely.
+  An ingest that raises a normal Python exception *is* caught and recorded
+  as `failed` with the exception message (see `cli/ingest_cmd.py`); this
+  gap is specifically about the process disappearing without getting the
+  chance to do that.
+- **Job status files are never cleaned up automatically.** Every
+  `--background` run leaves its `<job_id>.json` (and `.log`) behind under
+  `cases/<name>/jobs/` indefinitely; on a case with many background
+  imports over time this is a small but unbounded amount of bookkeeping.
+  Delete old ones manually if it matters.
+- **The `phase` field is coarse, not per-pipeline.** Since the EVTX and
+  aux pipelines now run concurrently (see below and
+  [08. Performance & scale](guides/08_performance_and_scale.md)), one
+  shared `phase` value (`scanning`/`staging`/`flattening`/`done`/`failed`)
+  approximates the more-advanced of the two pipelines' actual state rather
+  than reporting each independently -- useful as a coarse progress signal,
+  not as an exact per-table ETA.
+- **The per-file hash-then-parse double read is unchanged.** Every
+  *matched* non-EVTX file is still read once in full to compute its
+  `file_sha256` (`ingest/logsources/stage.py`) and then read again by its
+  parser -- avoiding that would need every parser to compute the hash
+  incrementally while it reads, which touches every parser's read path.
+  Left as a known, understood cost rather than bundled into this round of
+  ingest-performance work; the dominant cost fixed here was the two
+  single-threaded, un-parallelized discovery/classification tree walks
+  (see [08. Performance & scale](guides/08_performance_and_scale.md)),
+  not this per-file 2x read.
+- **`--background` only backgrounds the coordinator process.** In
+  distributed mode, per-file parse work already runs on `seclogx worker`
+  processes elsewhere; what blocked the terminal before was always the
+  coordinator itself (discovery, dispatch, flatten, bookkeeping), and
+  that's exactly what `--background` detaches -- there's no additional
+  distributed-specific progress aggregation beyond what already existed.
+
 ## Scale
 
 - **Single-machine by default; an opt-in, environment-variable-activated

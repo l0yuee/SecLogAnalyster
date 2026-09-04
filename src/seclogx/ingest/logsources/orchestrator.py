@@ -26,7 +26,8 @@ from pathlib import Path
 from ...distributed.config import ClusterConfig
 from ...distributed.queue import INGEST_QUEUE_NAME, get_job_queue
 from ..common import SourceSpec, StageStatus
-from .discovery import discover_and_classify
+from ..jobs import PHASE_FLATTENING, PHASE_STAGING, ProgressReporter
+from .discovery import ClassifiedFile, discover_and_classify
 from .flatten import flatten_table
 from .manifest import AuxIngestReport, AuxStagedFile
 from .stage import stage_aux_file
@@ -38,10 +39,15 @@ def run_aux_ingest(
     workers: int | None = None,
     keep_staging: bool = True,
     cluster_config: ClusterConfig | None = None,
+    classified: list[ClassifiedFile] | None = None,
+    progress: ProgressReporter | None = None,
 ) -> AuxIngestReport:
     cluster_config = cluster_config or ClusterConfig.from_env()
     batch_id = str(uuid.uuid4())
-    classified = discover_and_classify(sources)
+    if classified is None:
+        # Not pre-scanned by Case.ingest() (e.g. called directly, as
+        # existing tests do) -- discover on our own, exactly as before.
+        classified = discover_and_classify(sources)
 
     if not classified:
         return AuxIngestReport(
@@ -59,12 +65,20 @@ def run_aux_ingest(
     staging_dir = case_dir / "staging_aux"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
+    if progress:
+        progress.set_phase(PHASE_STAGING)
+
     # Unknown files require no hashing or parsing. Materialize their tiny
     # report entries locally instead of paying one process-pool / distributed
     # queue round trip per file. Real software acquisition trees commonly
     # contain tens of thousands of binaries beside only a few dozen logs.
     unknown_classified = [cf for cf in classified if cf.kind is None]
-    staged: list[AuxStagedFile] = [stage_aux_file(cf, staging_dir) for cf in unknown_classified]
+    staged: list[AuxStagedFile] = []
+    for cf in unknown_classified:
+        f = stage_aux_file(cf, staging_dir)
+        staged.append(f)
+        if progress:
+            progress.on_aux_result(f)
 
     known_classified = [cf for cf in classified if cf.kind is not None]
     if known_classified:
@@ -72,7 +86,10 @@ def run_aux_ingest(
         # worker` process (a shared/NFS mount), same requirement as the EVTX
         # pipeline's staging_dir -- see ingest/evtx/orchestrator.py.
         queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
-        staged.extend(queue.submit_all(stage_aux_file, [(cf, staging_dir) for cf in known_classified]))
+        on_result = progress.on_aux_result if progress else None
+        staged.extend(
+            queue.submit_all(stage_aux_file, [(cf, staging_dir) for cf in known_classified], on_result=on_result)
+        )
     staged.sort(key=lambda f: f.source_path)
 
     files_ok = sum(1 for f in staged if f.status == StageStatus.OK)
@@ -90,11 +107,15 @@ def run_aux_ingest(
         if f.table and f.ndjson_path:
             by_table.setdefault(f.table, []).append(f.ndjson_path)
 
+    if progress:
+        progress.set_phase(PHASE_FLATTENING)
     ingested_at = datetime.now(timezone.utc)
-    rows_written = {
-        table: flatten_table(case_dir, table, ndjson_paths, batch_id, ingested_at, cluster_config=cluster_config)
-        for table, ndjson_paths in by_table.items()
-    }
+    rows_written: dict[str, int] = {}
+    for table, ndjson_paths in by_table.items():
+        rows = flatten_table(case_dir, table, ndjson_paths, batch_id, ingested_at, cluster_config=cluster_config)
+        rows_written[table] = rows
+        if progress:
+            progress.on_table_flattened(table, rows)
 
     if not keep_staging:
         for f in staged:

@@ -31,18 +31,25 @@ DEFAULT_LOCAL_INGEST_WORKERS = min(8, os.cpu_count() or 1)
 
 class JobQueue(ABC):
     @abstractmethod
-    def submit_all(self, fn: Callable, args_list: list[tuple]) -> list[Any]:
+    def submit_all(
+        self, fn: Callable, args_list: list[tuple], on_result: Callable[[Any], None] | None = None
+    ) -> list[Any]:
         """Run `fn(*args)` for every `args` in `args_list` and return the
         results (order is not guaranteed to match `args_list` -- callers
         sort by their own key afterward, matching the pre-existing
-        `as_completed`-based behavior)."""
+        `as_completed`-based behavior). If given, `on_result` is called
+        with each result as soon as it becomes available (for incremental
+        progress reporting -- see `ingest.jobs.ProgressReporter`); it does
+        not affect what's returned."""
 
 
 class LocalJobQueue(JobQueue):
     def __init__(self, workers: int | None = None):
         self.workers = workers
 
-    def submit_all(self, fn: Callable, args_list: list[tuple]) -> list[Any]:
+    def submit_all(
+        self, fn: Callable, args_list: list[tuple], on_result: Callable[[Any], None] | None = None
+    ) -> list[Any]:
         if not args_list:
             return []
         results = []
@@ -58,7 +65,10 @@ class LocalJobQueue(JobQueue):
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=ctx) as pool:
             futures = [pool.submit(fn, *args) for args in args_list]
             for fut in as_completed(futures):
-                results.append(fut.result())
+                result = fut.result()
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
         return results
 
 
@@ -75,7 +85,9 @@ class RQJobQueue(JobQueue):
         self.queue = Queue(queue_name, connection=self.redis_conn)
         self.poll_interval = poll_interval
 
-    def submit_all(self, fn: Callable, args_list: list[tuple]) -> list[Any]:
+    def submit_all(
+        self, fn: Callable, args_list: list[tuple], on_result: Callable[[Any], None] | None = None
+    ) -> list[Any]:
         from rq.job import JobStatus
 
         if not args_list:
@@ -88,7 +100,10 @@ class RQJobQueue(JobQueue):
                 job.refresh()
                 status = job.get_status(refresh=False)
                 if status == JobStatus.FINISHED:
-                    results.append(job.return_value())
+                    result = job.return_value()
+                    results.append(result)
+                    if on_result is not None:
+                        on_result(result)
                 elif status in (JobStatus.FAILED, JobStatus.STOPPED, JobStatus.CANCELED):
                     latest = job.latest_result()
                     reason = latest.exc_string if latest else "unknown error"

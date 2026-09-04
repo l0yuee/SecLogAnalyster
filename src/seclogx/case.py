@@ -9,21 +9,25 @@ from __future__ import annotations
 
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pandas as pd
 
 from .config import DEFAULT_CASE_ROOT
 from .distributed.config import ClusterConfig
 from .distributed.locking import get_case_lock
+from .distributed.queue import DEFAULT_LOCAL_INGEST_WORKERS
 from .distributed.storage import get_storage_backend
 from .errors import CaseAlreadyExistsError, CaseNotFoundError, NoSourcesFoundError
 from .detect import HuntResults, run_hunt
 from .ingest import run_ingest, run_aux_ingest
 from .ingest.common import parse_source_arg
 from .ingest.evtx.manifest import IngestReport
+from .ingest.jobs import PHASE_STAGING, ProgressReporter
+from .ingest.scan import scan_sources
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .ingest.logsources.parsers.task_baseline import classify_against_baseline
 from .ingest.logsources.parsers.syslog import extract_auth_events
@@ -130,42 +134,90 @@ class Case:
         workers: int | None = None,
         keep_raw: bool = False,
         keep_staging: bool = True,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> IngestReport:
         specs = [parse_source_arg(s) if isinstance(s, str) else s for s in sources]
+        progress = ProgressReporter(on_update=on_progress) if on_progress is not None else None
 
-        try:
-            report = run_ingest(
-                case_dir=self.case_dir,
-                case_name=self.name,
-                sources=specs,
-                workers=workers,
-                keep_raw=keep_raw,
+        # One shared filesystem walk for both pipelines instead of two
+        # (ingest.scan.scan_sources) -- a real evidence tree scanned twice,
+        # single-threaded, before either pipeline's parallel workers get
+        # anything to do, was the actual "stuck for hours" bottleneck this
+        # feature addresses, not per-file parse throughput.
+        scan = scan_sources(specs, on_scanned=progress.on_scanned if progress else None)
+        if progress:
+            progress.set_discovered(len(scan.evtx_files), len(scan.aux_files))
+            progress.set_phase(PHASE_STAGING)
+
+        # Split the worker budget between the two pipelines when both have
+        # work and the caller didn't pin an explicit --workers, so running
+        # them concurrently (below) doesn't silently double peak concurrent
+        # worker processes -- and therefore peak memory -- versus today's
+        # documented "one file's parse footprint x workers" bound.
+        evtx_workers = workers
+        aux_workers = workers
+        if workers is None and scan.evtx_files and scan.aux_files:
+            half = max(1, DEFAULT_LOCAL_INGEST_WORKERS // 2)
+            evtx_workers = half
+            aux_workers = half
+
+        def _run_evtx() -> IngestReport:
+            try:
+                return run_ingest(
+                    case_dir=self.case_dir,
+                    case_name=self.name,
+                    sources=specs,
+                    workers=evtx_workers,
+                    keep_raw=keep_raw,
+                    keep_staging=keep_staging,
+                    cluster_config=self.cluster_config,
+                    discovered=scan.evtx_files,
+                    progress=progress,
+                )
+            except NoSourcesFoundError:
+                # No .evtx under these sources -- not fatal on its own, the aux
+                # pipeline (tasks / web / Linux / database / cloud-agent artifacts) below
+                # may still find something. Only an error if *both* find nothing.
+                now = datetime.now(timezone.utc).isoformat()
+                return IngestReport(
+                    batch_id=str(uuid.uuid4()),
+                    case_name=self.name,
+                    started_at=now,
+                    finished_at=now,
+                    files_discovered=0,
+                    files_ok=0,
+                    files_partial=0,
+                    files_failed=0,
+                    records_staged=0,
+                    records_flattened=0,
+                )
+
+        def _run_aux():
+            return run_aux_ingest(
+                self.case_dir,
+                specs,
+                workers=aux_workers,
                 keep_staging=keep_staging,
                 cluster_config=self.cluster_config,
-            )
-        except NoSourcesFoundError:
-            # No .evtx under these sources -- not fatal on its own, the aux
-            # pipeline (tasks / web / Linux / database / cloud-agent artifacts) below
-            # may still find something. Only an error if *both* find nothing.
-            now = datetime.now(timezone.utc).isoformat()
-            report = IngestReport(
-                batch_id=str(uuid.uuid4()),
-                case_name=self.name,
-                started_at=now,
-                finished_at=now,
-                files_discovered=0,
-                files_ok=0,
-                files_partial=0,
-                files_failed=0,
-                records_staged=0,
-                records_flattened=0,
+                classified=scan.aux_files,
+                progress=progress,
             )
 
-        report.aux = run_aux_ingest(
-            self.case_dir, specs, workers=workers, keep_staging=keep_staging, cluster_config=self.cluster_config
-        )
+        # Both pipelines are independent (EVTX vs. everything else) and
+        # each already manages its own process pool / distributed queue
+        # underneath -- running them concurrently instead of back-to-back
+        # roughly halves wall time for a source tree that has both kinds
+        # of evidence, since neither pipeline's workers sit idle while the
+        # other one runs.
+        with ThreadPoolExecutor(max_workers=2) as coordinator_pool:
+            evtx_future = coordinator_pool.submit(_run_evtx)
+            aux_future = coordinator_pool.submit(_run_aux)
+            report = evtx_future.result()
+            report.aux = aux_future.result()
 
         if report.files_discovered == 0 and report.aux.files_discovered == 0:
+            if progress:
+                progress.finish(error="no supported log files found")
             raise NoSourcesFoundError(
                 "no supported log files (.evtx, Scheduled Tasks, IIS/web/Exchange logs, Linux system logs, "
                 "database logs, Tencent Cloud Host Security logs, or Windows Registry hives) "
@@ -201,6 +253,9 @@ class Case:
         if self._db is not None:
             self._db.close()
             self._db = None
+
+        if progress:
+            progress.finish()
 
         return report
 

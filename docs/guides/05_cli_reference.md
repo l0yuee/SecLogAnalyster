@@ -48,11 +48,22 @@ core command.
 | `--keep-raw` | off | `.evtx` sources only: also capture each record's raw XML into the lake (`raw_xml` column), for cases needing full evidentiary completeness. Roughly doubles ingest time and memory for the files it's applied to. |
 | `--keep-staging` / `--no-keep-staging` | keep | Whether to keep the intermediate NDJSON after flattening -- `staging/` for `.evtx` sources, `staging_aux/` for every other log family. Keeping it makes reprocessing cheap if you change something; deleting it saves disk. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
+| `--background` / `-b` | off | Detach the import into a background process and return immediately -- see below. |
 
 If `<case>` doesn't already exist, `ingest` creates it automatically. A
 source with no `.evtx` files at all is not an error as long as it has at
 least one supported non-EVTX artifact, or vice versa -- `ingest` only
 fails if neither pass finds anything.
+
+The `.evtx` pass and the non-EVTX pass now run **concurrently** (each
+still manages its own bounded worker pool underneath), and the whole
+source tree is walked **once**, not twice -- classifying every candidate
+file's content is itself parallelized. In the default foreground mode,
+`ingest` shows a live progress display (phase, files scanned/staged,
+ok/partial/failed/unsupported counts) instead of sitting silent until
+everything finishes; see
+[08. Performance & scale](08_performance_and_scale.md) for why this
+mattered for real evidence volumes.
 
 Examples:
 
@@ -68,6 +79,10 @@ seclogx ingest incident42 \
 
 # Keep raw XML for a small, high-value evidence set; use more workers
 seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
+
+# Large import: don't block the terminal -- check progress separately
+seclogx ingest incident42 --source /evidence/full_kape_output --background
+seclogx ingest-status incident42 --watch
 ```
 
 After every ingest run, seclogx prints a **reconciliation report**:
@@ -118,6 +133,33 @@ Also mirrored by `IngestReport.aux.to_dataframe()` (or `AuxIngestReport`
 returned directly from `run_aux_ingest`), a per-file DataFrame just like
 `IngestReport.to_dataframe()` gives you for the EVTX pass -- one row per
 discovered file with its status, table, record/error counts.
+
+## `seclogx ingest-status <case> [job_id] [--watch]`
+
+Checks on a `seclogx ingest --background` job: current phase
+(`scanning`/`staging`/`flattening`/`done`/`failed`), files scanned so
+far, discovered/staged counts (ok/partial/failed/unsupported), and rows
+written per table so far. Reads
+`cases/<name>/jobs/<job_id>.json` -- a small JSON snapshot the
+background job updates as it runs (see
+[08. Performance & scale](08_performance_and_scale.md)).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `job_id` | most recent job | Which job to check; omit to see the most recently started one. |
+| `--watch` | off | Poll once a second and reprint whenever the status changes, until the job reaches `done` or `failed`. |
+| `--case-root` | `./cases` | Where the case workspace lives. |
+
+```bash
+seclogx ingest-status incident42
+seclogx ingest-status incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f --watch
+```
+
+If the background job crashes with something other than "no supported
+files found", its status is recorded as `failed` with the exception
+message rather than left stuck at whatever phase it was last in --
+check `cases/<name>/jobs/<job_id>.log` (the job's captured stdout/stderr)
+for the full traceback.
 
 ## `seclogx query <case> "<SQL>"`
 

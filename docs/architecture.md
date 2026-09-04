@@ -12,10 +12,18 @@ per-record Python marshaling, not parsing). This is two parallel
 pipelines sharing one case workspace and one query layer: the EVTX
 pipeline (stages 1-3 below, the original and still the most
 performance-critical path) and a second one for everything else ("Non-EVTX
-log families" further down). `Case.ingest()` runs both over the same
-`--source` inputs in one call; `query.py`'s `CaseDB` and the plain-language
-`search.py` interface sit on top of whichever tables either pipeline
-produced, with no distinction between them at the query layer.
+log families" further down). `Case.ingest()` walks every `--source` root
+exactly once (`ingest/scan.py:scan_sources()`, bucketing files for both
+pipelines from a single pass instead of two independent tree walks) and
+then runs both pipelines *concurrently* over that same scan result --
+each still manages its own bounded worker pool underneath, and an
+optional progress callback (`ingest/jobs.py:ProgressReporter`) is threaded
+through both, which is what backs `seclogx ingest`'s live progress display
+and its `--background`/`ingest-status` job tracking (see
+[08. Performance & scale](guides/08_performance_and_scale.md)).
+`query.py`'s `CaseDB` and the plain-language `search.py` interface sit on
+top of whichever tables either pipeline produced, with no distinction
+between them at the query layer.
 
 ```
  .evtx files (multiple hosts/paths)

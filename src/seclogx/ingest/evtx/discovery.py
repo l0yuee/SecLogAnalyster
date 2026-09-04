@@ -1,4 +1,11 @@
-"""Discover .evtx files across one or more (possibly unrelated) source paths."""
+"""Discover .evtx files across one or more (possibly unrelated) source paths.
+
+`discover_evtx_files()` is a thin wrapper over `ingest.scan.scan_sources()`,
+which walks each `--source` root exactly once and buckets files for *both*
+the EVTX and non-EVTX (aux) pipelines in a single pass -- see that module.
+This module keeps its own public function/dataclass so every existing
+direct caller and test is unaffected.
+"""
 
 from __future__ import annotations
 
@@ -16,23 +23,8 @@ class DiscoveredFile:
 
 
 def discover_evtx_files(sources: list[SourceSpec]) -> list[DiscoveredFile]:
-    seen: dict[Path, DiscoveredFile] = {}
-    for spec in sources:
-        root = spec.path.resolve()
-        if not root.exists():
-            raise FileNotFoundError(f"source path does not exist: {root}")
+    # Deferred import: ingest.scan imports DiscoveredFile from this module,
+    # so importing it back at module load time would be circular.
+    from ..scan import scan_sources
 
-        host = spec.host or root.name or str(root)
-
-        if root.is_file():
-            candidates = [root] if root.suffix.lower() == ".evtx" else []
-        else:
-            candidates = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() == ".evtx"]
-
-        for p in candidates:
-            resolved = p.resolve()
-            if resolved in seen:
-                continue
-            seen[resolved] = DiscoveredFile(path=resolved, host=host, size_bytes=resolved.stat().st_size)
-
-    return list(seen.values())
+    return scan_sources(sources).evtx_files

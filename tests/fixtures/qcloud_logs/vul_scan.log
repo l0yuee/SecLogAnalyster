@@ -1,0 +1,2 @@
+[2026-08-14 05:07:58] [INFO] Execute Command (uid: 65534, gid: 65534): /bin/bash -c 'uname -r'
+[2026-08-14 05:07:59] [ERROR] package inventory command failed

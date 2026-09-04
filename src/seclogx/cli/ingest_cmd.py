@@ -20,7 +20,7 @@ def ingest_command(
             "access logs, and Exchange CSV logs, optionally PATH:HOST. Repeatable."
         ),
     ),
-    workers: int | None = typer.Option(None, "--workers", help="Parallel staging workers (default: CPU count)"),
+    workers: int | None = typer.Option(None, "--workers", help="Parallel staging workers (default: up to 8)"),
     keep_raw: bool = typer.Option(
         False, "--keep-raw", help="Also capture raw EVTX record XML (slower, ~2x cost; .evtx sources only)"
     ),

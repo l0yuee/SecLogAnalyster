@@ -33,12 +33,13 @@ seclogx exists to make the first hours of triage fast:
   **Linux** syslog (BSD/RFC-3164 and RFC 5424 -- `auth.log`/`secure`
   content included), the Linux Audit Framework (auditd), and systemd
   journal export logs, **database** logs (MySQL/MariaDB error/
-  general/slow query logs, PostgreSQL, MSSQL, Oracle alert log), and
-  **Windows Registry** hives (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
+  general/slow query logs, PostgreSQL, MSSQL, Oracle alert log), **Tencent
+  Cloud Host Security** client text logs (YDService, HIDS/YDLive, scanners,
+  YDFlame/YDUtils/YDQuaraV2, YDEyes), and **Windows Registry** hives (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
   per-user NTUSER.DAT/UsrClass.dat). Each format is detected by content,
   not filename, so renamed/relocated evidence still works. See
   [02. Log types & schema](02_log_types_and_schema.md) for the full
-  eleven-table picture.
+  twelve-table picture.
 - You get a `pandas.DataFrame`-native interface throughout (CLI
   tables/CSV, or a Python `Case` object for a notebook) plus built-in
   Sigma-rule threat hunting with MITRE ATT&CK tagging, covering both
@@ -111,6 +112,7 @@ cases/<name>/
     auditd_logs/host=<h>/record_type=<r>/*.parquet                # Linux Audit Framework
     journal_logs/host=<h>/*.parquet                              # systemd journal export
     db_logs/host=<h>/log_type=<t>/*.parquet                       # MySQL/PostgreSQL/MSSQL/Oracle logs
+    qcloud_logs/host=<h>/log_type=<t>/*.parquet                   # Tencent Cloud Host Security client logs
     registry/host=<h>/hive_type=<t>/*.parquet                     # Windows Registry hives
 ```
 

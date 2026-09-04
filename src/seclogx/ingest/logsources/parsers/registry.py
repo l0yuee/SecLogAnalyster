@@ -123,7 +123,11 @@ def _derive_user_root(source_path: Path, is_usrclass: bool) -> str:
     name if the acquisition layout doesn't have one."""
     suffix = "\\_Classes" if is_usrclass else ""
     parts = source_path.parts
-    for i, part in enumerate(parts):
+    # Acquisition paths can themselves live below an analyst's ``Users``
+    # directory (for example a temporary test/evidence workspace).  The
+    # innermost marker belongs to the captured hive, so search right-to-left.
+    for i in range(len(parts) - 2, -1, -1):
+        part = parts[i]
         if part.lower() == "users" and i + 1 < len(parts):
             return f"HKEY_USERS\\{parts[i + 1]}{suffix}"
     label = source_path.parent.name or "UNKNOWN_USER"

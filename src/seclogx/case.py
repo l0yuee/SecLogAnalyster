@@ -145,7 +145,7 @@ class Case:
             )
         except NoSourcesFoundError:
             # No .evtx under these sources -- not fatal on its own, the aux
-            # pipeline (Scheduled Tasks / IIS / web / Exchange logs) below
+            # pipeline (tasks / web / Linux / database / cloud-agent artifacts) below
             # may still find something. Only an error if *both* find nothing.
             now = datetime.now(timezone.utc).isoformat()
             report = IngestReport(
@@ -167,8 +167,8 @@ class Case:
 
         if report.files_discovered == 0 and report.aux.files_discovered == 0:
             raise NoSourcesFoundError(
-                "no supported log files (.evtx, Scheduled Task definitions, IIS/web access logs, "
-                "Exchange CSV logs, syslog/auth logs, auditd logs, systemd journal export) "
+                "no supported log files (.evtx, Scheduled Tasks, IIS/web/Exchange logs, Linux system logs, "
+                "database logs, Tencent Cloud Host Security logs, or Windows Registry hives) "
                 "found under the given source path(s)"
             )
 
@@ -406,6 +406,17 @@ class Case:
 
     def db_logs_chunks(self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE) -> Iterator[pd.DataFrame]:
         return self._log_type_chunks("db_logs", log_type, chunksize)
+
+    def qcloud_logs(self, log_type: str | None = None) -> pd.DataFrame:
+        """Tencent Cloud Host Security (YunJing / Tencent CWPP) client
+        logs. ``log_type`` selects a component such as ``ydservice``,
+        ``hids``, ``ydlive``, ``vul_scan``, or ``ydquarav2``."""
+        return self._log_type_table("qcloud_logs", log_type)
+
+    def qcloud_logs_chunks(
+        self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE
+    ) -> Iterator[pd.DataFrame]:
+        return self._log_type_chunks("qcloud_logs", log_type, chunksize)
 
     def registry(self, hive_type: str | None = None) -> pd.DataFrame:
         """Every discovered registry key/value, normalized across every

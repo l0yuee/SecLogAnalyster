@@ -209,6 +209,28 @@ not oversights -- documented so they're easy to revisit later.
   significantly different layout (e.g. a heavily customized trace flag
   configuration) may not match.
 
+## Tencent Cloud Host Security client log ingestion
+
+- **Only local plaintext client logs are parsed.** This includes YDService,
+  HIDS/YDLive, vulnerability and baseline scanner, YDFlame/YDUtils/
+  YDQuaraV2, and YDEyes text formats. Private-cloud upload protocol payloads,
+  protobuf/FlatBuffers/BLOB messages, and encrypted or compressed
+  `result_file` contents are not decoded.
+- **Several line envelopes are generic enough to need product context.** The
+  Go-component, scanner, and YDEyes formats are classified only when the path,
+  filename, or sampled content identifies Tencent/YunJing components. This
+  avoids misclassifying unrelated application logs with the same timestamp
+  layout; a heavily renamed and relocated file with no product marker may be
+  reported as unknown.
+- **Client timestamps have no timezone or offset.** `time_created` preserves
+  the emitted wall-clock value as a naive timestamp; correlate it using the
+  acquired host's timezone.
+- **Semantic enrichment is best-effort.** Stable login, malware, quarantine,
+  command-execution, blocklist, and account-detail messages populate dedicated
+  columns; all other content remains fully available in `message`, `raw_line`,
+  and `extra`. Physical continuation lines are attached to the preceding
+  logical event rather than counted as parse errors.
+
 ## Windows Registry hive ingestion
 
 - **Not a live merged registry.** seclogx does not simulate a running
@@ -431,17 +453,17 @@ not oversights -- documented so they're easy to revisit later.
   query not already known to be small. The CLI (`query`/`table`/`tasks`/
   `timeline`) uses the chunked path automatically for both `--out` and
   the console preview.
-- **Ingest is bounded-memory per file, not per pathologically large
-  individual file.** Both pipelines now stage each file to NDJSON on disk
+- **Most ingest is bounded-memory per file; EVTX and Tencent Cloud client
+  logs are fully streaming.** Both pipelines stage each file to NDJSON on disk
   and bulk-flatten via DuckDB reading straight off disk, so coordinator
   memory during ingest is bounded by (one file's parse footprint) x
   `--workers`, not by total batch size -- see "Why not Dask" in
-  `docs/architecture.md` for the mechanism. What's *not* bounded: each
-  worker still reads one whole file into memory to parse it (EVTX
-  streams to NDJSON as it parses, but the non-EVTX parsers need the whole
-  file for encoding detection first), so a single individual file large
-  enough on its own to exceed available memory is still a per-file risk,
-  independent of batch size or worker count. A large `SOFTWARE` hive from
+  `docs/architecture.md` for the mechanism. EVTX and Tencent Cloud text
+  logs stream directly to staging (the latter retains only one pending
+  logical record for continuation-line handling), so their peak memory is
+  independent of source-file size. Other non-EVTX parsers still read one
+  whole file into memory, so a single individual file large enough on its
+  own to exceed available memory remains a per-file risk. A large `SOFTWARE` hive from
   a busy, long-lived machine is a concrete, realistic case of this (not
   just a hypothetical pathological one) -- it can hold hundreds of
   thousands of values, all parsed into one Python list before staging.

@@ -20,9 +20,12 @@
   Within all of this, individual log families vary widely in realistic
   volume: EVTX cases are typically well under 100GB, while web access/
   error logs across a case can realistically reach terabyte scale.
-- Ingest parallelism (`--workers`) scales with CPU cores -- files are
-  parsed independently in separate processes (or, in distributed mode,
-  across `seclogx worker` processes on any number of machines).
+- Ingest parallelism (`--workers`) uses at most eight local processes by
+  default -- files are parsed independently, but parser-process memory and
+  concurrent evidence-disk reads make unconstrained CPU-count parallelism
+  counterproductive on many workstations. Set `--workers` explicitly to tune
+  for fast NVMe storage or a tighter memory budget. Distributed mode still
+  fans work out across the available `seclogx worker` processes.
 - Querying and hunting run through DuckDB directly against the
   Hive-partitioned Parquet lake, which gives lazy, out-of-core execution
   with predicate pushdown: a query filtered to one host/channel/event
@@ -54,15 +57,17 @@
   the files it's applied to -- use it selectively on evidence that
   needs full XML fidelity, not by default on an entire large case.
 - Scheduled Tasks/IIS/web access/Exchange/syslog/auditd/journal/database/
-  registry logs now stage to per-file NDJSON the same way EVTX does, and flatten via DuckDB
+  Tencent Cloud/registry logs stage to per-file NDJSON the same way EVTX does, and flatten via DuckDB
   reading straight off disk (`read_ndjson_auto`) instead of accumulating
   every parsed row for a table in Python across the whole batch. Peak
   ingest-time memory is now bounded by (one file's parse footprint) x
   `workers`, not by total batch size -- a batch large enough to reach
   terabyte scale no longer has to fit in memory at once during ingest.
-  Per-file parsing itself (needed for encoding detection) still reads a
-  whole file at a time, so a single pathologically large individual file
-  is still a per-file, not per-batch, memory cost.
+  Tencent Cloud client logs use a one-record look-behind and stream directly
+  into gzip staging, so their memory use is independent of file size while
+  still preserving multiline records. Several other non-EVTX formats still
+  read one whole file at a time, so a pathologically large individual file in
+  one of those families remains a per-file, not per-batch, memory cost.
 - Staged NDJSON (`staging/`, `staging_aux/`) is gzip-compressed (level 1)
   rather than written as plain text, and is kept by default (see
   `--keep-staging` in [05. CLI reference](05_cli_reference.md)) so a case
@@ -89,7 +94,9 @@
   never silently dropped) is never hashed or staged either, since neither
   is used for a file with no table to attach provenance to; only files
   that actually match a supported format pay the cost of a full read for
-  hashing.
+  hashing. Unknown files are also reported locally and never submitted as
+  process-pool/distributed jobs; this matters for software acquisition trees
+  containing thousands of executables beside a small number of actual logs.
 
 Next: [09. FAQ & limitations](09_faq_and_limitations.md) for
 troubleshooting and the full known-limitations pointer.

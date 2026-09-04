@@ -50,7 +50,7 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 `seclogx query ... event_data::VARCHAR ILIKE '%...%'` 对其做全文检索（见[《7. 常用查询》](07_recipes.zh-CN.md)），或继续往下看
 `seclogx fields`——它能直接从你的数据里列出真实字段名。
 
-## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`registry`
+## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`qcloud_logs`、`registry`
 
 Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每一类数据的形态都与事件日志本质不同，因此各自拥有独立的表，而不是硬塞进
 `events` 里——完整列参考见 `docs/schema.md`。其中每一张表也都有对应的 `Case`
@@ -68,6 +68,7 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 | `auditd_logs` | Linux 审计框架（`/var/log/audit/audit.log`），每行一条记录 | `record_type`、`audit_serial`、`syscall`、`exe`、`comm`、`auid`、`key`、`fields`（JSON） |
 | `journal_logs` | systemd journal 导出格式（`journalctl -o json`） | `unit`、`syslog_identifier`、`priority`、`comm`、`exe`、`message`、`fields`（JSON） |
 | `db_logs` | 数据库服务器日志：MySQL/MariaDB（错误日志、通用查询日志、慢查询日志）、PostgreSQL、MSSQL、Oracle 告警日志，统一存放 | `log_type`、`severity`、`error_code`、`thread_id`、`user_name`、`query_time_sec`、`rows_examined`、`message` |
+| `qcloud_logs` | 腾讯云主机安全客户端文本日志：YDService、HIDS/YDLive、漏洞/基线扫描器、YDFlame/YDUtils/YDQuaraV2、YDEyes | `log_type`、`severity`、`module`、`event_type`、`user_name`、`source_ip`、`file_path`、`file_md5`、`message`、`extra` |
 | `registry` | Windows 注册表配置单元：SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/UsrClass/AmCache，每个值一行 | `hive_type`、`full_path`、`value_name`、`value_type`、`value_text`、`value_int`、`entropy` |
 
 在查询这些表之前，有几点需要了解：
@@ -105,6 +106,10 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   `docs/schema.md`。检测方式与本页其他表一样基于内容，但 MySQL
   的通用查询日志、慢查询日志与 Oracle 告警日志都依赖文件早期出现的标记行/头部行/时间戳行——如果某个数据库日志没有被正确识别，见
   `docs/known_limitations.md`。
+- **`qcloud_logs` 通过 `log_type` 统一四种客户端行格式**。登录、恶意文件、隔离、命令执行、
+  黑名单与账户详情等稳定消息会提取为结构化字段，同时完整消息仍可全文检索。形态较通用的
+  Go/扫描器/YDEyes 格式需要腾讯云产品上下文才能判定，私有云上传协议载荷不在解析范围内；
+  详见 `docs/known_limitations.md`。
 - **`registry` 不是实时合并出来的注册表**——没有 `HKLM`/`HKCU`
   别名映射，也没有易失性键。每一行都以其所属配置单元真实的逻辑路径为根（`hive_root`
   + `key_path`，例如 `HKEY_LOCAL_MACHINE\SOFTWARE\...`、
@@ -133,6 +138,7 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 | Linux 审计框架（auditd） | `auditd_logs` | 无——用 `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | 不支持——直接查询 |
 | systemd journal 导出 | `journal_logs` | 无——用 `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | 不支持——直接查询 |
 | 数据库日志（MySQL/MariaDB/PostgreSQL/MSSQL/Oracle） | `db_logs` | 无——用 `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | 不支持——直接查询 |
+| 腾讯云主机安全客户端日志 | `qcloud_logs` | 无——用 `table qcloud_logs` / `query` | `qcloud_logs(log_type=)` / `qcloud_logs_chunks(log_type=)` | 不支持——直接查询 |
 | Windows 注册表配置单元 | `registry` | `registry [--suspicious] [--hive-type]` | `registry(hive_type=)` / `registry_chunks(hive_type=)`，`suspicious_registry()`（启发式） | 不支持——用 `suspicious_registry()` 或直接查询 |
 
 `seclogx sources <case>`并不针对某一张具体的表——它是在使用上述任何一种接口之前，最值得先运行的一个命令：给出每张表的行数统计，让你在决定具体查哪张表之前，先了解案例里实际有什么。
@@ -173,6 +179,10 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   `mysql_slow` 中 `rows_examined` 相对正常流量明显偏高的记录（可能是通过全表扫描进行的数据泄露）；对
   `message` 文本排查到达数据库层的 SQL 注入特征。先按 `log_type`
   筛选——六种子格式实际写入的列差异很大。
+- **`qcloud_logs`**——先按 `event_type` 找登录失败、恶意文件检测/扫描、黑名单决策与
+  扫描器命令执行，再通过 `source_ip`、`user_name`、`file_md5`、`file_path`、
+  `subject_process_id` 与 `trace_id` 关联；未被语义提取覆盖的组件活动仍可按 `module` 和
+  `message` 排查。
 - **`registry`**——优先运行 `suspicious_registry()`：Run/RunOnce
   启动项、服务的 `ImagePath`/`ServiceDll`、COM CLSID `InprocServer32`
   劫持、Winlogon 的 `Shell`/`Userinit`/`Notify` 篡改、`AppInit_DLLs`、
@@ -235,6 +245,7 @@ c.fields("web_logs")   # -> status、uri_stem、client_ip 等（真实列）
 | `auditd_logs` | `record_type`、`key`、`exe`、`comm`、`auid`、`audit_serial`（用于关联相关记录） |
 | `journal_logs` | `unit`、`syslog_identifier`、`message`、`priority` |
 | `db_logs` | 先看 `log_type`，再看 `severity`、`error_code`、`message`；`mysql_slow` 行还有 `query_time_sec`、`rows_examined` |
+| `qcloud_logs` | `event_type`、`module`、`severity`、`source_ip`、`user_name`、`file_md5`、`file_path`、`trace_id`、`message` |
 | `registry` | `full_path`、`value_name`、`value_text`、`entropy`、`hive_type` |
 
 特别是对 `events` 而言，注意有哪些字段存在取决于具体的*通道（channel）*——`Image`/`CommandLine`

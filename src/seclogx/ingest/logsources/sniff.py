@@ -36,6 +36,10 @@ KIND_POSTGRESQL = "postgresql"
 KIND_MSSQL = "mssql"
 KIND_ORACLE_ALERT = "oracle_alert"
 KIND_REGISTRY_HIVE = "registry_hive"
+KIND_QCLOUD_YDSERVICE = "qcloud_ydservice"
+KIND_QCLOUD_GO = "qcloud_go"
+KIND_QCLOUD_SCANNER = "qcloud_scanner"
+KIND_QCLOUD_YDEYES = "qcloud_ydeyes"
 
 WEB_ERROR_KINDS = {KIND_WEB_ERROR_NGINX: "nginx", KIND_WEB_ERROR_APACHE: "apache", KIND_WEB_ERROR_TOMCAT: "tomcat"}
 
@@ -64,6 +68,32 @@ _POSTGRESQL_RE = re.compile(
 _MSSQL_RE = re.compile(rb"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{2}\s+\S+\s{2,}\S")
 _ORACLE_ALERT_RE = re.compile(rb"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2}$")
 
+# Tencent Cloud Host Security (YunJing / Tencent CWPP).  The YDService
+# shape is distinctive enough to identify from content alone.  The other
+# three are common logging shapes, so they additionally require a YunJing
+# path/name or a product-specific marker in the 16KB peek.
+_QCLOUD_YDSERVICE_RE = re.compile(
+    rb"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \d+ \d+ [A-Za-z]+ [^: ]+:\d+ .*$"
+)
+_QCLOUD_GO_RE = re.compile(
+    rb"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\[[^]]+\]\[[^]:]+:\d+\].*$"
+)
+_QCLOUD_SCANNER_RE = re.compile(
+    rb"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[[^]]+\] .*$"
+)
+_QCLOUD_YDEYES_RE = re.compile(rb"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] .*$")
+_QCLOUD_PRODUCT_MARKERS = (
+    b"yunjing",
+    b"tencent cwpp",
+    b"ydservice",
+    b"ydlive",
+    b"ydflame",
+    b"ydquara",
+    b"yhvs",
+    b"blackiplist",
+    b"/var/run/yd_",
+)
+
 _MESSAGE_TRACKING_FIELDS = {"message-id", "recipient-address"}
 # journald's "trusted", double-underscore-prefixed fields -- reliable,
 # format-unique signal for `journalctl -o json` export lines (as opposed
@@ -78,6 +108,25 @@ def _peek(path: Path) -> bytes:
 
 def _decode_lines(raw: bytes) -> list[str]:
     return _decode_text(raw).splitlines()
+
+
+def _looks_like_qcloud_log(path: Path, raw: bytes) -> bool:
+    normalized = path.as_posix().lower()
+    name = path.name.lower()
+    known_name = (
+        name.startswith("ydservice.")
+        or name.startswith("hids.log")
+        or name.startswith("ydlive.log")
+        or name.startswith("vul_scan.log")
+        or name.startswith("baseline_scan.log")
+        or name.startswith("ydflame.")
+        or name.startswith("ydutils.log")
+        or name.startswith("ydquarav2.log")
+        or "ydeyes" in name
+        or (name == "log.txt" and path.parent.name.lower() == "ydeyes")
+    )
+    lowered = raw.lower()
+    return "/yunjing/" in normalized or known_name or any(marker in lowered for marker in _QCLOUD_PRODUCT_MARKERS)
 
 
 def classify_file(path: Path) -> str | None:
@@ -164,6 +213,14 @@ def classify_file(path: Path) -> str | None:
 
     if first_data_line:
         encoded = first_data_line.encode("utf-8", errors="replace")
+        if _QCLOUD_YDSERVICE_RE.match(encoded):
+            return KIND_QCLOUD_YDSERVICE
+        if _QCLOUD_GO_RE.match(encoded) and _looks_like_qcloud_log(path, raw):
+            return KIND_QCLOUD_GO
+        if _QCLOUD_SCANNER_RE.match(encoded) and _looks_like_qcloud_log(path, raw):
+            return KIND_QCLOUD_SCANNER
+        if _QCLOUD_YDEYES_RE.match(encoded) and _looks_like_qcloud_log(path, raw):
+            return KIND_QCLOUD_YDEYES
         if _NGINX_ERROR_RE.match(encoded):
             return KIND_WEB_ERROR_NGINX
         if _APACHE_ERROR_RE.match(encoded):

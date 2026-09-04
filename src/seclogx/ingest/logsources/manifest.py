@@ -53,7 +53,7 @@ class AuxIngestReport:
 
     def summary_text(self) -> str:
         lines = [
-            "Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange):",
+            "Auxiliary artifact ingest (tasks / web / Exchange / Linux / database / QCloud / Registry):",
             f"  files discovered : {self.files_discovered}",
             f"  files ok         : {self.files_ok}",
             f"  files partial    : {self.files_partial}"

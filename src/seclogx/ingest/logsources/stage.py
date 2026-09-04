@@ -31,6 +31,16 @@ from .parsers.dblogs import (
 from .parsers.exchange import parse_exchange_csv
 from .parsers.iis import parse_iis_file
 from .parsers.journal import parse_journal_file
+from .parsers.qcloud import (
+    parse_qcloud_go_file,
+    parse_qcloud_scanner_file,
+    parse_qcloud_ydeyes_file,
+    parse_qcloud_ydservice_file,
+    stream_qcloud_go_file,
+    stream_qcloud_scanner_file,
+    stream_qcloud_ydeyes_file,
+    stream_qcloud_ydservice_file,
+)
 from .parsers.registry import parse_registry_hive_file
 from .parsers.scheduled_tasks import parse_task_xml
 from .parsers.syslog import parse_syslog_file
@@ -49,6 +59,10 @@ from .sniff import (
     KIND_MYSQL_SLOW,
     KIND_ORACLE_ALERT,
     KIND_POSTGRESQL,
+    KIND_QCLOUD_GO,
+    KIND_QCLOUD_SCANNER,
+    KIND_QCLOUD_YDEYES,
+    KIND_QCLOUD_YDSERVICE,
     KIND_REGISTRY_HIVE,
     KIND_SCHEDULED_TASK,
     KIND_SYSLOG,
@@ -64,9 +78,87 @@ from .sniff import (
 # level 1 -- same tradeoff, same DuckDB-side transparency on read.
 _GZIP_LEVEL = 1
 
+_QCLOUD_STREAM_PARSERS = {
+    KIND_QCLOUD_YDSERVICE: stream_qcloud_ydservice_file,
+    KIND_QCLOUD_GO: stream_qcloud_go_file,
+    KIND_QCLOUD_SCANNER: stream_qcloud_scanner_file,
+    KIND_QCLOUD_YDEYES: stream_qcloud_ydeyes_file,
+}
+
 
 def _short_hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+
+
+def _staging_path(cf: ClassifiedFile, staging_dir: Path, table: str) -> Path:
+    host_dir = staging_dir / cf.host
+    host_dir.mkdir(parents=True, exist_ok=True)
+    return host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson.gz"
+
+
+def _stage_qcloud_stream(
+    cf: ClassifiedFile, staging_dir: Path, file_sha256: str
+) -> AuxStagedFile:
+    """Stream a large Tencent client log directly into compressed staging."""
+    ndjson_path = _staging_path(cf, staging_dir, "qcloud_logs")
+    record_count = 0
+    error_count = 0
+    parse_error: str | None = None
+    encode_json = json.JSONEncoder(ensure_ascii=False, separators=(",", ":")).encode
+
+    try:
+        with gzip.open(
+            ndjson_path, "wt", compresslevel=_GZIP_LEVEL, encoding="utf-8", newline="\n"
+        ) as out:
+
+            def emit(row: dict) -> None:
+                nonlocal record_count
+                row["source_path"] = str(cf.path)
+                row["source_file"] = cf.path.name
+                row["file_sha256"] = file_sha256
+                # Streaming rows are sparse: DuckDB's union_by_name + explicit
+                # schema supplies NULL for omitted optional columns. Reusing one
+                # encoder avoids per-record encoder construction on this hot path.
+                out.write(encode_json(row) + "\n")
+                record_count += 1
+
+            _, error_count = _QCLOUD_STREAM_PARSERS[cf.kind](cf.path, cf.host, emit)
+    except Exception as exc:  # noqa: BLE001 -- preserve successfully staged prefix
+        parse_error = str(exc)
+
+    if record_count == 0:
+        status = StageStatus.FAILED
+        ndjson_path.unlink(missing_ok=True)
+        ndjson_out = None
+    elif parse_error is not None or error_count:
+        status = StageStatus.PARTIAL
+        ndjson_out = str(ndjson_path)
+    else:
+        status = StageStatus.OK
+        ndjson_out = str(ndjson_path)
+
+    if parse_error is not None:
+        error_message = f"parse error: {parse_error}"
+    elif error_count:
+        error_message = f"{error_count} row(s) rejected (format mismatch)"
+    else:
+        error_message = None
+
+    return AuxStagedFile(
+        source_path=str(cf.path),
+        source_file=cf.path.name,
+        host=cf.host,
+        file_sha256=file_sha256,
+        size_bytes=cf.size_bytes,
+        kind=cf.kind,
+        table="qcloud_logs",
+        status=status,
+        record_count=record_count,
+        error_count=error_count,
+        error_message=error_message,
+        ndjson_path=ndjson_out,
+        staged_at=now_iso(),
+    )
 
 
 def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
@@ -113,6 +205,9 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
             staged_at=now_iso(),
         )
 
+    if cf.kind in _QCLOUD_STREAM_PARSERS:
+        return _stage_qcloud_stream(cf, staging_dir, file_sha256)
+
     try:
         rows, table, ok_count, error_count = _parse(cf)
     except Exception as e:  # noqa: BLE001 -- never let one bad file abort the ingest run
@@ -145,15 +240,13 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
 
     ndjson_out: str | None = None
     if rows:
-        host_dir = staging_dir / cf.host
-        host_dir.mkdir(parents=True, exist_ok=True)
         # Hash suffix avoids collisions when files with the same basename
         # are discovered under the same host from different acquisition
         # paths (same scheme as ingest/evtx/stage.py).
-        ndjson_path = host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson.gz"
-        with gzip.open(ndjson_path, "wt", compresslevel=_GZIP_LEVEL) as out:
+        ndjson_path = _staging_path(cf, staging_dir, table)
+        with gzip.open(ndjson_path, "wt", compresslevel=_GZIP_LEVEL, encoding="utf-8", newline="\n") as out:
             for row in rows:
-                out.write(json.dumps(row, default=str) + "\n")
+                out.write(json.dumps(row, default=str, ensure_ascii=False, separators=(",", ":")) + "\n")
         ndjson_out = str(ndjson_path)
 
     return AuxStagedFile(
@@ -226,6 +319,18 @@ def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
     if cf.kind == KIND_ORACLE_ALERT:
         rows, ok, err = parse_oracle_alert_file(cf.path, cf.host)
         return rows, "db_logs", ok, err
+    if cf.kind == KIND_QCLOUD_YDSERVICE:
+        rows, ok, err = parse_qcloud_ydservice_file(cf.path, cf.host)
+        return rows, "qcloud_logs", ok, err
+    if cf.kind == KIND_QCLOUD_GO:
+        rows, ok, err = parse_qcloud_go_file(cf.path, cf.host)
+        return rows, "qcloud_logs", ok, err
+    if cf.kind == KIND_QCLOUD_SCANNER:
+        rows, ok, err = parse_qcloud_scanner_file(cf.path, cf.host)
+        return rows, "qcloud_logs", ok, err
+    if cf.kind == KIND_QCLOUD_YDEYES:
+        rows, ok, err = parse_qcloud_ydeyes_file(cf.path, cf.host)
+        return rows, "qcloud_logs", ok, err
     if cf.kind == KIND_REGISTRY_HIVE:
         rows, ok, err = parse_registry_hive_file(cf.path, cf.host)
         return rows, "registry", ok, err

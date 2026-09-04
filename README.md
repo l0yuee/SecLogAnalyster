@@ -29,6 +29,11 @@ workspace instead of raw XML and inconsistent text logs.
   logs), PostgreSQL, MSSQL (`ERRORLOG`), and Oracle (alert log) -- unified
   into one `db_logs` table with a `log_type` column, same pattern as the
   web access/error log tables.
+- **Tencent Cloud Host Security logs**: Linux YunJing / Tencent CWPP
+  `ydservice.*.log`, `hids.log*`, `ydlive.log`, scanner, asset, quarantine,
+  and YDEyes text logs -- unified in `qcloud_logs`, with structured login,
+  blocklist, malware/path/hash/trace, process, account, and command fields
+  while retaining each complete raw record.
 - **Windows Registry**: raw hive files (SYSTEM, SOFTWARE, SAM, SECURITY,
   DEFAULT, per-user `NTUSER.DAT`/`UsrClass.dat`) parsed completely --
   every key and value, not a sample -- into one `registry` table, with
@@ -52,7 +57,7 @@ workspace instead of raw XML and inconsistent text logs.
   alike -- with a popularity count and a real example value.
 - **pandas-native**: every log family -- events, web access/error logs,
   Scheduled Tasks, Exchange logs, syslog, auditd, systemd journal, database
-  logs, Registry hives -- is reachable as a `pandas.DataFrame` through a
+  logs, Tencent Cloud Host Security logs, Registry hives -- is reachable as a `pandas.DataFrame` through a
   named accessor
   (`c.web_logs()`, `c.scheduled_tasks()`, `c.syslog()`, ...), the same
   first-class treatment `events` gets, ready for a notebook.
@@ -164,6 +169,7 @@ c.syslog()                        # generic syslog, incl. auth.log/secure conten
 c.auditd_logs()                   # Linux Audit Framework
 c.journal_logs()                  # systemd journal export
 c.db_logs(log_type="mysql_slow")  # MySQL/MariaDB, PostgreSQL, MSSQL, Oracle logs
+c.qcloud_logs(log_type="ydservice") # Tencent Cloud Host Security / YunJing logs
 c.registry()                      # Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/NTUSER/...
 c.suspicious_registry()           # high-entropy values + Run/services/COM/IFEO persistence heuristics
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
@@ -203,7 +209,7 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
-| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, registry) |
+| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, qcloud_logs, registry) |
 | `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |
 | `seclogx fields <case> <table>` | List every field a table actually has in this case's real data (columns + JSON-catchall keys), with a popularity count and example value |
 | `seclogx search <case> <table> [--eq/--contains/--regex FIELD=VALUE]...` | Query any table without writing SQL: exact/fuzzy/regex conditions, case-insensitive by default, combined with AND (or `--match-any` for OR) |

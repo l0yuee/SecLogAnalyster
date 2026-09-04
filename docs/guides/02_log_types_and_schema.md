@@ -60,7 +60,7 @@ If you don't know the exact field name for something, `CaseDB.search()`
 search across it -- see [07. Recipes](07_recipes.md) -- or read on for
 `seclogx fields`, which lists real field names directly from your data.
 
-## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `registry`
+## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `qcloud_logs`, `registry`
 
 Windows Event Log isn't the only artifact `ingest` normalizes. Each of
 these is fundamentally a different shape, so each gets its own table
@@ -81,6 +81,7 @@ via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md)
 | `auditd_logs` | Linux Audit Framework (`/var/log/audit/audit.log`), one row per line | `record_type`, `audit_serial`, `syscall`, `exe`, `comm`, `auid`, `key`, `fields` (JSON) |
 | `journal_logs` | systemd journal export format (`journalctl -o json`) | `unit`, `syslog_identifier`, `priority`, `comm`, `exe`, `message`, `fields` (JSON) |
 | `db_logs` | Database server logs: MySQL/MariaDB (error, general query, slow query), PostgreSQL, MSSQL, Oracle alert log, unified | `log_type`, `severity`, `error_code`, `thread_id`, `user_name`, `query_time_sec`, `rows_examined`, `message` |
+| `qcloud_logs` | Tencent Cloud Host Security client text logs: YDService, HIDS/YDLive, vulnerability/baseline scanners, YDFlame/YDUtils/YDQuaraV2, YDEyes | `log_type`, `severity`, `module`, `event_type`, `user_name`, `source_ip`, `file_path`, `file_md5`, `message`, `extra` |
 | `registry` | Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/UsrClass/AmCache, one row per value | `hive_type`, `full_path`, `value_name`, `value_type`, `value_text`, `value_int`, `entropy` |
 
 A few things worth knowing before you query these:
@@ -138,6 +139,12 @@ A few things worth knowing before you query these:
   general/slow query logs and Oracle's alert log each depend on a
   marker/header/timestamp line appearing early in the file -- see
   `docs/known_limitations.md` if a database log doesn't get picked up.
+- **`qcloud_logs` unifies four client line envelopes behind `log_type`**.
+  Stable login, malware, quarantine, command, blocklist, and account messages
+  receive structured fields; every message remains searchable verbatim. The
+  generic-looking Go/scanner/YDEyes envelopes require Tencent product context,
+  and private-cloud upload payloads are not decoded; see
+  `docs/known_limitations.md`.
 - **`registry` is not a live merged registry** -- no `HKLM`/`HKCU`
   aliasing, no volatile keys. Each row is rooted at its own hive's real
   logical path (`hive_root` + `key_path`, e.g.
@@ -174,6 +181,7 @@ gets on top of that.
 | Linux Audit Framework (auditd) | `auditd_logs` | none -- use `table auditd_logs` / `query` | `auditd_logs()` / `auditd_logs_chunks()` | No -- query directly |
 | systemd journal export | `journal_logs` | none -- use `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | No -- query directly |
 | Database logs (MySQL/MariaDB/PostgreSQL/MSSQL/Oracle) | `db_logs` | none -- use `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | No -- query directly |
+| Tencent Cloud Host Security client logs | `qcloud_logs` | none -- use `table qcloud_logs` / `query` | `qcloud_logs(log_type=)` / `qcloud_logs_chunks(log_type=)` | No -- query directly |
 | Windows Registry hives | `registry` | `registry [--suspicious] [--hive-type]` | `registry(hive_type=)` / `registry_chunks(hive_type=)`, `suspicious_registry()` (heuristic) | No -- use `suspicious_registry()` / query directly |
 
 `seclogx sources <case>` isn't table-specific -- it's the one command to
@@ -233,6 +241,11 @@ What to actually look for in each, at a glance (full recipes in
   exfiltration via a full-table scan); `message` text for SQL injection
   patterns reaching the database layer. Filter by `log_type` first --
   the six sub-formats have very different columns populated.
+- **`qcloud_logs`** -- start with `event_type` to surface login failures,
+  malware detections/scans, blocklist decisions, and scanner command
+  execution. Pivot with `source_ip`, `user_name`, `file_md5`, `file_path`,
+  `subject_process_id`, and `trace_id`; use `module` and `message` for
+  component-specific activity not covered by enrichment.
 - **`registry`** -- `suspicious_registry()` runs first: Run/RunOnce
   startup items, service `ImagePath`/`ServiceDll`, COM CLSID
   `InprocServer32` hijacking, Winlogon `Shell`/`Userinit`/`Notify`
@@ -307,6 +320,7 @@ vary):
 | `auditd_logs` | `record_type`, `key`, `exe`, `comm`, `auid`, `audit_serial` (to correlate related lines) |
 | `journal_logs` | `unit`, `syslog_identifier`, `message`, `priority` |
 | `db_logs` | `log_type` first, then `severity`, `error_code`, `message`; `mysql_slow` rows also have `query_time_sec`, `rows_examined` |
+| `qcloud_logs` | `event_type`, `module`, `severity`, `source_ip`, `user_name`, `file_md5`, `file_path`, `trace_id`, `message` |
 | `registry` | `full_path`, `value_name`, `value_text`, `entropy`, `hive_type` |
 
 For `events` specifically, note that which fields exist depends on the

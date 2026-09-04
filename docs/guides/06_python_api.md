@@ -86,6 +86,7 @@ c.syslog()                             # generic syslog, incl. auth.log/secure c
 c.auditd_logs()                        # Linux Audit Framework
 c.journal_logs()                       # systemd journal export
 c.db_logs(log_type="mysql_slow")       # MySQL/MariaDB, PostgreSQL, MSSQL, Oracle logs
+c.qcloud_logs(log_type="ydservice")    # Tencent Cloud Host Security client logs
 c.registry()                           # Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/NTUSER/...
 c.registry(hive_type="software")
 c.suspicious_registry()                # high-entropy values + Run/services/COM/IFEO persistence heuristics
@@ -129,7 +130,7 @@ with Case.open("incident42") as c:
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |
-| Per-log-family accessors | `c.events()` / `c.events_chunks()`, `c.web_logs(log_type=)` / `_chunks`, `c.web_error_logs(log_type=)` / `_chunks`, `c.scheduled_tasks()` / `_chunks`, `c.exchange_message_tracking()` / `_chunks`, `c.exchange_logs(log_type=)` / `_chunks`, `c.syslog()` / `_chunks`, `c.auditd_logs()` / `_chunks`, `c.journal_logs()` / `_chunks`, `c.db_logs(log_type=)` / `_chunks`, `c.registry(hive_type=)` / `_chunks` |
+| Per-log-family accessors | `c.events()` / `c.events_chunks()`, `c.web_logs(log_type=)` / `_chunks`, `c.web_error_logs(log_type=)` / `_chunks`, `c.scheduled_tasks()` / `_chunks`, `c.exchange_message_tracking()` / `_chunks`, `c.exchange_logs(log_type=)` / `_chunks`, `c.syslog()` / `_chunks`, `c.auditd_logs()` / `_chunks`, `c.journal_logs()` / `_chunks`, `c.db_logs(log_type=)` / `_chunks`, `c.qcloud_logs(log_type=)` / `_chunks`, `c.registry(hive_type=)` / `_chunks` |
 | Scheduled Task triage | `c.suspicious_tasks()` |
 | Auth event triage (over `syslog`) | `c.auth_events()` |
 | Registry triage | `c.suspicious_registry(entropy_threshold=7.0, min_size=32)` |

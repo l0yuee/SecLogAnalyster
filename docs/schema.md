@@ -6,7 +6,7 @@ and every other log family's schema further down (`## Non-EVTX log
 tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 `web_logs`, `web_error_logs`, `scheduled_tasks`,
 `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`,
-`journal_logs`, `db_logs`, `registry`. See "Quick reference: analyzing each log type" in
+`journal_logs`, `db_logs`, `qcloud_logs`, `registry`. See "Quick reference: analyzing each log type" in
 [`docs/guides/02_log_types_and_schema.md`](guides/02_log_types_and_schema.md)
 for how to actually query each one, and `docs/architecture.md` for how
 they're ingested.
@@ -308,6 +308,32 @@ caveats specific to each sub-format. Partition columns: `host, log_type`.
 | `rows_examined` | `BIGINT` | mysql_slow's `Rows_examined`; NULL elsewhere |
 | `message` | `VARCHAR` | Free-text message / SQL statement text / mysql_general's argument |
 | `extra` | `JSON` | Catchall (e.g. mysql_slow's `lock_time`/`rows_sent`) |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `qcloud_logs`
+
+Tencent Cloud Host Security (YunJing/CWPP) client text logs. Four physical
+line formats are normalized into one table, while `log_type` preserves the
+originating component (`ydservice`, `hids`, `ydlive`, `vul_scan`,
+`baseline_scan`, `ydflame`, `ydutils`, `ydquarav2`, or `ydeyes`). Continuation
+lines are attached to the preceding event. Partition columns: `host, log_type`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `log_type` | `VARCHAR` | Tencent client component/sub-log type (partition key) |
+| `time_created` | `TIMESTAMP` | Client-local log timestamp; source formats carry no timezone |
+| `severity` | `VARCHAR` | `DEBUG`/`INFO`/`WARN`/`ERROR` where present |
+| `module` | `VARCHAR` | YDService functional module, such as `Detection`, `Malware`, or `Crontab` |
+| `code_file`, `source_line` | `VARCHAR`, `INTEGER` | Source-code location emitted by YDService/Go components |
+| `process_id`, `thread_id` | `BIGINT` | Logging process/thread identifiers where present |
+| `event_type` | `VARCHAR` | Best-effort semantic label such as `login_failure`, `malware_detection`, `malware_scan`, or `command_execution` |
+| `user_name`, `source_ip`, `destination_port` | mixed | Extracted login/account/network context |
+| `blocked` | `BOOLEAN` | Whether the client reported blocking a login attempt, where present |
+| `subject_process_id`, `file_path`, `file_md5`, `trace_id` | mixed | Malware/process artifact context where present |
+| `message` | `VARCHAR` | Normalized message, including attached continuation lines |
+| `raw_line` | `VARCHAR` | Original complete logical record, including continuation lines |
+| `extra` | `JSON` | Additional structured fields such as scanner commands, account details, and quarantine result flags |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
 
 ## `registry`

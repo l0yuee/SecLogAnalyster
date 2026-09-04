@@ -15,6 +15,7 @@ functions -- both `stage_file` and `stage_aux_file` already are.
 from __future__ import annotations
 
 import multiprocessing
+import os
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -25,6 +26,7 @@ from .config import ClusterConfig
 
 INGEST_QUEUE_NAME = "seclogx-ingest"
 HUNT_QUEUE_NAME = "seclogx-hunt"
+DEFAULT_LOCAL_INGEST_WORKERS = min(8, os.cpu_count() or 1)
 
 
 class JobQueue(ABC):
@@ -107,4 +109,11 @@ def get_job_queue(
     cluster_config = cluster_config or ClusterConfig.from_env()
     if cluster_config.is_distributed:
         return RQJobQueue(cluster_config.broker_url, queue_name=queue_name)
+    if workers is None and queue_name == INGEST_QUEUE_NAME:
+        # ProcessPoolExecutor otherwise defaults to as many as 32 workers.
+        # Parser workers import pandas/DuckDB and concurrently read the same
+        # evidence disk, so that default often consumes more RAM and produces
+        # more I/O contention without improving throughput. Hunting retains
+        # executor-default parallelism; explicit ``--workers`` stays authoritative.
+        workers = DEFAULT_LOCAL_INGEST_WORKERS
     return LocalJobQueue(workers=workers)

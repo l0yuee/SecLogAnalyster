@@ -7,7 +7,13 @@ import time
 import pytest
 
 from seclogx.distributed.config import ClusterConfig
-from seclogx.distributed.queue import LocalJobQueue, RQJobQueue, get_job_queue
+from seclogx.distributed.queue import (
+    DEFAULT_LOCAL_INGEST_WORKERS,
+    HUNT_QUEUE_NAME,
+    LocalJobQueue,
+    RQJobQueue,
+    get_job_queue,
+)
 
 # Module-level and importable-by-name -- a hard requirement for any
 # function dispatched through RQJobQueue (see queue.py's docstring);
@@ -30,6 +36,14 @@ class TestLocalJobQueue:
 
     def test_empty_args_list_returns_empty(self):
         assert LocalJobQueue().submit_all(_add, []) == []
+
+    def test_default_ingest_worker_count_is_bounded(self):
+        queue = get_job_queue(ClusterConfig.local())
+        assert queue.workers == DEFAULT_LOCAL_INGEST_WORKERS
+        assert 1 <= DEFAULT_LOCAL_INGEST_WORKERS <= 8
+
+    def test_hunting_keeps_executor_default_worker_count(self):
+        assert get_job_queue(ClusterConfig.local(), queue_name=HUNT_QUEUE_NAME).workers is None
 
     def test_get_job_queue_returns_local_when_not_distributed(self):
         assert isinstance(get_job_queue(ClusterConfig.local()), LocalJobQueue)

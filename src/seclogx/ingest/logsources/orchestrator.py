@@ -1,6 +1,6 @@
 """Orchestrates discovery and parallel staging for the non-EVTX log families
-(Scheduled Tasks, IIS/nginx/Apache/Tomcat web access AND error logs, Exchange
-CSV logs). Runs as a second pass alongside the existing EVTX ingest (see
+(Scheduled Tasks, web/Exchange/Linux/database logs, Tencent Cloud Host
+Security logs, and Registry hives). Runs as a second pass alongside the existing EVTX ingest (see
 case.py), over the same `--source` inputs. Per-table Parquet flattening is
 delegated to flatten.py, mirroring how the EVTX pipeline
 (`ingest/evtx/orchestrator.py` + `ingest/evtx/flatten.py`) splits the two
@@ -59,11 +59,20 @@ def run_aux_ingest(
     staging_dir = case_dir / "staging_aux"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    # Distributed mode: staging_dir must be reachable by every `seclogx
-    # worker` process (a shared/NFS mount), same requirement as the EVTX
-    # pipeline's staging_dir -- see ingest/evtx/orchestrator.py.
-    queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
-    staged: list[AuxStagedFile] = queue.submit_all(stage_aux_file, [(cf, staging_dir) for cf in classified])
+    # Unknown files require no hashing or parsing. Materialize their tiny
+    # report entries locally instead of paying one process-pool / distributed
+    # queue round trip per file. Real software acquisition trees commonly
+    # contain tens of thousands of binaries beside only a few dozen logs.
+    unknown_classified = [cf for cf in classified if cf.kind is None]
+    staged: list[AuxStagedFile] = [stage_aux_file(cf, staging_dir) for cf in unknown_classified]
+
+    known_classified = [cf for cf in classified if cf.kind is not None]
+    if known_classified:
+        # Distributed mode: staging_dir must be reachable by every `seclogx
+        # worker` process (a shared/NFS mount), same requirement as the EVTX
+        # pipeline's staging_dir -- see ingest/evtx/orchestrator.py.
+        queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
+        staged.extend(queue.submit_all(stage_aux_file, [(cf, staging_dir) for cf in known_classified]))
     staged.sort(key=lambda f: f.source_path)
 
     files_ok = sum(1 for f in staged if f.status == StageStatus.OK)

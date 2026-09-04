@@ -16,6 +16,7 @@ def test_tables_registry_has_expected_tables():
         "auditd_logs",
         "journal_logs",
         "db_logs",
+        "qcloud_logs",
         "registry",
     }
     for table, definition in TABLES.items():

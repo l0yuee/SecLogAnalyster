@@ -290,6 +290,41 @@ DB_LOGS_COLUMNS: list[tuple[str, str]] = [
 ]
 DB_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
 
+# Tencent Cloud Host Security Linux client (YunJing / Tencent CWPP)
+# line-oriented logs.  Four physical formats share one forensic schema;
+# ``log_type`` identifies the originating component while ``raw_line``
+# preserves exact source text alongside best-effort structured fields.
+QCLOUD_LOGS_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("log_type", "VARCHAR"),  # ydservice|hids|ydlive|vul_scan|baseline_scan|ydflame|ydutils|ydquarav2|ydeyes|...
+    ("time_created", "TIMESTAMP"),
+    ("severity", "VARCHAR"),
+    ("module", "VARCHAR"),
+    ("code_file", "VARCHAR"),
+    ("source_line", "INTEGER"),
+    ("process_id", "BIGINT"),  # logging process (YDService prefix)
+    ("thread_id", "BIGINT"),
+    ("event_type", "VARCHAR"),  # normalized high-value event where confidently identifiable
+    ("user_name", "VARCHAR"),
+    ("source_ip", "VARCHAR"),
+    ("destination_port", "INTEGER"),
+    ("blocked", "BOOLEAN"),
+    ("subject_process_id", "BIGINT"),  # process referenced by a security event, distinct from logger PID
+    ("file_path", "VARCHAR"),
+    ("file_md5", "VARCHAR"),
+    ("trace_id", "VARCHAR"),
+    ("message", "VARCHAR"),
+    ("raw_line", "VARCHAR"),
+    ("extra", "JSON"),
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+QCLOUD_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
+
 # Windows Registry hives -- SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
 # per-user NTUSER.DAT/UsrClass.dat, and (a bonus, since the underlying
 # regipy dependency already supports it) AmCache.hve/BCD. One row per
@@ -335,6 +370,7 @@ TABLES: dict[str, dict] = {
     "auditd_logs": {"columns": AUDITD_LOGS_COLUMNS, "partition_by": AUDITD_LOGS_PARTITION_COLUMNS},
     "journal_logs": {"columns": JOURNAL_LOGS_COLUMNS, "partition_by": JOURNAL_LOGS_PARTITION_COLUMNS},
     "db_logs": {"columns": DB_LOGS_COLUMNS, "partition_by": DB_LOGS_PARTITION_COLUMNS},
+    "qcloud_logs": {"columns": QCLOUD_LOGS_COLUMNS, "partition_by": QCLOUD_LOGS_PARTITION_COLUMNS},
     "registry": {"columns": REGISTRY_COLUMNS, "partition_by": REGISTRY_PARTITION_COLUMNS},
 }
 

@@ -37,13 +37,14 @@ Discovers, classifies, and normalizes every supported file under the
 given source paths into the case in one pass: `.evtx`, Scheduled Task
 definitions, IIS/nginx/Apache/Tomcat access logs, Exchange CSV logs,
 Linux syslog/`auth.log`, auditd, and systemd journal export logs,
-MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, and raw Windows
-Registry hive files. This is the core command.
+MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, Tencent Cloud Host
+Security client logs, and raw Windows Registry hive files. This is the
+core command.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--source PATH[:HOST]` | required, repeatable | A file or directory to scan recursively. Optionally tag it with an explicit host label (`PATH:HOST`); if omitted, the source directory's own name is used as the host label. |
-| `--workers N` | CPU count | Parallel staging workers. Files are parsed independently, so this scales with cores. |
+| `--workers N` | up to 8 | Parallel staging workers. The bounded default balances CPU throughput, process memory, and evidence-disk contention; set it explicitly for the host and storage in use. |
 | `--keep-raw` | off | `.evtx` sources only: also capture each record's raw XML into the lake (`raw_xml` column), for cases needing full evidentiary completeness. Roughly doubles ingest time and memory for the files it's applied to. |
 | `--keep-staging` / `--no-keep-staging` | keep | Whether to keep the intermediate NDJSON after flattening -- `staging/` for `.evtx` sources, `staging_aux/` for every other log family. Keeping it makes reprocessing cheap if you change something; deleting it saves disk. |
 | `--case-root` | `./cases` | Where the case workspace lives. |

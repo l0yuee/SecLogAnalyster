@@ -32,13 +32,13 @@ seclogx case info incident42
 
 在来源路径下一次性发现、分类并归一化所有支持的文件，导入到案例中：`.evtx`、计划任务定义、IIS/nginx/Apache/Tomcat
 访问日志、Exchange CSV 日志、Linux syslog/`auth.log`、auditd 与 systemd
-journal 导出日志、MySQL/MariaDB/PostgreSQL/MSSQL/Oracle 数据库日志，以及原始
-Windows 注册表配置单元文件。这是核心命令。
+ journal 导出日志、MySQL/MariaDB/PostgreSQL/MSSQL/Oracle 数据库日志、腾讯云主机安全
+客户端日志，以及原始 Windows 注册表配置单元文件。这是核心命令。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
 | `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。可选地用 `PATH:HOST` 语法显式指定主机标签；若省略，则使用来源目录本身的名称作为主机标签。 |
-| `--workers N` | CPU 核心数 | 并行处理文件的工作进程数。各文件相互独立解析，因此该参数随核心数线性扩展效果明显。 |
+| `--workers N` | 最多 8 | 并行处理文件的工作进程数。受限的默认值用于平衡 CPU 吞吐、进程内存与证据磁盘争用；可根据机器和存储性能显式调整。 |
 | `--keep-raw` | 关闭 | 仅对 `.evtx` 来源生效：同时将每条记录的原始 XML 一并写入数据湖（`raw_xml` 列），适用于需要完整证据保真度的场景。会使被应用文件的导入耗时与内存占用大致翻倍。 |
 | `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留中间 NDJSON 文件——EVTX 来源存放在 `staging/` 下，其他所有日志类型存放在 `staging_aux/` 下。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |

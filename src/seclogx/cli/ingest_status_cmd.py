@@ -8,7 +8,6 @@ import typer
 from ..case import Case
 from ..config import DEFAULT_CASE_ROOT
 from ..errors import CaseNotFoundError
-from ..ingest.jobs import list_jobs, read_job_status
 from ._render import console
 
 _TERMINAL_PHASES = ("done", "failed")
@@ -46,18 +45,14 @@ def ingest_status_command(
         console.print(f"[red]case '{case_name}' not found[/red]")
         raise typer.Exit(1)
 
-    if job_id:
-        status = read_job_status(c.case_dir, job_id)
-        if status is None:
+    status = c.job_status(job_id)
+    if status is None:
+        if job_id:
             console.print(f"[red]no ingest job '{job_id}' found for case '{case_name}'[/red]")
-            raise typer.Exit(1)
-    else:
-        jobs = list_jobs(c.case_dir)
-        if not jobs:
+        else:
             console.print(f"[yellow]no background ingest jobs recorded for case '{case_name}'[/yellow]")
-            raise typer.Exit(1)
-        status = jobs[0]
-        job_id = status.get("job_id")
+        raise typer.Exit(1)
+    job_id = status.get("job_id")
 
     _print_status(status)
 
@@ -65,7 +60,7 @@ def ingest_status_command(
         last = status
         while last.get("phase") not in _TERMINAL_PHASES:
             time.sleep(1.0)
-            latest = read_job_status(c.case_dir, job_id)
+            latest = c.job_status(job_id)
             if latest is None:
                 break
             if latest != last:

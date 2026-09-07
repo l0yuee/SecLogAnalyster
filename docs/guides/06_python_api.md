@@ -28,6 +28,24 @@ print(report.summary_text())
 report.to_dataframe()                  # per-file staging detail as a DataFrame (EVTX pass)
 report.aux.to_dataframe()              # same, for the Scheduled Tasks/IIS/web/Exchange pass
 
+# Live progress instead of a blocking call with no feedback: on_progress
+# is called with a dict snapshot (phase, files scanned/staged, ok/partial/
+# failed/unsupported counts, rows written per table so far) throttled to
+# roughly every 0.3s / 25 items -- cheap enough to print or feed into a
+# notebook progress widget without slowing the ingest down.
+report = c.ingest(
+    ["/mnt/kape_output/WKS01:WKS01"],
+    on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
+)
+
+# Same import, but backgrounded (the library equivalent of `seclogx ingest
+# --background`): starts a detached child process and returns a job_id
+# immediately instead of blocking the calling process/notebook kernel.
+job_id = c.ingest_background(["/mnt/kape_output/WKS01:WKS01"], workers=8)
+c.job_status(job_id)                   # -> dict snapshot, same shape as on_progress's
+c.job_status()                         # omit job_id -> most recently started job
+c.list_jobs()                          # -> list[dict], most recently started first
+
 # Explore
 c.summary()
 c.channels()
@@ -126,7 +144,7 @@ with Case.open("incident42") as c:
 | Category | Methods |
 |---|---|
 | Lifecycle | `Case.create(name, case_root=)`, `Case.open(name, case_root=)`, `Case.list_cases(case_root=)`, `c.info()` |
-| Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=)` -> `IngestReport` |
+| Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=)` -> `IngestReport`; `c.ingest_background(sources, workers=, keep_raw=, keep_staging=)` -> `job_id`; `c.job_status(job_id=)` -> `dict \| None`; `c.list_jobs()` -> `list[dict]` |
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |

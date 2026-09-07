@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -24,9 +27,17 @@ from .distributed.storage import get_storage_backend
 from .errors import CaseAlreadyExistsError, CaseNotFoundError, NoSourcesFoundError
 from .detect import HuntResults, run_hunt
 from .ingest import run_ingest, run_aux_ingest
-from .ingest.common import parse_source_arg
+from .ingest.common import now_iso, parse_source_arg
 from .ingest.evtx.manifest import IngestReport
-from .ingest.jobs import PHASE_STAGING, ProgressReporter
+from .ingest.jobs import (
+    PHASE_STAGING,
+    ProgressReporter,
+    job_log_path,
+    jobs_dir,
+    list_jobs as _list_jobs,
+    read_job_status,
+    write_job_status,
+)
 from .ingest.scan import scan_sources
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .ingest.logsources.parsers.task_baseline import classify_against_baseline
@@ -258,6 +269,76 @@ class Case:
             progress.finish()
 
         return report
+
+    def ingest_background(
+        self,
+        sources: list[str],
+        workers: int | None = None,
+        keep_raw: bool = False,
+        keep_staging: bool = True,
+    ) -> str:
+        """The library equivalent of `seclogx ingest --background`: starts
+        `ingest()` in a detached child process and returns its `job_id`
+        immediately instead of blocking -- useful from a notebook or script
+        when a large import shouldn't hold up the calling process. Poll
+        progress with `job_status(job_id)` (or `list_jobs()`), same as the
+        CLI's `ingest-status`."""
+        job_id = str(uuid.uuid4())
+        jobs_dir(self.case_dir).mkdir(parents=True, exist_ok=True)
+        log_path = job_log_path(self.case_dir, job_id)
+
+        args = [sys.executable, "-m", "seclogx.cli.main", "ingest", self.name]
+        for s in sources:
+            args += ["--source", s]
+        if workers is not None:
+            args += ["--workers", str(workers)]
+        if keep_raw:
+            args += ["--keep-raw"]
+        args += ["--keep-staging" if keep_staging else "--no-keep-staging"]
+        args += ["--case-root", str(self.case_dir.parent), "--_job-id", job_id]
+
+        popen_kwargs: dict = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        else:
+            # Detach from this process's session so the job survives the
+            # caller (this Python process, or the notebook kernel it's in)
+            # exiting.
+            popen_kwargs["start_new_session"] = True
+
+        with open(log_path, "wb") as log_file:
+            subprocess.Popen(
+                args, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **popen_kwargs
+            )
+
+        write_job_status(
+            self.case_dir,
+            job_id,
+            {
+                "job_id": job_id,
+                "case_name": self.name,
+                "sources": sources,
+                "phase": "scanning",
+                "started_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+        )
+        return job_id
+
+    def job_status(self, job_id: str | None = None) -> dict | None:
+        """Status snapshot for one background ingest job (`job_id` from
+        `ingest_background()`), or the most recently started job if
+        `job_id` is omitted. Returns `None` if the job (or, with no
+        `job_id`, any job) isn't found."""
+        if job_id is not None:
+            return read_job_status(self.case_dir, job_id)
+        jobs = self.list_jobs()
+        return jobs[0] if jobs else None
+
+    def list_jobs(self) -> list[dict]:
+        """All background ingest jobs recorded for this case, most recently
+        started first."""
+        return _list_jobs(self.case_dir)
 
     # -- query --------------------------------------------------------------
     @property

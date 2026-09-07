@@ -25,6 +25,22 @@ print(report.summary_text())
 report.to_dataframe()                  # 每个文件的暂存详情，以 DataFrame 形式返回（EVTX 一侧）
 report.aux.to_dataframe()              # 计划任务/IIS/Web/Exchange 一侧的同等信息
 
+# 实时进度反馈，而不是一次阻塞式调用、期间毫无输出：on_progress 会被调用，
+# 参数是一个 dict 快照（当前阶段、已扫描/已暂存文件数、成功/部分/失败/不支持计数、
+# 目前各表已写入的行数），并做了节流（大约每 0.3 秒或每 25 条一次）——足够便宜，
+# 可以直接打印，或接入 notebook 里的进度组件，不会拖慢导入本身。
+report = c.ingest(
+    ["/mnt/kape_output/WKS01:WKS01"],
+    on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
+)
+
+# 同样的导入，但放到后台执行（对应命令行的 `seclogx ingest --background`）：
+# 会启动一个独立的子进程并立即返回一个 job_id，而不会阻塞调用方进程/notebook 内核。
+job_id = c.ingest_background(["/mnt/kape_output/WKS01:WKS01"], workers=8)
+c.job_status(job_id)                   # -> dict 快照，字段结构与 on_progress 收到的一致
+c.job_status()                         # 不传 job_id -> 最近一次启动的任务
+c.list_jobs()                          # -> list[dict]，按启动时间从新到旧排列
+
 # 探索
 c.summary()
 c.channels()
@@ -116,7 +132,7 @@ with Case.open("incident42") as c:
 | 分类 | 方法 |
 |---|---|
 | 生命周期 | `Case.create(name, case_root=)`、`Case.open(name, case_root=)`、`Case.list_cases(case_root=)`、`c.info()` |
-| 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=)` -> `IngestReport` |
+| 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=)` -> `IngestReport`；`c.ingest_background(sources, workers=, keep_raw=, keep_staging=)` -> `job_id`；`c.job_status(job_id=)` -> `dict \| None`；`c.list_jobs()` -> `list[dict]` |
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
 | 原生 SQL | `c.query(sql)`、`c.query_chunks(sql, chunksize=)`、`c.db.table(name)`、`c.db.table_chunks(name, chunksize=)` |

@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-import uuid
 from pathlib import Path
 
 import typer
@@ -13,7 +9,7 @@ from ..case import Case
 from ..config import DEFAULT_CASE_ROOT
 from ..errors import CaseNotFoundError, NoSourcesFoundError
 from ..ingest.common import now_iso
-from ..ingest.jobs import job_log_path, jobs_dir, read_job_status, write_job_status
+from ..ingest.jobs import job_log_path, read_job_status, write_job_status
 from ._render import console
 
 
@@ -25,52 +21,17 @@ def _spawn_background_job(
     keep_staging: bool,
     case_root: Path,
 ) -> None:
-    job_id = str(uuid.uuid4())
-    case_dir = Path(case_root) / case_name
-
     try:
-        Case.open(case_name, case_root=case_root)
+        c = Case.open(case_name, case_root=case_root)
     except CaseNotFoundError:
-        Case.create(case_name, case_root=case_root)
+        c = Case.create(case_name, case_root=case_root)
 
-    jobs_dir(case_dir).mkdir(parents=True, exist_ok=True)
-    log_path = job_log_path(case_dir, job_id)
+    # Case.ingest_background() does the actual detached-subprocess spawn and
+    # initial status-file write -- this is the CLI's own front door to it,
+    # kept thin so the spawn logic has exactly one implementation.
+    job_id = c.ingest_background(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging)
+    log_path = job_log_path(c.case_dir, job_id)
 
-    args = [sys.executable, "-m", "seclogx.cli.main", "ingest", case_name]
-    for s in source:
-        args += ["--source", s]
-    if workers is not None:
-        args += ["--workers", str(workers)]
-    if keep_raw:
-        args += ["--keep-raw"]
-    args += ["--keep-staging" if keep_staging else "--no-keep-staging"]
-    args += ["--case-root", str(case_root), "--_job-id", job_id]
-
-    popen_kwargs: dict = {}
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    else:
-        # Detach from this process's session so the job survives the
-        # parent (this CLI invocation, and the terminal it ran in) exiting.
-        popen_kwargs["start_new_session"] = True
-
-    with open(log_path, "wb") as log_file:
-        subprocess.Popen(
-            args, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **popen_kwargs
-        )
-
-    write_job_status(
-        case_dir,
-        job_id,
-        {
-            "job_id": job_id,
-            "case_name": case_name,
-            "sources": source,
-            "phase": "scanning",
-            "started_at": now_iso(),
-            "updated_at": now_iso(),
-        },
-    )
     console.print(f"[green]Started background ingest job {job_id}[/green] for case '{case_name}'")
     console.print(f"  log: {log_path}")
     console.print(f"  check progress: seclogx ingest-status {case_name} {job_id}  (add --watch to follow it)")

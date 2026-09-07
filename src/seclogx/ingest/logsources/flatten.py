@@ -77,9 +77,13 @@ def flatten_table(
     # concurrent writers targeting the same new partition can race on
     # Windows, where the losing CreateDirectory call is an error. Python's
     # mkdir(exist_ok=True) handles this race, so initialize the finite set of
-    # partitions before COPY; this is a no-op for object storage.
-    partition_rows = con.execute(f"SELECT DISTINCT {partition_by} FROM ({select_query})").fetchall()
-    ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+    # partitions before COPY there. Enumerating them costs a second full
+    # pass over every staged file, so it's skipped on backends that don't
+    # have the race (POSIX local, and object storage, which has no
+    # directories at all) -- see StorageBackend.precreates_partition_dirs.
+    if backend.precreates_partition_dirs:
+        partition_rows = con.execute(f"SELECT DISTINCT {partition_by} FROM ({select_query})").fetchall()
+        ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
 
     (row_count,) = con.execute(
         f"""

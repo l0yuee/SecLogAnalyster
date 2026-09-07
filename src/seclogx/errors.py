@@ -28,6 +28,21 @@ class ResultTooLargeError(SeclogxError):
     pass
 
 
+class UnguardedMainError(SeclogxError):
+    """Raised when parallel staging can't start because the calling script
+    runs `Case.ingest()` at import time without an
+    `if __name__ == "__main__":` guard.
+
+    Worker processes are started with the 'spawn' method (see
+    distributed/queue.py for why), which re-imports the caller's `__main__`
+    module in each child. Without the guard, that re-import re-runs the
+    ingest itself, and Python aborts the pool with a bare
+    `BrokenProcessPool` that says nothing about the actual cause. This
+    error replaces it with the fix."""
+
+    pass
+
+
 class ClusterConfigError(SeclogxError):
     """Raised when distributed/cluster-mode configuration is missing or
     inconsistent for the operation being attempted (e.g. a cluster

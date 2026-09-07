@@ -91,7 +91,9 @@ def _run_in_foreground(c: Case, source, workers, keep_raw, keep_staging) -> None
         def on_progress(snapshot: dict) -> None:
             phase = snapshot.get("phase", "")
             if phase == "scanning":
-                detail = f"scanned {snapshot.get('files_scanned', 0)} files"
+                walked = snapshot.get("files_walked", 0)
+                classified = snapshot.get("files_scanned", 0)
+                detail = f"found {walked} files, classified {classified}"
             else:
                 staged = snapshot.get("evtx_staged", 0) + snapshot.get("aux_staged", 0)
                 discovered = snapshot.get("evtx_discovered", 0) + snapshot.get("aux_discovered", 0)

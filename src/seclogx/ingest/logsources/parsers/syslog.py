@@ -167,7 +167,8 @@ _SSH_DISCONNECT_RE = re.compile(
 )
 _SUDO_RE = re.compile(r"^\s*(?P<user>\S+)\s*:.*?\bCOMMAND=(?P<command>.*)$")
 _PAM_SESSION_RE = re.compile(r"pam_unix\([\w.-]+:session\):\s*session (?P<state>opened|closed) for user (?P<user>\S+)")
-_ACCOUNT_MGMT_TAGS = {"useradd", "userdel", "usermod", "groupadd", "groupdel", "passwd"}
+ACCOUNT_MGMT_TAGS = {"useradd", "userdel", "usermod", "groupadd", "groupdel", "passwd"}
+_ACCOUNT_MGMT_TAGS = ACCOUNT_MGMT_TAGS  # back-compat alias for the private name
 _ACCOUNT_USER_NAME_RE = re.compile(r"name=([^,\s]+)")
 _ACCOUNT_USER_QUOTED_RE = re.compile(r"'([^']+)'")
 
@@ -238,6 +239,25 @@ def _extract_one(app_name: str | None, message: str | None) -> dict | None:
         }
 
     return None
+
+
+# A SQL pre-filter that is a strict *superset* of what `_extract_one`
+# accepts, so pushing it down to DuckDB narrows the rows that have to be
+# materialized without changing the result by a single row. Every branch
+# of `_extract_one` requires one of these four things:
+#   - an app_name containing 'sshd'            (the OpenSSH branch)
+#   - an app_name of exactly 'sudo'            (the sudo branch)
+#   - an account-management app_name           (the shadow-utils branch)
+#   - the literal 'pam_unix(' in the message   (the PAM branch, any app)
+# Keep this in lockstep with `_extract_one` -- it may over-select freely,
+# but must never under-select.
+AUTH_EVENT_CANDIDATE_SQL = (
+    "lower(coalesce(app_name, '')) LIKE '%sshd%' "
+    "OR lower(coalesce(app_name, '')) = 'sudo' "
+    "OR lower(coalesce(app_name, '')) IN ("
+    + ", ".join(f"'{tag}'" for tag in sorted(ACCOUNT_MGMT_TAGS))
+    + ") OR coalesce(message, '') LIKE '%pam_unix(%'"
+)
 
 
 def extract_auth_events(df: pd.DataFrame) -> pd.DataFrame:

@@ -92,6 +92,9 @@ class CaseDB:
         # condition. Invalidated naturally whenever Case creates a fresh
         # CaseDB (post-ingest).
         self._json_object_columns_cache: dict[str, list[str]] = {}
+        # Likewise for DESCRIBE results (search.py's `_table_columns`),
+        # which field resolution needs once per search condition.
+        self._table_columns_cache: dict[str, list[tuple[str, str]]] = {}
         if self.backend.exists(self.lake_dir):
             for table_name in sorted(self.backend.table_dirs(self.lake_dir)):
                 table_location = self.backend.join(self.lake_dir, table_name)

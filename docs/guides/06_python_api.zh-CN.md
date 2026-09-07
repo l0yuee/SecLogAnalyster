@@ -9,6 +9,25 @@
 命令行能做的一切，都有对应的 Python API，且全程返回 `pandas.DataFrame` 对象——可以直接嵌入到你日常使用的 Jupyter notebook 与 pandas 分析流程中。下面用到的有界内存（`_chunks`）与
 `search()` 内存安全机制，完整讲解见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)。
 
+> **在 `.py` 脚本里调用 `ingest()`？请把它放在 `if __name__ == "__main__":`
+> 保护块里。** 导入过程会用 Python 的 `spawn`
+> 方式启动工作进程来并行暂存文件，而每个工作进程都会重新 import
+> 你的脚本——如果没有这个保护块，每个工作进程都会重新跑一遍导入，而不是各自承担一部分工作，Python
+> 随后会直接中止整个进程池。遇到这种情况时，`seclogx` 会抛出
+> `UnguardedMainError` 并说明原因。Notebook、交互式解释器以及 `seclogx`
+> 命令行都不受影响；`workers=1`（在调用方进程内暂存，不使用进程池）在任何环境下都可用。
+>
+> ```python
+> from seclogx import Case
+>
+> def main():
+>     c = Case.create("incident42")
+>     print(c.ingest(["/mnt/kape_output/WKS01:WKS01"]).summary_text())
+>
+> if __name__ == "__main__":
+>     main()
+> ```
+
 ```python
 from seclogx import Case
 

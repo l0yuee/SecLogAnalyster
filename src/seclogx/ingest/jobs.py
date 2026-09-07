@@ -34,6 +34,12 @@ PHASE_FLATTENING = "flattening"
 PHASE_DONE = "done"
 PHASE_FAILED = "failed"
 
+# Pipeline order, used to keep the reported phase monotonic while the two
+# concurrent pipelines report into one reporter (see
+# ProgressReporter.set_phase). The terminal phases are set directly by
+# finish(), which always wins.
+_PHASE_ORDER = {PHASE_SCANNING: 0, PHASE_STAGING: 1, PHASE_FLATTENING: 2}
+
 
 def jobs_dir(case_dir: Path) -> Path:
     return Path(case_dir) / JOBS_DIRNAME
@@ -106,6 +112,7 @@ class ProgressReporter:
     min_count_interval: int = 25
 
     phase: str = PHASE_SCANNING
+    files_walked: int = 0
     files_scanned: int = 0
     evtx_discovered: int = 0
     aux_discovered: int = 0
@@ -128,6 +135,7 @@ class ProgressReporter:
     def snapshot(self) -> dict:
         return {
             "phase": self.phase,
+            "files_walked": self.files_walked,
             "files_scanned": self.files_scanned,
             "evtx_discovered": self.evtx_discovered,
             "aux_discovered": self.aux_discovered,
@@ -152,12 +160,30 @@ class ProgressReporter:
             return
         self._last_emit_ts = now
         self._last_emit_count = total
-        self.on_update(self.snapshot())
+        try:
+            self.on_update(self.snapshot())
+        except Exception:  # noqa: BLE001
+            # Progress reporting must never take down the ingest it is
+            # reporting on: a full disk while writing the job status file,
+            # or a display that fails to render, would otherwise abort a
+            # long-running import that was itself succeeding.
+            pass
 
     def set_phase(self, phase: str) -> None:
         with self._lock:
-            self.phase = phase
+            # Both pipelines share one reporter and run concurrently, so
+            # the EVTX side can reach `flattening` while the aux side is
+            # still `staging`. Keep the reported phase monotonic rather
+            # than letting it flip backwards, which reads as the import
+            # having regressed.
+            if _PHASE_ORDER.get(phase, -1) >= _PHASE_ORDER.get(self.phase, -1):
+                self.phase = phase
             self._emit(force=True)
+
+    def on_walked(self, count: int) -> None:
+        with self._lock:
+            self.files_walked = count
+            self._emit()
 
     def on_scanned(self, count: int) -> None:
         with self._lock:

@@ -102,7 +102,18 @@ def _quote_ident(name: str) -> str:
 
 
 def _table_columns(db: CaseDB, table: str) -> list[tuple[str, str]]:
-    return [(row[0], row[1]) for row in db.connection.execute(f"DESCRIBE {_quote_ident(table)}").fetchall()]
+    """`(name, type)` for each of `table`'s columns.
+
+    Cached per CaseDB instance: `resolve_field` needs this for every
+    condition in a search, and DESCRIBE on a view over a Parquet glob makes
+    DuckDB re-read file metadata each time. A case's schema can't change
+    under an open CaseDB -- `Case` drops and rebuilds its CaseDB after an
+    ingest -- so the cache never goes stale."""
+    cached = db._table_columns_cache.get(table)
+    if cached is None:
+        cached = [(row[0], row[1]) for row in db.connection.execute(f"DESCRIBE {_quote_ident(table)}").fetchall()]
+        db._table_columns_cache[table] = cached
+    return cached
 
 
 def _declared_json_object_columns(table: str) -> list[str] | None:

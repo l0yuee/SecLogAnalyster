@@ -16,7 +16,7 @@ _TERMINAL_PHASES = ("done", "failed")
 def _print_status(status: dict) -> None:
     console.print(f"[bold]job {status.get('job_id')}[/bold]  phase={status.get('phase')}")
     console.print(
-        f"  scanned {status.get('files_scanned', 0)}  "
+        f"  walked {status.get('files_walked', 0)}  classified {status.get('files_scanned', 0)}  "
         f"discovered evtx={status.get('evtx_discovered', 0)} aux={status.get('aux_discovered', 0)}"
     )
     console.print(

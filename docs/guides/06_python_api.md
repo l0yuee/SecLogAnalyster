@@ -12,6 +12,27 @@ into a Jupyter notebook alongside your usual pandas analysis. For the
 bounded-memory (`_chunks`) and `search()` memory-safety mechanics used
 below, see [03. Querying & search](03_querying_and_search.md).
 
+> **Calling `ingest()` from a `.py` script? Put it under an
+> `if __name__ == "__main__":` guard.** Ingest stages files across worker
+> processes started with Python's `spawn` method, and each worker
+> re-imports your script -- without the guard, every worker re-runs the
+> ingest instead of doing its share, and Python aborts the pool.
+> `seclogx` raises `UnguardedMainError` telling you this if it happens.
+> Notebooks, the REPL, and the `seclogx` CLI are unaffected, and
+> `workers=1` (which stages in the calling process, no pool) works
+> anywhere.
+>
+> ```python
+> from seclogx import Case
+>
+> def main():
+>     c = Case.create("incident42")
+>     print(c.ingest(["/mnt/kape_output/WKS01:WKS01"]).summary_text())
+>
+> if __name__ == "__main__":
+>     main()
+> ```
+
 ```python
 from seclogx import Case
 

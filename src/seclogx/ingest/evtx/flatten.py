@@ -90,11 +90,16 @@ def flatten_case(
     """
 
     select_query = f"SELECT {select_sql} {from_sql}"
+    # Windows-only concurrent-CreateDirectory workaround; enumerating the
+    # partitions is a second full pass over every staged record, so it's
+    # skipped where the race doesn't exist -- see
+    # StorageBackend.precreates_partition_dirs and logsources/flatten.py.
     partition_columns = ("host", "channel")
-    partition_rows = con.execute(
-        f"SELECT DISTINCT {', '.join(partition_columns)} FROM ({select_query})"
-    ).fetchall()
-    ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+    if backend.precreates_partition_dirs:
+        partition_rows = con.execute(
+            f"SELECT DISTINCT {', '.join(partition_columns)} FROM ({select_query})"
+        ).fetchall()
+        ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
 
     (row_count,) = con.execute(
         f"""

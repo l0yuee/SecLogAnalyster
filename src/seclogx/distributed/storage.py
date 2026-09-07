@@ -20,6 +20,7 @@ boundary.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -83,6 +84,18 @@ class StorageBackend(ABC):
         """Prepare a fresh DuckDB connection to read/write this backend's
         locations. A no-op locally; installs+configures `httpfs` for S3."""
 
+    @property
+    def precreates_partition_dirs(self) -> bool:
+        """Whether a flatten must enumerate its partition values and
+        pre-create their directories before COPY (see
+        `ensure_hive_partition_dirs`).
+
+        Doing so costs a second full pass over the staged NDJSON --
+        measurably around a third of flatten time -- purely to work around
+        a Windows-only directory-creation race, so it's only worth paying
+        where that race exists."""
+        return False
+
 
 class LocalStorageBackend(StorageBackend):
     """Exactly today's behavior: plain `pathlib` operations against the
@@ -122,6 +135,15 @@ class LocalStorageBackend(StorageBackend):
 
     def copy_target(self, table_location: str) -> str:
         return table_location
+
+    @property
+    def precreates_partition_dirs(self) -> bool:
+        # Only Windows needs this: there, two concurrent COPYs creating the
+        # same new partition directory can fail the loser's CreateDirectory
+        # call. POSIX mkdir races are already benign (DuckDB tolerates
+        # EEXIST), so paying an extra full scan of every staged file there
+        # would buy nothing.
+        return os.name == "nt"
 
 
 class S3StorageBackend(StorageBackend):

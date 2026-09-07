@@ -429,22 +429,24 @@ not oversights -- documented so they're easy to revisit later.
   imports over time this is a small but unbounded amount of bookkeeping.
   Delete old ones manually if it matters.
 - **The `phase` field is coarse, not per-pipeline.** Since the EVTX and
-  aux pipelines now run concurrently (see below and
+  aux pipelines run concurrently (see below and
   [08. Performance & scale](guides/08_performance_and_scale.md)), one
   shared `phase` value (`scanning`/`staging`/`flattening`/`done`/`failed`)
-  approximates the more-advanced of the two pipelines' actual state rather
+  reports the more-advanced of the two pipelines' actual state rather
   than reporting each independently -- useful as a coarse progress signal,
-  not as an exact per-table ETA.
-- **The per-file hash-then-parse double read is unchanged.** Every
-  *matched* non-EVTX file is still read once in full to compute its
-  `file_sha256` (`ingest/logsources/stage.py`) and then read again by its
-  parser -- avoiding that would need every parser to compute the hash
-  incrementally while it reads, which touches every parser's read path.
-  Left as a known, understood cost rather than bundled into this round of
-  ingest-performance work; the dominant cost fixed here was the two
-  single-threaded, un-parallelized discovery/classification tree walks
-  (see [08. Performance & scale](guides/08_performance_and_scale.md)),
-  not this per-file 2x read.
+  not as an exact per-table ETA. It only ever moves forward (a slower
+  pipeline reporting `staging` after the other reached `flattening` no
+  longer drags the reported phase backwards), which means it can say
+  `flattening` while real staging work is still in flight.
+- **The per-file hash-then-parse double read is unchanged, and measured
+  not to matter.** Every *matched* non-EVTX file is read once in full to
+  compute its `file_sha256` (`ingest/logsources/stage.py`) and then read
+  again by its parser. Profiling a 600k-row ingest put the hashing at
+  **~1% of per-file staging time** -- the second read is served from the
+  OS page cache and SHA-256 is hardware-accelerated -- so this stays as-is
+  rather than being restructured through every parser's read path.
+  Recorded here because the 2x read is real and visible in the code, not
+  because it is a meaningful cost.
 - **`--background` only backgrounds the coordinator process.** In
   distributed mode, per-file parse work already runs on `seclogx worker`
   processes elsewhere; what blocked the terminal before was always the

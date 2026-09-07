@@ -41,7 +41,7 @@ from .ingest.jobs import (
 from .ingest.scan import scan_sources
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .ingest.logsources.parsers.task_baseline import classify_against_baseline
-from .ingest.logsources.parsers.syslog import extract_auth_events
+from .ingest.logsources.parsers.syslog import AUTH_EVENT_CANDIDATE_SQL, extract_auth_events
 from .query import DEFAULT_CHUNKSIZE, CaseDB
 from .search import Match, conditions_from_dicts, discover_fields
 from .search import search as _search
@@ -155,7 +155,11 @@ class Case:
         # single-threaded, before either pipeline's parallel workers get
         # anything to do, was the actual "stuck for hours" bottleneck this
         # feature addresses, not per-file parse throughput.
-        scan = scan_sources(specs, on_scanned=progress.on_scanned if progress else None)
+        scan = scan_sources(
+            specs,
+            on_scanned=progress.on_scanned if progress else None,
+            on_walked=progress.on_walked if progress else None,
+        )
         if progress:
             progress.set_discovered(len(scan.evtx_files), len(scan.aux_files))
             progress.set_phase(PHASE_STAGING)
@@ -637,8 +641,20 @@ class Case:
         (useradd/userdel/usermod/...) message shapes, structuring them
         into `event_type`/`user`/`source_ip`/... columns. Not a separate
         ingest table -- computed from already-ingested `syslog` rows, the
-        same way `suspicious_tasks()` derives from `scheduled_tasks`."""
-        return extract_auth_events(self.syslog())
+        same way `suspicious_tasks()` derives from `scheduled_tasks`.
+
+        The candidate rows are narrowed in SQL first (see
+        `AUTH_EVENT_CANDIDATE_SQL`, a strict superset of what the
+        heuristic accepts, so the result is identical) rather than pulling
+        the whole `syslog` table into one DataFrame: syslog is one of the
+        tables that realistically reaches many millions of rows, of which
+        auth-shaped lines are a small fraction."""
+        if "syslog" not in self.db.tables:
+            return extract_auth_events(pd.DataFrame())
+        candidates = self.db.sql(
+            f"SELECT * FROM syslog WHERE {AUTH_EVENT_CANDIDATE_SQL} ORDER BY time_created"
+        )
+        return extract_auth_events(candidates)
 
     def _log_type_table(self, table: str, log_type: str | None) -> pd.DataFrame:
         if log_type is None:

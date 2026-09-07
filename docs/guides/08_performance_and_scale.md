@@ -45,6 +45,30 @@
   split between them rather than doubled, so peak concurrent worker
   processes (and therefore peak memory) doesn't grow versus running one
   pipeline at a time.
+- That single walk uses `os.scandir` rather than `Path.rglob("*")` plus
+  `is_file()`, `resolve()` and `stat()` per entry. The latter costs three
+  or four syscalls per file (plus `resolve()`'s per-path-component
+  readlink walk) where scandir gets the entry type from the directory read
+  itself and needs one stat: **measured 4.6x faster on a 24,000-file
+  acquisition tree** with a warm cache, and the gap widens on cold,
+  network-mounted or spinning storage where syscall count dominates.
+  Cross-source dedup is now keyed by `(st_dev, st_ino)` from that stat
+  rather than by resolved path, which costs nothing extra and also catches
+  hard links. Symlink behavior is unchanged: a symlink to a log file is
+  followed and ingested, a symlinked *directory* is not descended into
+  (so a symlink cycle can't hang the walk). The walk also reports a
+  running file count as it goes, so the very first phase of a large ingest
+  is no longer silent.
+- Staging a parsed file writes its NDJSON through **one reused
+  `json.JSONEncoder`**. `json.dumps(row, ...)` with any non-default
+  keyword argument builds a fresh encoder per call and skips the module's
+  cached one, which profiling put in the top three costs of a
+  600k-row ingest. Combined with a hand-rolled Common Log Format
+  timestamp parser (`ingest/logsources/parsers/webaccess.py`) that reads
+  the fixed-width shape by slicing instead of `datetime.strptime` --
+  4.5x faster on that call, which happens once per access-log line, with
+  `strptime` kept as the fallback for unusual-but-valid variants -- this
+  cut **per-file staging CPU by ~22%** on the same benchmark.
 - `ingest` shows a **live progress display** in the foreground (current
   phase, files scanned so far, staged ok/partial/failed/unsupported
   counts, rows written per table) instead of producing no output until
@@ -58,6 +82,17 @@
   `ingest-status` read never sees a half-written file; the background
   job's captured stdout/stderr lands in the sibling `.log` file. See
   [05. CLI reference](05_cli_reference.md).
+- Flattening staged NDJSON into Parquet makes **one** pass over the data,
+  not two. DuckDB's `COPY ... PARTITION_BY` creates the Hive partition
+  directories itself, but two concurrent writers creating the same new
+  directory can race on Windows, so the partition values used to be
+  enumerated (`SELECT DISTINCT`, a full extra read and JSON-parse of every
+  staged file) and their directories pre-created before every COPY.
+  Measured at **~32% of flatten time**, paid on every platform to fix a
+  Windows-only race; it is now gated on
+  `StorageBackend.precreates_partition_dirs`, true only for local storage
+  on Windows. POSIX mkdir races are already benign and object storage has
+  no directories at all.
 - Querying and hunting run through DuckDB directly against the
   Hive-partitioned Parquet lake, which gives lazy, out-of-core execution
   with predicate pushdown: a query filtered to one host/channel/event
@@ -74,6 +109,16 @@
   `timeline`) uses this automatically for both `--out` and the console
   preview, so no CLI flag is needed to get the bounded-memory behavior
   there.
+- `.auth_events()` narrows `syslog` down to auth-shaped rows **in SQL**
+  before pulling anything into pandas (see `AUTH_EVENT_CANDIDATE_SQL`),
+  rather than materializing the whole table and filtering it row by row.
+  syslog is one of the families that realistically reaches many millions
+  of rows, of which SSH/sudo/PAM/account-management lines are a small
+  fraction, so the old shape risked exhausting memory on exactly the cases
+  where the view is most useful. The SQL filter is deliberately a strict
+  *superset* of what the heuristic accepts, so the result is identical --
+  pinned by a test that compares it against running the heuristic over the
+  full table.
 - `.search()` estimates a result's size before fetching it (`count(*)`,
   exact, plus a bytes-per-row figure from a small `LIMIT`-bounded sample,
   extrapolated to the full row count -- both steps bounded regardless of

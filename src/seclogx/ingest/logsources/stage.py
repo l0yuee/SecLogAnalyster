@@ -78,6 +78,16 @@ from .sniff import (
 # level 1 -- same tradeoff, same DuckDB-side transparency on read.
 _GZIP_LEVEL = 1
 
+# One reusable encoder for the staging hot path. `json.dumps(...)` with any
+# non-default keyword argument constructs a fresh JSONEncoder per call and
+# skips the module's cached one, which showed up as a top-three cost when
+# profiling a multi-hundred-thousand-row ingest; `_stage_qcloud_stream`
+# below already avoided it, and this is the same fix for the main path.
+# `default=str` matches what the main path has always passed: a value no
+# encoder handles natively (a stray datetime, say) is staged as its text
+# form rather than failing the whole file.
+_encode_json = json.JSONEncoder(default=str, ensure_ascii=False, separators=(",", ":")).encode
+
 _QCLOUD_STREAM_PARSERS = {
     KIND_QCLOUD_YDSERVICE: stream_qcloud_ydservice_file,
     KIND_QCLOUD_GO: stream_qcloud_go_file,
@@ -104,7 +114,7 @@ def _stage_qcloud_stream(
     record_count = 0
     error_count = 0
     parse_error: str | None = None
-    encode_json = json.JSONEncoder(ensure_ascii=False, separators=(",", ":")).encode
+    encode_json = _encode_json
 
     try:
         with gzip.open(
@@ -245,8 +255,7 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
         # paths (same scheme as ingest/evtx/stage.py).
         ndjson_path = _staging_path(cf, staging_dir, table)
         with gzip.open(ndjson_path, "wt", compresslevel=_GZIP_LEVEL, encoding="utf-8", newline="\n") as out:
-            for row in rows:
-                out.write(json.dumps(row, default=str, ensure_ascii=False, separators=(",", ":")) + "\n")
+            out.writelines(_encode_json(row) + "\n" for row in rows)
         ndjson_out = str(ndjson_path)
 
     return AuxStagedFile(

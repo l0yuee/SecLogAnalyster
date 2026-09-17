@@ -11,11 +11,10 @@ at which point one in-memory DataFrame for a whole table is the actual
 bottleneck, not the query engine. `.sql_chunks()`/`.table_chunks()` are
 the bounded-memory alternative: an iterator of DataFrame chunks, each
 independently small (bounded by `chunksize`, not by total result size),
-using DuckDB's `fetch_df_chunk()` rather than `fetchdf()`. Verified
-empirically: reading 5M rows via chunks added ~190MB of peak RSS,
-against ~2.7GB for `fetchdf()` on the same query -- the difference is
-bounded vs. proportional-to-data-size memory use, which is what actually
-matters at real-world log volumes.
+using DuckDB's `fetch_df_chunk()` rather than `fetchdf()`. Consume and
+discard each chunk to avoid accumulating the full result. Chunking limits
+the rows delivered to Python at once; row width and query execution can
+still require substantial memory.
 
 The lake is organized as one table per log family under `lake/<table>/`
 (`events` for Windows Event Log; `web_logs`, `web_error_logs`,

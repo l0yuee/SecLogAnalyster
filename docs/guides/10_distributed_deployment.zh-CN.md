@@ -14,10 +14,11 @@ S3 兼容的对象存储上，而不必局限于本地磁盘。
 
 开启集群模式改变的是两件事：
 
-1. **导入（ingest）。** 两条导入流水线（`.evtx`，以及非 EVTX
-   的各个日志族——计划任务/Web 日志/Exchange/syslog/auditd/journal）都会把各自的单文件解析任务交给一个任务队列去分发，而不是像本地模式那样交给本地进程池。在本地模式下，这个队列的行为其实就是今天的
+1. **导入（ingest）。** 两条导入通路（`.evtx`，以及非 EVTX
+   的各个日志族——计划任务/Web 日志/Exchange/syslog/auditd/journal/数据库/QCloud/注册表）都会把各自的单文件解析任务交给一个任务队列去分发，而不是像本地模式那样交给本地进程池。在本地模式下，这个队列的行为其实就是
    `ProcessPoolExecutor`。一旦配置了 broker，同样的任务就会被放入队列，供任意数量的 `seclogx worker`
-   进程（在任何位置）去认领执行。
+   进程认领执行，前提是这些进程能够访问来源和暂存路径。worker 解析并写出暂存分片；
+   协调端收到清单后读取分片，执行有界的 DuckDB 到 Parquet 转换。
 2. **Sigma 狩猎。** `seclogx hunt` 会用同样的方式把互不依赖的规则分发到各个 worker
    上执行，再把匹配结果合并回来。每条规则本身的查询早已与其他规则互不依赖，所以这只是一次纯粹的并行映射（map）——并不是为顺序执行路径之外另外实现了一套规则求值逻辑。
 
@@ -35,8 +36,12 @@ DuckDB 路径。
 ## 安装
 
 ```bash
-pip install -e ".[cluster]"
+conda activate python314
+python -m pip install -e ".[cluster]"
 ```
+
+本地 Python、CLI 和 Notebook 使用这个专用环境。仓库提供的 Linux 容器镜像有自己的解释器和依赖；
+协调端与 worker 应运行一致的 seclogx 版本。
 
 这会安装 `redis`、`rq`（任务队列）以及 `boto3`（用于 S3 元数据操作）——普通单机使用完全不需要它们，也不会导入它们。针对
 S3 的 Parquet 实际读写走的是 DuckDB 自带的 `httpfs`
@@ -44,9 +49,8 @@ S3 的 Parquet 实际读写走的是 DuckDB 自带的 `httpfs`
 
 ## 如何开启：环境变量
 
-集群模式完全通过环境变量激活——不存在任何新增的命令行参数。每一次运行
-`seclogx` 命令（以及以库方式调用 `Case`
-的每个方法）都会在运行时从环境变量中解析配置，因此导出下面这些变量，就是"如何开启集群模式"的全部内容：
+集群模式通过环境变量激活。运行 CLI 或创建、打开 `Case` 之前设置变量；`Case` 会保存解析后的配置，
+修改环境不会重新配置一个已经打开的对象。
 
 | 变量 | 默认值 | 含义 |
 |---|---|---|
@@ -56,19 +60,23 @@ S3 的 Parquet 实际读写走的是 DuckDB 自带的 `httpfs`
 | `SECLOGX_S3_ENDPOINT_URL` | 未设置 | 用于指向 MinIO 或其他 S3 兼容端点，而不是真正的 AWS S3。 |
 | `SECLOGX_S3_REGION` | 未设置 | 同时透传给 boto3 与 DuckDB 的 `httpfs`。 |
 
-S3 的**凭据永远不会被 seclogx 自身的配置读取**——它们走的是 boto3
-的标准凭据链（`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_DEFAULT_REGION`
-环境变量、实例角色（instance profile）、`~/.aws/credentials` 等），与任何基于
-boto3 的工具完全一样。seclogx 自身绝不会读取、保存或记录任何凭据信息。
+S3 凭据走 boto3 的标准凭据链（`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、实例角色、
+`~/.aws/credentials` 等）。`ClusterConfig` 不保存 AWS 凭据；存储后端通过 boto3 解析凭据，
+并将其配置到 DuckDB 连接供 S3 访问使用。
 
 存储与任务队列是两个相互独立的开关——你可以只启用 S3（单机导入、供多名分析师共享读取权限）而不配置
-broker，也可以只配置 broker（分布式导入/狩猎、查询仍在单机、数据湖仍在本地）。大多数真实的集群部署会同时使用两者，因为只有这样才能让多台
-worker 机器真正并发写入同一个数据湖。
+broker，也可以只配置 broker，并将文件系统数据湖以相同路径挂载给所有狩猎 worker。
+S3 只共享 Parquet 数据湖，不负责传输来源或暂存分片，也不会把转换工作分发给 worker。
 
-无论哪种模式下，`case.json` 和 `staging/`
-都会有意保留在案例 `--case-root` 所指向的本地/NFS
-挂载目录中。它们体积小，只是协调端（coordinator）用于导入记账的信息——不是需要扩展的部分，分布式
-worker 也不需要直接访问它们（原因见下文"实现原理"一节）。
+无论哪种模式下，`case.json`、`staging/` 和 `staging_aux/` 都保留在 `--case-root` 下。
+**协调端与导入 worker 必须以相同绝对路径共享来源和可写暂存目录。** 队列传递文件描述、路径和选项，
+不会通过 Redis 上传证据或返回文件内容。只在协调端容器挂载路径是不够的。跨平台路径表示也必须一致，
+因此 Linux 容器 worker 通常配合 Linux 容器协调端更容易配置。
+
+暂存保存解析后的数据集，体积可能很大。每条导入通路先完成暂存，再分组转换，没有磁盘背压。
+辅助来源默认 `auto`：达到 16 MiB 的来源文件使用 Arrow IPC/ZSTD，较小来源用 gzip NDJSON；
+EVTX 保持 NDJSON。即使 `keep_staging=False`，也要为共享暂存、Parquet 和临时文件预留空间，
+因为删除发生在转换成功之后。分布式狩猎还要求 worker 能够访问任务中指定的案例和自定义规则路径。
 
 ## `seclogx worker`
 
@@ -86,61 +94,69 @@ export AWS_SECRET_ACCESS_KEY=...
 seclogx worker
 ```
 
-它会阻塞并持续监听导入与狩猎两个队列，直到被杀死为止（也可以加
+它会阻塞并持续监听导入与狩猎两个队列，直到停止（也可以加
 `--burst`，处理完当前队列中已有的任务后立即退出——适合脚本化/CI
-场景下的验证）。想运行多少个就运行多少个，想放在多少台机器上就放多少台，只要都指向同一个
-broker 与同一份存储即可。
+场景下的验证）。进程和机器数量需要受内存、共享存储与 broker 能力约束，并使用一致的
+broker、存储配置和必要文件系统挂载。RQ worker 可使用仓库提供的 Linux 容器部署；
+本地 Windows 多进程支持不代表原生 Windows RQ worker 也受支持。
 
 ## 协调端：`seclogx ingest` / `seclogx hunt` / `seclogx cluster status`
 
 并不存在一个单独的"协调端（coordinator）"程序——它就是你一直在用的同一个
 `seclogx` 命令行工具，在分析师平时工作的任意位置运行（笔记本电脑、跳板机、CI
-任务），只需导出和 worker 相同的环境变量即可。一旦设置了
-`SECLOGX_BROKER_URL`，`seclogx ingest`/`seclogx hunt`
-就会改为把工作放入队列，而不是在本地启动进程池，并等待结果返回。
+任务），配置相同环境变量并挂载所需共享路径。设置 `SECLOGX_BROKER_URL` 后，单文件解析和
+狩猎任务进入 Redis/RQ；导入协调端等待暂存结束后仍要完成转换，需要自身的 CPU、内存和 I/O 资源。
 
 ```bash
-seclogx case init incident42 --case-root /shared/cases   # 或者数据湖直接建在 S3 上，见上文
-seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
-seclogx hunt incident42
+seclogx case init incident42 --case-root /shared/cases
+seclogx ingest incident42 --case-root /shared/cases \
+  --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01 \
+  --memory-limit 2GB --duckdb-threads 2 --staging-format auto
+seclogx hunt incident42 --case-root /shared/cases
 ```
+
+上述来源必须对每个导入 worker 可读，案例路径必须提供共享可写暂存。
+`--staging-chunk-bytes` 控制 worker 的分片目标；`--flatten-batch-bytes`、`--memory-limit`
+和 `--duckdb-threads` 控制协调端转换。`--workers` 是本地进程池预算，不限制 Redis worker 副本数。
+DuckDB 内存参数不是整个进程树的上限，`CONVERSION_LOCK` 也只串行化同一协调进程内的转换。
+
+当前 RQ 适配器提交任务时没有显式设置每个任务的超时或重试策略，使用已安装 RQ 的默认值；
+seclogx CLI 没有分布式任务超时覆盖参数。派发耗时较长的文件前需核对这一约束。
+任务失败会被报告，不会自动续跑。本地待执行任务数量的限制也不适用于 Redis 队列，后者当前一次性提交任务列表。
 
 另外两个命令是集群模式特有的：
 
-- **`seclogx cluster config`** —— 打印当前解析出的配置（其中不含任何凭据信息，因为凭据本来就不会经过
-  `ClusterConfig`）。可用于确认某台机器是否真的读取到了你期望它读取的环境变量。
+- **`seclogx cluster config`** —— 打印当前解析出的配置（`ClusterConfig` 不包含 AWS 凭据，
+  但 broker URL 本身可能包含凭据）。可用于确认某台机器是否读取了预期环境变量。
 - **`seclogx cluster status`** —— 在配置了 broker
   的情况下，报告当前有多少个 `seclogx worker`
   进程在线，以及两个队列各自排队中的任务数。如果没有配置 broker，它会明确说明这一点并正常退出（没有集群可供报告）。
 
 ## Docker Compose 与 Kubernetes
 
-`deploy/docker-compose.yml` 是一个可以直接在单机上跑起来的集群演示环境（Redis
+`deploy/docker-compose.yml` 提供单机集群服务演示（Redis
 + MinIO + 一个可伸缩的 `worker` 服务）——完整操作步骤见
-`deploy/README.md`。`deploy/k8s/worker-deployment.yaml` 是面向 worker
+`deploy/README.md`，导入前须按其中说明补齐共享挂载。`deploy/k8s/worker-deployment.yaml` 是面向 worker
 集群的 Kubernetes `Deployment`（有意只覆盖 worker
 本身——Redis 与 S3 兼容存储需要自行提供，这与大多数真实部署环境本来就已经具备这两项服务的情况是一致的）。二者的完整说明都在
 `deploy/README.md` 中；本指南是它们的叙述性说明，不重复其中的内容。
 
-## 加锁：为什么 S3 存储/多机场景即便只关心存储，也建议配置 broker
+## 加锁与并发写入
 
-`case.json` 的读取-修改-写入过程（导入记账：已见过的主机、历次运行记录）现在始终受锁保护——这修复的是一个真实存在、且在集群模式出现之前就已存在的问题（两次针对同一案例的
-`seclogx ingest` 运行发生竞争时，曾经可能悄悄丢失其中一次运行的记账信息），而不仅仅是集群模式才需要关心的问题。在单机上，或者案例目录位于普通本地磁盘时，这里用的是一个纯本地、不依赖额外第三方库的文件锁。一旦配置了
-broker，则改用基于 Redis
-的锁——通过网络文件系统实现的 POSIX
-文件锁并不足以可靠地协调真正相互独立的多台机器，而分布式部署本来就需要
-Redis 来支撑任务队列，用它顺带提供跨机器锁，不需要额外的基础设施成本。**如果会有多台机器针对同一个案例并发运行
-`seclogx ingest`——即便你只关心共享的 S3
-存储，并不关心分布式解析——也请同时配置 `SECLOGX_BROKER_URL`**，这样这里的加锁机制才能真正做到跨机器安全。
+`case.json` 更新使用本地文件锁；配置 broker 后改用 Redis 锁。它只保护元数据的读取、修改和写入，
+不覆盖整个导入操作，也不提供跨次去重、回滚、数据湖原子发布或一致查询快照。
+应协调同一 Case 同时只有一个导入写入方，完成后再分析。不同协调端和后台任务不共享
+`CONVERSION_LOCK`，增加 broker 也不会让并发写入成为事务。Redis 锁的标识包含解析后的案例路径，
+因此不同机器的挂载路径也需要一致。
 
 ## 实现原理（供感兴趣的读者，或排查问题时参考）
 
 - `src/seclogx/distributed/config.py` —— `ClusterConfig`，从上面这些环境变量解析而来。
 - `src/seclogx/distributed/storage.py` —— `StorageBackend`
   （`LocalStorageBackend`/`S3StorageBackend`），被 `CaseDB`
-  以及两条导入流水线 flatten 步骤中每一个涉及 `lake/` 的操作所使用。
+  以及两条导入通路 flatten 步骤中每一个涉及 `lake/` 的操作所使用。
 - `src/seclogx/distributed/queue.py` —— `JobQueue`
-  （`LocalJobQueue`/`RQJobQueue`），被两条导入流水线的编排逻辑，以及
+  （`LocalJobQueue`/`RQJobQueue`），被两条导入通路的编排逻辑，以及
   `detect/hunt.py` 中的分布式扇出路径所使用。
 - `src/seclogx/distributed/locking.py` —— 上文提到的 `case.json` 锁。
 - `src/seclogx/cli/worker_cmd.py` / `src/seclogx/cli/cluster_cmds.py` ——

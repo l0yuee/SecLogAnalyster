@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ..common import StageStatus, now_iso  # noqa: F401 (re-exported for existing importers)
+from ..staging import StagedChunk
 
 
 @dataclass
@@ -28,6 +29,9 @@ class AuxStagedFile:
     error_message: str | None
     ndjson_path: str | None = None
     staged_at: str = ""
+    chunks: list[StagedChunk] = field(default_factory=list)
+    # None means legacy/unknown or collection exceeded its bounded budget.
+    partition_rows: list[tuple[str | None, ...]] | None = None
 
 
 @dataclass

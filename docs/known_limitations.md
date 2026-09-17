@@ -1,10 +1,27 @@
 # Known limitations (v1)
 
-These are deliberate v1 scope decisions or empirically-discovered edge cases,
-not oversights -- documented so they're easy to revisit later.
+These are current scope boundaries and known edge cases, documented so
+analysts can distinguish supported behavior from remaining gaps.
 
 ## Ingestion / schema
 
+- **Discovery is not a complete evidence inventory.** The scan filters
+  empty auxiliary files and configured non-log suffixes before content
+  classification. Inaccessible entries/directories can be skipped when
+  `stat` or directory enumeration raises `OSError`; those omissions do
+  not each receive a failed-file manifest entry. The `unknown` count
+  covers files actually submitted to classification, not every path
+  present under a source root.
+
+- **Non-EVTX timestamp columns normalize explicit ISO offsets to UTC.**
+  A timestamp ending in `Z`/`z`, `+08:00`, or `-0330` is stored as a UTC
+  `TIMESTAMP` without a timezone marker, preserving microseconds. A source
+  timestamp without an offset retains its wall-clock value; no timezone
+  is guessed. Invalid timestamps become NULL. The result does not depend
+  on staging shard boundaries or the DuckDB session timezone, and plain
+  text fields that happen to resemble timestamps retain their original text.
+  Existing Parquet files are not rewritten by this change; it applies to
+  new imports. Re-importing into an existing case can append duplicate rows.
 - **`UserData`-based providers are stored but not field-flattened.** Many
   providers (RDP `TerminalServices-RemoteConnectionManager`, some Task
   Scheduler and Defender events) use `UserData` instead of `EventData`.
@@ -14,19 +31,15 @@ not oversights -- documented so they're easy to revisit later.
   is still stored in `event_data` and is fully covered by
   `CaseDB.search()` (full-text ILIKE), but per-field Sigma mapping
   (`detect/pipeline.py`) currently only targets `EventData`-style fields.
-- **A small number of records can have a NULL `channel`.** Observed
-  empirically (3 out of ~102k records across real sample data) on
-  malformed/edge-case source records where the `Channel` element itself
-  is absent. Handled gracefully (no crash, included in query results) but
-  not root-caused further since it's a data-quality property of the
-  source file, not a parser bug.
-- **`--keep-raw` builds an in-memory index of a file's raw XML** (keyed by
-  record id) before merging it into the NDJSON output, to stay correct
-  even if the XML and JSON parses of the same file diverge on a corrupt
-  chunk. This trades peak memory for correctness during staging of that
-  file -- acceptable given `--keep-raw` is an explicit opt-in for
-  evidentiary completeness on a specific case, not the default path.
-- **A corrupted chunk aborts the rest of a file's parse.** Empirically,
+- **Records can have a NULL `channel`.** Source records with no
+  `Channel` element remain in query results with NULL in that column.
+- **`--keep-raw` uses a temporary SQLite index of raw XML**, keyed by
+  record ID and queried during the JSON pass. It no longer retains all
+  XML in a Python dictionary, but still adds a parse, index I/O and
+  temporary disk space. XML capture is best effort on corrupt chunks;
+  the JSON recovery pass remains authoritative and some raw XML can be
+  absent. Use it when XML fidelity is needed, not as a free option.
+- **A corrupted chunk can abort the rest of an EVTX file's parse.**
   `PyEvtxParser.records_json()` raises at the generator level on a bad
   chunk rather than yielding a per-record error object, so a corrupted
   chunk partway through a file means the rest of that file is lost even
@@ -48,9 +61,11 @@ not oversights -- documented so they're easy to revisit later.
   Security EventID 4688 -- deliberate, since most Sigma rules for these
   categories are written against Sysmon's field set (`Image`,
   `CommandLine`, `ParentImage`, ...) which mostly doesn't exist on native
-  Security events by default. See `detect/pipeline.py` `LOGSOURCE_ROUTES`.
+  Security events by default. PowerShell's `ps_script`/`ps_module` are
+  separate routes to its Operational channel (4104/4103), not Sysmon.
+  See `detect/pipeline.py` `LOGSOURCE_ROUTES`.
 - **`DuckDBBackend` field expressions are parenthesized deliberately.**
-  Empirically, DuckDB's `->`/`->>` JSON operators do not bind as tightly
+  DuckDB's `->`/`->>` JSON operators do not bind as tightly
   as expected against `LIKE ... AND ...` in a compound WHERE clause --
   an unparenthesized `event_data ->> 'Image' LIKE '...' AND ...`
   expression can misparse and fail at execution time with a confusing
@@ -64,6 +79,11 @@ not oversights -- documented so they're easy to revisit later.
   conversion explicitly (reported by `seclogx rules validate` / a hunt's
   failure list) rather than silently producing an incorrect query.
 - **Sigma correlation rules are not supported.**
+- **Hunt results are collected in memory.** Each rule uses `fetchdf()`;
+  matching frames are retained and concatenated. There is no chunked
+  hunt API or `search()` size guard, and distributed workers return
+  these frames to the coordinator. `IngestOptions` does not configure
+  query/hunt connections or cap pandas memory.
 - **The bundled ATT&CK lookup (`data/attack/techniques.json`) is a small,
   hand-curated table** covering only the techniques referenced by the
   bundled Sigma rules -- not the full ATT&CK framework, and not fetched
@@ -78,7 +98,8 @@ not oversights -- documented so they're easy to revisit later.
   unusually-truncated or nonstandard log header can be misclassified as
   `unknown` and reported as unrecognized rather than ingested (see
   `AuxIngestReport.unknown_samples` / the ingest summary's "files
-  unrecognized" count -- never silent).
+  unrecognized" count). Discovery exclusions described above happen
+  before this classification/reporting step.
 - **Legacy `.job` Scheduled Tasks (pre-Vista binary format) are not
   parsed.** Only the modern Task Scheduler 2.0 XML format
   (`C:\Windows\System32\Tasks\**`) is supported.
@@ -88,9 +109,10 @@ not oversights -- documented so they're easy to revisit later.
   safely parse it -- legitimate Task Scheduler exports never contain one.
 - **Text/XML decoding tries UTF-8, UTF-16, then GB18030 (a superset of
   GBK/GB2312) before an always-succeeds Latin-1 fallback**
-  (`textdecode.decode_text`, used by every aux parser including
-  Scheduled Tasks XML, and by Sigma rule loading -- see below). This
-  covers Simplified/Traditional Chinese-locale content and binary-ish
+  (`textdecode.decode_text` for small documents and
+  `textdecode.iter_text_lines` for streaming logs; QCloud only considers
+  UTF-16 when a BOM is present). This
+  covers many Chinese-locale inputs and binary-ish
   data without crashing, but is still a best-effort guess, not real
   charset detection -- content in an encoding outside this list (e.g.
   Shift-JIS, Big5, KOI8-R) can still decode as readable-looking but wrong
@@ -160,8 +182,9 @@ not oversights -- documented so they're easy to revisit later.
   rather than a misparse.
 - **A Tomcat log entry's attached stack trace is capped at 200 continuation
   lines** (`weberror._TOMCAT_MAX_CONTINUATION_LINES`) to bound memory on a
-  pathological case; lines beyond the cap are counted as parse errors for
-  that file rather than silently appended or dropped.
+  pathological case. Exceeding the limit raises `TextRecordTooLargeError`;
+  the oversized current entry is not emitted with a truncated stack trace.
+  Completed earlier entries can be retained with a `partial` file status.
 - **Unlike access logs, nginx/Apache/Tomcat error-log format is
   engine-specific and unambiguous** -- `log_type` in `web_error_logs` is a
   real detection (a distinct regex per engine in `sniff.py`), not the
@@ -236,7 +259,7 @@ not oversights -- documented so they're easy to revisit later.
 - **Not a live merged registry.** seclogx does not simulate a running
   Windows OS's in-memory registry (no `HKLM`/`HKCU` aliasing, no
   volatile/`HKEY_CURRENT_CONFIG` keys, no class-name resolution). Every
-  discovered hive file is parsed completely and normalized into the
+  discovered hive is traversed and recoverable records are normalized into the
   `registry` table rooted at its own real logical path (`hive_root` +
   `key_path`, e.g. `HKEY_LOCAL_MACHINE\SOFTWARE\...`,
   `HKEY_USERS\<user>\...`) -- the standard way forensic registry tools
@@ -250,8 +273,9 @@ not oversights -- documented so they're easy to revisit later.
   sibling `.LOG1` file is found next to a hive, seclogx tries to replay
   it (and `.LOG2`, if present) before parsing; if that fails for any
   reason (missing/corrupted log, unsupported log format), it falls back
-  to parsing the raw hive as collected -- reported explicitly via
-  `registry.transaction_log_applied = False`, not silently. A hive
+  to parsing the raw hive as collected.
+  `registry.transaction_log_applied = False` means recovery was not
+  applied; it does not distinguish missing logs from replay failure. A hive
   collected "dirty" (writes pending in a transaction log that couldn't be
   replayed) may be missing its most recent changes.
 - **Hive-type identification trusts the hive's own embedded original
@@ -277,12 +301,14 @@ not oversights -- documented so they're easy to revisit later.
   bytes) can trivially read as "high entropy" purely from sample-size
   noise; `suspicious_registry()`'s `min_size` parameter (default 32
   bytes) exists specifically to filter that noise out before flagging.
-- **`value_data_hex` is capped at 8KB of hex text for storage** (a
+- **`value_data_hex` stores at most the first 8 KiB of raw bytes as
+  16,384 hexadecimal characters** (a
   pathologically large payload's hex isn't stored in full), but
-  `entropy`/`value_size` are always computed from the complete,
-  uncapped raw bytes first -- the analysis-relevant numbers are never
-  affected by the storage cap, only how much of the raw hex you can page
-  through directly in that column.
+  a binary value's `entropy`/`value_size` use the complete, uncapped bytes.
+  For decoded strings/multi-strings, `value_size` is calculated from
+  UTF-16 text lengths; it is not an exact original hive-cell byte count.
+  Corrupt value/subkey iterators that end before their declared count
+  mark the source partial; recovered records remain available.
 
 ## Linux log ingestion (syslog / auth.log / auditd / systemd journal)
 
@@ -407,7 +433,7 @@ not oversights -- documented so they're easy to revisit later.
   `memcheck.available_memory_bytes()` tries `/proc/meminfo` (Linux),
   `os.sysconf` (POSIX, coarser), then `GlobalMemoryStatusEx` (Windows);
   on a platform/environment where none of those work, it returns `None`,
-  and `fits_in_memory()` falls back to a fixed 200MB absolute cap rather
+  and `fits_in_memory()` falls back to a fixed 200 MiB absolute cap rather
   than assuming unlimited memory.
 
 ## Background ingest jobs and progress reporting
@@ -428,8 +454,8 @@ not oversights -- documented so they're easy to revisit later.
   `cases/<name>/jobs/` indefinitely; on a case with many background
   imports over time this is a small but unbounded amount of bookkeeping.
   Delete old ones manually if it matters.
-- **The `phase` field is coarse, not per-pipeline.** Since the EVTX and
-  aux pipelines run concurrently (see below and
+- **The `phase` field is coarse, not per-pipeline.** When EVTX and
+  aux pipelines run concurrently under a workers budget above one (see below and
   [08. Performance & scale](guides/08_performance_and_scale.md)), one
   shared `phase` value (`scanning`/`staging`/`flattening`/`done`/`failed`)
   reports the more-advanced of the two pipelines' actual state rather
@@ -438,15 +464,16 @@ not oversights -- documented so they're easy to revisit later.
   pipeline reporting `staging` after the other reached `flattening` no
   longer drags the reported phase backwards), which means it can say
   `flattening` while real staging work is still in flight.
-- **The per-file hash-then-parse double read is unchanged, and measured
-  not to matter.** Every *matched* non-EVTX file is read once in full to
-  compute its `file_sha256` (`ingest/logsources/stage.py`) and then read
-  again by its parser. Profiling a 600k-row ingest put the hashing at
-  **~1% of per-file staging time** -- the second read is served from the
-  OS page cache and SHA-256 is hardware-accelerated -- so this stays as-is
-  rather than being restructured through every parser's read path.
-  Recorded here because the 2x read is real and visible in the code, not
-  because it is a meaningful cost.
+- **Text preparation and parsing still require separate reads.**
+  Normal UTF-8 text logs combine SHA-256 and strict whole-file encoding
+  validation in one bounded pass, then parse in a second pass. If UTF-8
+  fails, hashing still finishes and remaining encoding candidates are
+  validated in their original order; UTF-8 is not retried. Scoped reuse
+  matches both path and decoding policy. Identity, size and timestamps
+  detect ordinary source changes, not an immutable evidence snapshot.
+  Preparation read/change errors report a failed source; changes detected
+  during parsing are fatal. EVTX, Registry and task XML retain separate
+  hash/read paths. Storage and page-cache behavior affect all these costs.
 - **`--background` only backgrounds the coordinator process.** In
   distributed mode, per-file parse work already runs on `seclogx worker`
   processes elsewhere; what blocked the terminal before was always the
@@ -474,15 +501,17 @@ not oversights -- documented so they're easy to revisit later.
   `seclogx ingest` against the same case concurrently** -- `case.json`'s
   locking falls back to a Redis-based lock once a broker is configured,
   which is what makes concurrent multi-machine writers to the same case
-  safe; a plain local file lock (used when no broker is configured) isn't
+  safe from lost metadata updates; this is not a lake transaction or a
+  consistent query snapshot. A plain local file lock (used when no broker is configured) isn't
   a reliable cross-machine coordination mechanism over a network
   filesystem.
 - **`case.json`, `staging/`, and `logs/` are never moved to S3, in any
   mode.** Only `lake/` (the Parquet payload) is affected by
   `SECLOGX_STORAGE_BACKEND` -- case metadata and ingest-time scratch space
   stay on whatever local/NFS directory `--case-root` points at. This is a
-  deliberate scope boundary, not a gap: they're small, coordinator-only
-  bookkeeping, not what needs to scale.
+  deliberate scope boundary. Metadata is small, but staging can contain
+  the full converted evidence set and must be reachable by parsing
+  workers. Budget shared/local disk capacity accordingly.
 - **`.sql()`/`.table()` (and the `Case` accessors built on them --
   `web_logs()`, `events()`, `timeline()`, etc.) materialize the entire
   result as one pandas DataFrame.** DuckDB's query execution underneath is
@@ -492,35 +521,87 @@ not oversights -- documented so they're easy to revisit later.
   case, well past what fits in memory as one DataFrame. Every such
   accessor has a `_chunks` sibling (`sql_chunks()`/`table_chunks()`,
   `query_chunks()`, `web_logs_chunks()`, `timeline_chunks()`, ...)
-  returning an `Iterator[pd.DataFrame]` instead, with memory bounded by
-  `chunksize` rather than total result size -- use these for any table or
+  returning an `Iterator[pd.DataFrame]` instead, with result delivery
+  limited to approximately `chunksize` rows at a time -- use these for any table or
   query not already known to be small. The CLI (`query`/`table`/`tasks`/
   `timeline`) uses the chunked path automatically for both `--out` and
-  the console preview.
-- **Most ingest is bounded-memory per file; EVTX and Tencent Cloud client
-  logs are fully streaming.** Both pipelines stage each file to NDJSON on disk
-  and bulk-flatten via DuckDB reading straight off disk, so coordinator
-  memory during ingest is bounded by (one file's parse footprint) x
-  `--workers`, not by total batch size -- see "Why not Dask" in
-  `docs/architecture.md` for the mechanism. EVTX and Tencent Cloud text
-  logs stream directly to staging (the latter retains only one pending
-  logical record for continuation-line handling), so their peak memory is
-  independent of source-file size. Other non-EVTX parsers still read one
-  whole file into memory, so a single individual file large enough on its
-  own to exceed available memory remains a per-file risk. A large `SOFTWARE` hive from
-  a busy, long-lived machine is a concrete, realistic case of this (not
-  just a hypothetical pathological one) -- it can hold hundreds of
-  thousands of values, all parsed into one Python list before staging.
-- **Staged NDJSON (`staging/`, `staging_aux/`) is gzip-compressed and kept
-  by default, trading some ingest CPU time for a much smaller on-disk
-  case relative to an uncompressed-and-kept staging directory.** Without
+  the console preview. Row width, retaining/concatenating chunks, and
+  DuckDB's execution state can still exhaust memory; chunked delivery
+  is not a query RSS limit. Derived heuristics and Sigma hunts are not
+  all covered by this chunked-accessor contract.
+- **Streaming ingest does not impose a total-process memory ceiling.**
+  Text-log and registry parsers emit completed rows to bounded Arrow IPC
+  or gzip NDJSON staging;
+  direct parser calls without `emit` retain the full-list compatibility
+  API. Registry traversal uses a seekable file-backed hive instead of
+  copying the complete hive into memory. Regipy transaction-log recovery
+  still uses its potentially in-memory path, and an individual large
+  registry value can allocate substantial memory. The adapter relies on
+  regipy internals and its tests must be retained when upgrading regipy.
+  Scheduled Task XML remains a whole-document parser, with an 8 MiB
+  document limit enforced by ingest.
+- **Record limits are explicit; large source files are not excluded.**
+  The old 2 GiB non-EVTX source-file exclusion has been removed. Physical
+  text lines are bounded at 8 Mi characters. Exchange/Tomcat logical
+  records have an 8 Mi-character limit; database logical records also
+  limit characters and line count (Oracle retains a 200-continuation-line
+  bound). QCloud limits a logical record to 4 Mi characters or 100,000
+  lines. CSV retains Python's field limit (normally 128 Ki characters),
+  with an explicit exception on excess. Tomcat's 200-continuation-line
+  bound raises before the incomplete current entry is emitted. Encoding
+  after validation is strict; no replacement characters are silently
+  inserted to handle later decode failures. QCloud requires a BOM before
+  trying UTF-16; other text parsers preserve the legacy trial order.
+- **`IngestOptions` limits each conversion's work, not total RSS.**
+  Defaults are `memory_limit="2GB"`, `threads=2`,
+  `staging_chunk_bytes=64 * 1024 * 1024` and
+  `flatten_batch_bytes=256 * 1024 * 1024`, with `staging_format="auto"`.
+  Auxiliary sources at least 16 MiB use Arrow/ZSTD1; smaller sources use
+  gzip NDJSON, and either format can be explicitly selected. EVTX staging
+  is unchanged. Arrow also uses a fixed 1 MiB output buffer per active
+  staging writer. Byte targets use uncompressed JSON or Arrow buffer sizes.
+  Shards/records are indivisible and may exceed a target;
+  encoded records over 32 MiB are rejected. DuckDB's memory limit covers
+  one conversion instance's managed allocations, not Python objects,
+  parsing workers, native-library allocations or concurrent processes.
+  `CONVERSION_LOCK` serializes ingest conversions in one coordinator or
+  Notebook process, but not across independent processes or machines.
+  Local `workers` is a total parsing budget across both pipelines;
+  `workers=1` runs them serially in the calling process.
+- **Windows partition metadata is an optimization, not another schema.**
+  Auxiliary staging collects canonical partition text before path escaping,
+  limited to 4,096 distinct tuples / 1 MiB of encoded values per source.
+  Missing legacy metadata, unsupported value types or exceeded limits
+  fall back to DuckDB's `SELECT DISTINCT` scan before directory creation.
+  That fallback's result depends on partition cardinality; EVTX retains
+  its own partition scan.
+- **Staging still finishes before flattening within each pipeline.**
+  Batch-isolated temporary directories prevent unrelated runs from
+  overwriting staging files, and flatten handles bounded groups of
+  shards. The local file-task queue has a pending-task bound, but there
+  is no immediate flatten/disk-space backpressure pipeline. Staging disk
+  usage can grow with the complete input, and discovery/manifest memory
+  grows with file and shard count.
+- **Resume, cross-run idempotency and query snapshots are not provided.**
+  Re-importing evidence can append duplicates; a failure after earlier
+  flatten groups were written can leave partial data in the lake. Unique
+  output filenames, metadata locking and isolated scratch space do not
+  constitute an atomic dataset commit. Arrow IPC staging is supported,
+  but still produces intermediate files before the final Parquet conversion.
+  No fixed throughput/RSS guarantee applies across arbitrary data sizes,
+  formats or machines; EVTX native parsing and Registry recovery have
+  additional format-specific resource requirements.
+- **Staging is compressed and kept by default: gzip level 1 for NDJSON,
+  ZSTD level 1 for Arrow IPC.** This trades ingest CPU time for a smaller on-disk
+  case relative to an uncompressed-and-kept staging directory. Without
   compression, a case directory could land at several times the source
   evidence's size -- rendered-as-JSON EVTX records alone run considerably
   larger than the source binary `.evtx`, and staging is additive on top
   of the already-compressed Parquet lake. This is a memory/disk/speed
   three-way tradeoff, not a solved problem: `--no-keep-staging` cuts disk
-  further (at the cost of needing to re-ingest, not just re-flatten, to
-  recover from a bad flatten), and gzip level 1 was chosen to bias toward
+  after successful conversion (not the peak during ingestion), at the cost
+  of needing to re-ingest, not just re-flatten, to
+  recover from a bad flatten. Level 1 compression was chosen to bias toward
   ingest speed over maximum compression ratio. See "Performance and scale
   notes" in [08. Performance & scale](guides/08_performance_and_scale.md)
   for the full tradeoff and the companion fix (unrecognized files, e.g.

@@ -13,7 +13,32 @@ shown as `seclogx search` / `Case.search()` equivalents -- the same
 pattern (condition dicts instead of a `WHERE` clause) applies to every
 recipe below, and to every table, not just `events`.
 
-**Find LOLBin abuse (process spawned by an unusual parent):**
+Run local Python and JupyterLab from `conda activate python314`, and select
+the `python314` kernel. `c.query()` returns a complete DataFrame: filter,
+aggregate or add a SQL `LIMIT` before fetching a preview. Calling pandas
+`.head()` after an unbounded fetch does not reduce the fetch's memory cost.
+For a complete large result, consume `c.query_chunks(sql, chunksize=100_000)`
+one chunk at a time without collecting the chunks into a list or concatenating
+them. SQL scans, sorting and aggregation still have their own resource cost.
+
+A small result is a useful first check after a large import:
+
+```python
+c.query("SELECT status, count(*) AS n FROM web_logs GROUP BY status ORDER BY status")
+c.query("""
+    SELECT client_ip, count(*) AS n FROM web_logs
+    WHERE status >= 400 AND status < 600
+    GROUP BY client_ip ORDER BY n DESC LIMIT 10
+""")
+```
+
+The detail queries below intentionally describe matching records; use a
+host/time filter and a preview limit, or the chunked API, when the matching
+set can be large. `auth_events()` narrows candidates in SQL but materializes
+the candidates and derived results; the hunt and suspicion helpers also
+return DataFrames and are not general streaming result APIs.
+
+**Inspect rundll32 executions and their parent processes for possible LOLBin abuse:**
 
 ```sql
 SELECT time_created, host, computer,
@@ -110,7 +135,7 @@ r.matches[["time_created", "host", "sigma_rule_title", "sigma_attack_ids"]].sort
 ```sql
 SELECT host, log_type, time_created, client_ip, method, uri_stem, status
 FROM web_logs
-WHERE status >= 400
+WHERE status >= 400 AND status < 600
 ORDER BY time_created
 ```
 
@@ -237,8 +262,13 @@ ORDER BY time_created
 failures/errors across every engine at once:**
 
 ```python
-slow = c.db_logs(log_type="mysql_slow").sort_values("rows_examined", ascending=False)
-slow[["time_created", "host", "user_name", "client_address", "query_time_sec", "rows_examined", "message"]].head(20)
+slow = c.query("""
+    SELECT time_created, host, user_name, client_address,
+           query_time_sec, rows_examined, message
+    FROM db_logs WHERE log_type = 'mysql_slow'
+    ORDER BY rows_examined DESC NULLS LAST LIMIT 20
+""")
+slow
 ```
 
 ```sql
@@ -255,7 +285,11 @@ encoded/packed payloads stashed in a value), and a quick persistence
 sweep:**
 
 ```python
-c.registry().query("entropy > 7.5 and value_size >= 64").sort_values("entropy", ascending=False)
+c.query("""
+    SELECT host, hive_type, full_path, value_name, entropy, value_size
+    FROM registry WHERE entropy > 7.5 AND value_size >= 64
+    ORDER BY entropy DESC LIMIT 100
+""")
 
 c.suspicious_registry()[["host", "full_path", "value_name", "suspicion_reasons"]]
 ```

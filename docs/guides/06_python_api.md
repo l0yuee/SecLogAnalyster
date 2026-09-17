@@ -6,11 +6,100 @@
 
 ---
 
-Everything the CLI does is available as a plain Python API, returning
-`pandas.DataFrame` objects throughout -- built for dropping straight
-into a Jupyter notebook alongside your usual pandas analysis. For the
+The Python API provides DataFrames, chunk iterators, ingest reports and job
+status objects for Jupyter and scripts. For the
 bounded-memory (`_chunks`) and `search()` memory-safety mechanics used
 below, see [03. Querying & search](03_querying_and_search.md).
+
+## Notebook environment
+
+Use the project's dedicated conda `python314` environment, isolated from `base`:
+
+```bash
+conda activate python314
+python -m pip install -e .
+python -m jupyterlab
+```
+
+JupyterLab and `ipykernel` must be installed in that environment to use these
+commands. If the kernel is not listed, register it with
+`python -m ipykernel install --user --name python314 --display-name "Python (python314)"`.
+Choose this kernel and check `import sys; print(sys.executable)` in a cell.
+For noninteractive scripts use `conda run --no-capture-output -n python314 python ...`.
+Background imports spawn the current interpreter, so selecting the correct
+Notebook kernel also selects their Python environment.
+
+## Resource controls for a large Notebook import
+
+```python
+from seclogx import Case, IngestOptions
+
+c = Case.create("large_case")  # use Case.open("large_case") in a later session
+options = IngestOptions(
+    memory_limit="2GB",
+    threads=2,
+    staging_chunk_bytes=64 * 1024 * 1024,
+    flatten_batch_bytes=256 * 1024 * 1024,
+    staging_format="auto",
+)
+report = c.ingest([r"E:\evidence:HOST01"], workers=2, options=options)
+print(report.summary_text())
+```
+
+The `IngestOptions` values above are the library defaults; `workers=2`
+explicitly sets parsing parallelism. `workers` is the total local parsing budget
+across both pipelines; `workers=1` runs them serially in this process.
+`threads` and `memory_limit` apply to each DuckDB conversion, and conversions
+in one Notebook process are serialized; independent background jobs have separate
+budgets. These options configure ingest conversion, not later analyst queries.
+**2GB is not a hard RSS limit** for
+the kernel or its worker processes. The byte settings target uncompressed
+staging shards and conversion groups, with records/shards left indivisible.
+
+`staging_format="auto"` selects Arrow IPC with ZSTD level 1 for each supported
+auxiliary source of at least 16 MiB, and gzip NDJSON for smaller sources.
+Set `"arrow"` or `"ndjson"` to choose explicitly. EVTX staging remains NDJSON;
+auxiliary Parquet output uses ZSTD level 1 with either staging path. Both paths
+retain fixed text input columns and the same canonical SQL normalization.
+
+If the workstation has enough spare memory and CPU capacity, an optional configuration is
+`IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")` with
+`workers=8`. This changes the budget, not the library defaults or a process RSS
+limit. Leave room for the Notebook, parsing workers and other programs.
+
+For background execution, replace the foreground call with
+`job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`
+and inspect `c.job_status(job_id)`. Do not run both imports on the same
+evidence: cross-run deduplication/resume is not implemented. Staging remains
+enabled by default; `keep_staging=False` deletes it after successful
+conversion but does not remove its peak disk requirement. See
+[Performance & scale](08_performance_and_scale.md) for parser limits,
+encoding-validation I/O and resource limits.
+
+Each pipeline stages its batch before conversion. Background execution does not
+provide an early-query guarantee or an atomic snapshot of the lake while it is
+being written. Wait for `done`, inspect the job log and per-file report, then
+reopen the Case before analysis. `done` can include partial, failed or unrecognized
+source files. Caught job exceptions set `failed`; forced termination or failed
+status writes can leave a stale snapshot, because there is no separate liveness
+supervisor or automatic resume. Status and stdout/stderr live under
+`c.case_dir / "jobs"`. `job_status()` returns `None` if the requested job is not
+found. Reopening avoids stale cached views in a `Case` object that existed before
+the background import.
+
+The corresponding CLI accepts `--staging-format auto` (or `arrow`/`ndjson`),
+including with `--background`. During auxiliary text ingest, SHA-256 and strict
+UTF-8 validation share a pass; alternate encodings retain strict fallback reads.
+Bounded partition metadata also avoids the usual extra Windows partition scan
+when complete; legacy, unsupported or oversized metadata falls back to scanning.
+
+After importing, an unrestricted `c.query()` or `c.web_logs()` still builds one
+complete DataFrame and can exhaust the Jupyter kernel's memory. Filter in SQL or
+consume `c.query_chunks()` / `c.web_logs_chunks()`; ingest options do not limit
+the size of returned DataFrames. Chunks are bounded in rows, not bytes: choose
+`chunksize` for your record widths and release each chunk after processing it.
+
+## General API examples
 
 > **Calling `ingest()` from a `.py` script? Put it under an
 > `if __name__ == "__main__":` guard.** Ingest stages files across worker
@@ -34,38 +123,47 @@ below, see [03. Querying & search](03_querying_and_search.md).
 > ```
 
 ```python
-from seclogx import Case
+from seclogx import Case, IngestOptions
 
 # Create or open a case
 c = Case.create("incident42")          # first time
-c = Case.open("incident42")            # subsequent sessions
+# c = Case.open("incident42")          # use this instead in subsequent sessions
 
 # Ingest (same semantics as the CLI; PATH or "PATH:HOST" strings)
 report = c.ingest(
     ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
     workers=8,
+    on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
 )
 print(report.summary_text())
 report.to_dataframe()                  # per-file staging detail as a DataFrame (EVTX pass)
-report.aux.to_dataframe()              # same, for the Scheduled Tasks/IIS/web/Exchange pass
+report.aux.to_dataframe()              # discovered auxiliary candidates and their statuses
+```
 
-# Live progress instead of a blocking call with no feedback: on_progress
-# is called with a dict snapshot (phase, files scanned/staged, ok/partial/
-# failed/unsupported counts, rows written per table so far) throttled to
-# roughly every 0.3s / 25 items -- cheap enough to print or feed into a
-# notebook progress widget without slowing the ingest down.
-report = c.ingest(
-    ["/mnt/kape_output/WKS01:WKS01"],
-    on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
+`on_progress` receives phase, walked/classified/staged counts, file-status totals
+and rows written by table. Updates are throttled at progress events (roughly
+0.3 seconds or 25 completed files); this is not a heartbeat or byte-level ETA.
+Keep the callback lightweight. A large file can run without changing the counters.
+
+Alternatively, **replace** the foreground `c.ingest(...)` call above with a
+background call. Do not run both against the same evidence:
+
+```python
+job_id = c.ingest_background(
+    ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
+    workers=8,
+    options=IngestOptions(staging_format="auto"),
 )
+c.job_status(job_id)                   # dict snapshot, or None if absent
+c.job_status()                         # most recently started job
+c.list_jobs()                          # list[dict], most recently started first
+```
 
-# Same import, but backgrounded (the library equivalent of `seclogx ingest
-# --background`): starts a detached child process and returns a job_id
-# immediately instead of blocking the calling process/notebook kernel.
-job_id = c.ingest_background(["/mnt/kape_output/WKS01:WKS01"], workers=8)
-c.job_status(job_id)                   # -> dict snapshot, same shape as on_progress's
-c.job_status()                         # omit job_id -> most recently started job
-c.list_jobs()                          # -> list[dict], most recently started first
+The analysis examples below assume the chosen import has finished. Use filters
+or the `_chunks()` alternatives for results that may exceed available memory.
+
+```python
+c = Case.open("incident42")
 
 # Explore
 c.summary()
@@ -81,8 +179,8 @@ df = c.query("""
 """)
 
 # Not sure what's actually in a table, or which field to search on?
-# fields() answers both from this case's real data -- one row per field
-# (real column or a key found inside a JSON catchall like event_data),
+# fields() samples this case's data -- one row per field
+# (real column or a sampled key inside a JSON catchall like event_data),
 # how common it is, and a real example value. See "Which fields can I
 # search on?" in 02. Log types & schema for the full explanation and a cheat sheet.
 c.fields("events")       # -> Image, CommandLine, TargetUserName, ... (from event_data) + real columns
@@ -164,8 +262,9 @@ with Case.open("incident42") as c:
 
 | Category | Methods |
 |---|---|
-| Lifecycle | `Case.create(name, case_root=)`, `Case.open(name, case_root=)`, `Case.list_cases(case_root=)`, `c.info()` |
-| Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=)` -> `IngestReport`; `c.ingest_background(sources, workers=, keep_raw=, keep_staging=)` -> `job_id`; `c.job_status(job_id=)` -> `dict \| None`; `c.list_jobs()` -> `list[dict]` |
+| Lifecycle | `Case.create(name, case_root=, cluster_config=)`, `Case.open(name, case_root=, cluster_config=)`, `Case.list_cases(case_root=)`, `c.info()` |
+| Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`; `c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`; `c.job_status(job_id=)` -> `dict \| None`; `c.list_jobs()` -> `list[dict]` |
+| Ingest resources | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto")` |
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |
@@ -179,17 +278,18 @@ with Case.open("incident42") as c:
 
 ## Distributed mode from Python
 
-There's no separate API for this -- `Case.open()`/`Case.create()`/
-`Case.ingest()`/`Case.hunt()` all resolve `seclogx.distributed.config.
-ClusterConfig` from the environment automatically each time they run.
-Set the same `SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*`
-variables described in
-[10. Distributed deployment](10_distributed_deployment.md) before
-constructing/using a `Case`, and ingest/hunt dispatch through the
-configured job queue and storage backend exactly like the CLI does -- no
-code changes needed. Pass an explicit `cluster_config=` to override
-per-call instead of relying on the environment, if you're driving several
-differently-configured cases from one process.
+`Case.create()` and `Case.open()` resolve `ClusterConfig` from the environment
+when the Case is constructed, unless given `cluster_config=` explicitly. Later
+foreground `ingest()` and `hunt()` calls use the Case's stored configuration;
+neither method accepts a `cluster_config` argument. Set the
+`SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*` variables described in
+[10. Distributed deployment](10_distributed_deployment.md) before creating or
+opening the Case, or pass an explicit configuration to those factory methods.
+
+`ingest_background()` starts a new CLI process that resolves cluster settings
+from its inherited environment. An explicit in-memory `c.cluster_config` is not
+serialized to that child; configure the environment before spawning background
+work. The local `workers` budget does not control the size of a distributed queue.
 
 Next: [07. Recipes](07_recipes.md) for worked, copy-pasteable examples
 using this API (and its `seclogx search` no-SQL equivalents).

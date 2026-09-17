@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
-from ..sniff import _decode_lines
+from ....textdecode import iter_text_lines
+from ._stream import RowSink
 
 _FIELD_MAP = {
     "s-ip": "server_ip",
@@ -36,21 +38,17 @@ _INT_FIELDS = {"status", "substatus", "win32_status", "time_taken_ms", "bytes_se
 _HANDLED_SOURCE_FIELDS = set(_FIELD_MAP) | {"date", "time"}
 
 
-def _read_all_text(path: Path) -> str:
-    raw = path.read_bytes()
-    return "\n".join(_decode_lines(raw))
-
-
-def parse_iis_file(path: Path, host: str) -> tuple[list[dict], int, int]:
+def parse_iis_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     """Returns (rows, ok_count, error_count). Never raises -- a line that
     doesn't match the current `#Fields:` header is counted as an error, not
     silently skipped."""
-    text = _read_all_text(path)
     fields: list[str] | None = None
-    rows: list[dict] = []
+    rows = RowSink(emit)
     error_count = 0
 
-    for line in text.splitlines():
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         if line.startswith("#Fields:"):
@@ -68,7 +66,7 @@ def parse_iis_file(path: Path, host: str) -> tuple[list[dict], int, int]:
         raw_rec = dict(zip(fields, parts))
         rows.append(_normalize_record(raw_rec, host))
 
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
 def _normalize_record(raw_rec: dict, host: str) -> dict:

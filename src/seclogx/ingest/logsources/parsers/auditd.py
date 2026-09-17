@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..sniff import _decode_lines
+from ....textdecode import iter_text_lines
+from ._stream import RowSink
 
 _HEADER_RE = re.compile(r"^type=(?P<type>\S+)\s+msg=audit\((?P<epoch>\d+)\.(?P<ms>\d+):(?P<serial>\d+)\):\s*(?P<rest>.*)$")
 _KV_RE = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
@@ -31,14 +33,16 @@ def _unquote(value: str) -> str:
     return value
 
 
-def parse_auditd_file(path: Path, host: str) -> tuple[list[dict], int, int]:
+def parse_auditd_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     """Returns (rows, ok_count, error_count). A line that doesn't match the
     `type=... msg=audit(epoch.ms:serial): ...` header is counted as an
     error, not silently dropped."""
-    rows: list[dict] = []
+    rows = RowSink(emit)
     error_count = 0
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
 
@@ -66,4 +70,4 @@ def parse_auditd_file(path: Path, host: str) -> tuple[list[dict], int, int]:
         row["fields"] = json.dumps(kv) if kv else None
         rows.append(row)
 
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count

@@ -1,7 +1,6 @@
 # The Sigma backend, and how to extend it
 
-No official DuckDB (or generic ANSI-SQL) pySigma backend exists, so
-`detect/backend.py` implements a small custom one, closely modeled on the
+`detect/backend.py` implements this project's custom DuckDB backend, modeled on the
 public `pySigma-backend-sqlite` backend's token configuration (LIKE-based
 string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
 
@@ -14,7 +13,7 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
    `field_quote`/`field_escape` are left unset, so this mapped string is
    substituted as-is wherever a template needs `{field}`.
 
-   **Always parenthesize new field mappings.** Empirically, DuckDB's
+   **Always parenthesize new field mappings.** DuckDB's
    `->`/`->>` operators don't bind as tightly as expected against
    `LIKE ... AND ...` in a compound WHERE clause; an unparenthesized
    mapping can misparse and fail at execution time with a confusing
@@ -24,9 +23,10 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
    `LOGSOURCE_TABLE`): a Sigma rule's `logsource.category` (e.g.
    `process_creation`) is turned into an added `channel = '...' AND
    EventID = ...` condition via pySigma's `AddConditionTransformation`,
-   scoped to that category via `LogsourceCondition`. v1 routes every
-   `events`-backed category to its Sysmon equivalent (see
-   `docs/known_limitations.md` for why). `LOGSOURCE_TABLE` separately
+   scoped to that category via `LogsourceCondition`. Most `events`-backed
+   categories route to Sysmon; `ps_script` and `ps_module` route to
+   `Microsoft-Windows-PowerShell/Operational` events 4104 and 4103.
+   `LOGSOURCE_TABLE` separately
    maps every supported category to the table it's hunted against --
    `events` for all of them except `webserver`, which targets `web_logs`
    (IIS/nginx/Apache/Tomcat/Exchange-HttpProxy access logs) and has no
@@ -42,6 +42,13 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
    that table yet, the rule is reported as a failure ("case has no
    '<table>' table ingested"), not silently skipped.
 
+4. **Result collection**: each rule query materializes a pandas DataFrame;
+   matching frames are retained and concatenated into `HuntResults.matches`.
+   The same event can appear once per matching rule. This path does not use
+   chunked query delivery or the `search()` size guard. Distributed workers
+   also return match frames to the coordinator. Ingest's `memory_limit`
+   does not govern hunt connections or pandas allocations.
+
 ## Adding support for a new field or category
 
 - New field used by a rule you want to run: add an entry to
@@ -55,20 +62,23 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
 - New logsource category targeting a different table (`web_logs` or a
   future one): add an entry directly to `LOGSOURCE_TABLE` (skip
   `LOGSOURCE_ROUTES` unless that category also needs an added condition).
-- `seclogx hunt` only ever runs bundled + user-supplied Sigma rules
+- `seclogx hunt` runs the bundled or a user-supplied Sigma rule directory
   against `events` and `web_logs` in v1 -- `scheduled_tasks`,
   `web_error_logs`, `exchange_message_tracking`/`exchange_logs`, the
   three Linux tables (`syslog`/`auditd_logs`/`journal_logs`), `db_logs`,
-  and `registry` have no Sigma logsource category that fits (Sigma's
+  `qcloud_logs`, and `registry` have no route in this project's
+  `LOGSOURCE_TABLE` (Sigma's
   scheduled-task detections target the event log, not on-disk task
-  definitions; there's no standard Sigma category for web error/
-  diagnostic logs, these Linux formats, or database server logs either;
+  definitions;
   Sigma's `registry_event`/`registry_add`/etc. categories model *live*
   registry-monitoring telemetry -- Sysmon EventID 12/13/14 fields like
   `TargetObject`/`EventType` -- not a static offline hive dump, so they
   don't fit `registry` either), so they're queried directly via
   SQL/`search()`, or via the lightweight `Case.suspicious_tasks()` /
   `Case.auth_events()` / `Case.suspicious_registry()` heuristics instead.
+- Unknown fields can still convert to SQL as unmapped identifiers and fail
+  only when the query executes. `rules validate` checks loading/conversion,
+  not a case's columns or the semantic correctness of a detection.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
   `seclogx hunt <case> --rules <dir>` against a case with known-good data

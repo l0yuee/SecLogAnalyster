@@ -6,6 +6,7 @@ import typer
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 from ..case import Case
+from ..ingest.resources import IngestOptions
 from ..config import DEFAULT_CASE_ROOT
 from ..errors import CaseNotFoundError, NoSourcesFoundError
 from ..ingest.common import now_iso
@@ -20,6 +21,7 @@ def _spawn_background_job(
     keep_raw: bool,
     keep_staging: bool,
     case_root: Path,
+    options: IngestOptions | None = None,
 ) -> None:
     try:
         c = Case.open(case_name, case_root=case_root)
@@ -29,7 +31,7 @@ def _spawn_background_job(
     # Case.ingest_background() does the actual detached-subprocess spawn and
     # initial status-file write -- this is the CLI's own front door to it,
     # kept thin so the spawn logic has exactly one implementation.
-    job_id = c.ingest_background(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging)
+    job_id = c.ingest_background(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging, options=options)
     log_path = job_log_path(c.case_dir, job_id)
 
     console.print(f"[green]Started background ingest job {job_id}[/green] for case '{case_name}'")
@@ -37,7 +39,7 @@ def _spawn_background_job(
     console.print(f"  check progress: seclogx ingest-status {case_name} {job_id}  (add --watch to follow it)")
 
 
-def _run_as_background_child(c: Case, job_id: str, case_name: str, source, workers, keep_raw, keep_staging) -> None:
+def _run_as_background_child(c: Case, job_id: str, case_name: str, source, workers, keep_raw, keep_staging, options=None) -> None:
     # write_job_status() replaces the whole file rather than merging, so
     # fields the parent wrote before spawning us (started_at, sources) --
     # which ProgressReporter's snapshot doesn't know about -- have to be
@@ -55,7 +57,7 @@ def _run_as_background_child(c: Case, job_id: str, case_name: str, source, worke
         write_job_status(c.case_dir, job_id, snapshot)
 
     try:
-        report = c.ingest(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging, on_progress=on_progress)
+        report = c.ingest(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging, on_progress=on_progress, options=options)
     except NoSourcesFoundError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
@@ -78,7 +80,7 @@ def _run_as_background_child(c: Case, job_id: str, case_name: str, source, worke
     console.print(report.summary_text())
 
 
-def _run_in_foreground(c: Case, source, workers, keep_raw, keep_staging) -> None:
+def _run_in_foreground(c: Case, source, workers, keep_raw, keep_staging, options=None) -> None:
     with Progress(
         TextColumn("[bold]{task.fields[phase]}"),
         BarColumn(),
@@ -105,7 +107,7 @@ def _run_in_foreground(c: Case, source, workers, keep_raw, keep_staging) -> None
             bar.update(task, phase=phase, detail=detail)
 
         try:
-            report = c.ingest(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging, on_progress=on_progress)
+            report = c.ingest(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging, on_progress=on_progress, options=options)
         except NoSourcesFoundError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1)
@@ -119,16 +121,16 @@ def ingest_command(
         ...,
         "--source",
         help=(
-            "Source path to scan for .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat "
-            "access logs, and Exchange CSV logs, optionally PATH:HOST. Repeatable."
+            "Source path to scan for supported security logs and artifacts, "
+            "optionally PATH:HOST. Repeatable."
         ),
     ),
-    workers: int | None = typer.Option(None, "--workers", help="Parallel staging workers (default: up to 8)"),
+    workers: int | None = typer.Option(None, "--workers", help="Total local parsing workers across both pipelines (default: up to 8)", min=1),
     keep_raw: bool = typer.Option(
-        False, "--keep-raw", help="Also capture raw EVTX record XML (slower, ~2x cost; .evtx sources only)"
+        False, "--keep-raw", help="Also capture raw EVTX record XML (adds parsing and storage work; .evtx sources only)"
     ),
     keep_staging: bool = typer.Option(
-        True, "--keep-staging/--no-keep-staging", help="Keep staged NDJSON after flattening (cheap reprocessing)"
+        True, "--keep-staging/--no-keep-staging", help="Keep staged data after successful conversion"
     ),
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
     background: bool = typer.Option(
@@ -138,10 +140,26 @@ def ingest_command(
         help="Run the import detached in the background and return immediately; "
         "check progress with `seclogx ingest-status`",
     ),
+    memory_limit: str = typer.Option("2GB", "--memory-limit", help="DuckDB memory per conversion instance; not total process RSS"),
+    duckdb_threads: int = typer.Option(2, "--duckdb-threads", min=1),
+    staging_chunk_mb: int = typer.Option(64, "--staging-chunk-mb", min=1, help="Uncompressed MiB per staging shard"),
+    flatten_batch_mb: int = typer.Option(256, "--flatten-batch-mb", min=1, help="Uncompressed MiB per conversion batch"),
+    staging_format: str = typer.Option("auto", "--staging-format", help="Auxiliary staging: auto (Arrow for sources >=16 MiB), ndjson or arrow; EVTX uses NDJSON"),
+    _staging_chunk_bytes: int | None = typer.Option(None, "--staging-chunk-bytes", hidden=True, min=1),
+    _flatten_batch_bytes: int | None = typer.Option(None, "--flatten-batch-bytes", hidden=True, min=1),
     _job_id: str = typer.Option(None, "--_job-id", hidden=True),
 ) -> None:
+    try:
+        options = IngestOptions(
+            memory_limit=memory_limit, threads=duckdb_threads,
+            staging_chunk_bytes=_staging_chunk_bytes or staging_chunk_mb * 1024 * 1024,
+            flatten_batch_bytes=_flatten_batch_bytes or flatten_batch_mb * 1024 * 1024,
+            staging_format=staging_format,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     if background and _job_id is None:
-        _spawn_background_job(case_name, source, workers, keep_raw, keep_staging, case_root)
+        _spawn_background_job(case_name, source, workers, keep_raw, keep_staging, case_root, options)
         return
 
     try:
@@ -154,6 +172,6 @@ def ingest_command(
         # This is the detached child spawned above: no live terminal to
         # draw a progress bar on, so progress is persisted straight to the
         # job status file instead (see ingest.jobs.write_job_status).
-        _run_as_background_child(c, _job_id, case_name, source, workers, keep_raw, keep_staging)
+        _run_as_background_child(c, _job_id, case_name, source, workers, keep_raw, keep_staging, options)
     else:
-        _run_in_foreground(c, source, workers, keep_raw, keep_staging)
+        _run_in_foreground(c, source, workers, keep_raw, keep_staging, options)

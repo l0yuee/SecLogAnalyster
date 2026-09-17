@@ -1,9 +1,50 @@
 .venv/
+/venv/
+/.conda/
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
 build/
 dist/
 .pytest_cache/
-cases/*/
-!cases/.gitkeep
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Local evidence, generated Cases, scale data, snapshots and benchmark scratch.
+# Keep product sources and public user guides in Git.
+/.benchmarks/
+/cases/*
+!/cases/.gitkeep
+/tmp/
+
+# Local discussion memory and benchmark experiments are not published.
+/AGENTS.md
+/PROJECT_MEMORY.md
+/docs/benchmark_*
+/docs/ingest_performance*.md
+/docs/ingest_throughput*.md
+/scripts/benchmark_*.py
+/scripts/scale_dataset.py
+/scripts/scale_validation.py
+/scripts/profile_ingest_stage.py
+/tests/unit/test_benchmark_ingest_compare.py
+/tests/unit/test_scale_dataset.py
+/tests/unit/test_scale_validation.py
+
+# Local secrets/configuration; example configuration belongs in the repository.
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Desktop metadata.
+.DS_Store
+Thumbs.db
+desktop.ini

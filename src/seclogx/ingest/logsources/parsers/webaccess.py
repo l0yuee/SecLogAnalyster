@@ -13,8 +13,10 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
-from ..sniff import _decode_lines
+from ....textdecode import iter_text_lines
+from ._stream import RowSink
 
 _CLF_RE = re.compile(
     r'^(?P<client_ip>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<time>[^\]]+)\] '
@@ -71,14 +73,15 @@ def _parse_time(raw: str) -> str | None:
         return _parse_time_strptime(raw)
 
 
-def parse_web_access_file(path: Path, host: str, log_type: str) -> tuple[list[dict], int, int]:
+def parse_web_access_file(
+    path: Path, host: str, log_type: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     """Returns (rows, ok_count, error_count). A line that doesn't match CLF/
     Combined is counted as an error, not silently skipped."""
-    raw = path.read_bytes()
-    rows: list[dict] = []
+    rows = RowSink(emit)
     error_count = 0
 
-    for line in _decode_lines(raw):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         m = _CLF_RE.match(line)
@@ -125,4 +128,4 @@ def parse_web_access_file(path: Path, host: str, log_type: str) -> tuple[list[di
             }
         )
 
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count

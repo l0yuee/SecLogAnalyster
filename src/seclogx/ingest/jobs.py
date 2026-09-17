@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -57,9 +58,30 @@ def write_job_status(case_dir: Path, job_id: str, status: dict) -> None:
     d = jobs_dir(case_dir)
     d.mkdir(parents=True, exist_ok=True)
     path = job_status_path(case_dir, job_id)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(status, indent=2, default=str), encoding="utf-8")
-    os.replace(tmp, path)  # atomic on both POSIX and Windows
+    tmp = None
+    try:
+        # A unique sibling avoids collisions between overlapping writers and
+        # keeps the rename atomic on the destination filesystem.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=d, prefix=f".{job_id}.", suffix=".tmp", delete=False
+        ) as handle:
+            tmp = Path(handle.name)
+            json.dump(status, handle, indent=2, default=str)
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError as exc:
+                # Windows readers/antivirus can briefly hold a handle that
+                # disallows replacement. In particular, losing the final
+                # done snapshot would otherwise leave a finished job running
+                # forever. Other failures are not transient sharing errors.
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 9:
+                    raise
+                time.sleep(min(0.01 * (2 ** attempt), 0.1))
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def read_job_status(case_dir: Path, job_id: str) -> dict | None:

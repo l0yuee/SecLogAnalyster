@@ -14,8 +14,10 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
-from ..sniff import _decode_lines
+from ....textdecode import MAX_TEXT_RECORD_CHARS, TextRecordTooLargeError, iter_text_lines
+from ._stream import RowSink
 
 _NGINX_ERROR_RE = re.compile(
     r"^(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<severity>\w+)\] "
@@ -73,10 +75,12 @@ def _empty_row(host: str, log_type: str) -> dict:
     }
 
 
-def parse_nginx_error_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_nginx_error_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         m = _NGINX_ERROR_RE.match(line)
@@ -95,13 +99,15 @@ def parse_nginx_error_file(path: Path, host: str) -> tuple[list[dict], int, int]
         if client_m:
             row["client_ip"] = client_m.group(1).strip()
         rows.append(row)
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_apache_error_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_apache_error_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         m = _APACHE_ERROR_RE.match(line)
@@ -128,18 +134,22 @@ def parse_apache_error_file(path: Path, host: str) -> tuple[list[dict], int, int
                 row["client_ip"] = client
         row["message"] = m.group("message")
         rows.append(row)
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_tomcat_error_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_tomcat_error_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
     current: dict | None = None
     continuation_count = 0
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         m = _TOMCAT_ERROR_RE.match(line)
         if m:
+            if current is not None:
+                rows.append(current)
             current = _empty_row(host, "tomcat")
             try:
                 current["time_created"] = datetime.strptime(m.group("time"), "%d-%b-%Y %H:%M:%S.%f").isoformat()
@@ -149,26 +159,37 @@ def parse_tomcat_error_file(path: Path, host: str) -> tuple[list[dict], int, int
             current["pid_or_thread"] = m.group("thread")
             current["logger"] = m.group("logger")
             current["message"] = m.group("message")
-            rows.append(current)
             continuation_count = 0
             continue
         if not line.strip():
             continue
-        if current is not None and continuation_count < _TOMCAT_MAX_CONTINUATION_LINES:
+        if current is not None:
+            if continuation_count >= _TOMCAT_MAX_CONTINUATION_LINES:
+                raise TextRecordTooLargeError(
+                    f"Tomcat logical record exceeds {_TOMCAT_MAX_CONTINUATION_LINES} continuation lines: {path}"
+                )
+            if len(current["message"]) + 1 + len(line) > MAX_TEXT_RECORD_CHARS:
+                raise TextRecordTooLargeError(
+                    f"Tomcat logical record exceeds {MAX_TEXT_RECORD_CHARS} characters: {path}"
+                )
             current["message"] = f"{current['message']}\n{line}"
             continuation_count += 1
         else:
             error_count += 1
 
-    return rows, len(rows), error_count
+    if current is not None:
+        rows.append(current)
+    return rows.rows, rows.count, error_count
 
 
-def parse_iis_httperr_file(path: Path, host: str) -> tuple[list[dict], int, int]:
+def parse_iis_httperr_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     fields: list[str] | None = None
-    rows: list[dict] = []
+    rows = RowSink(emit)
     error_count = 0
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         if line.startswith("#Fields:"):
@@ -186,7 +207,7 @@ def parse_iis_httperr_file(path: Path, host: str) -> tuple[list[dict], int, int]
         rec = dict(zip(fields, parts))
         rows.append(_normalize_httperr_record(rec, host))
 
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
 def _normalize_httperr_record(rec: dict, host: str) -> dict:

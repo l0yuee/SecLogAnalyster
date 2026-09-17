@@ -19,7 +19,7 @@ import os
 import sys
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Callable
 
@@ -81,6 +81,8 @@ class JobQueue(ABC):
 
 class LocalJobQueue(JobQueue):
     def __init__(self, workers: int | None = None):
+        if workers is not None and (isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0):
+            raise ValueError("workers must be a positive integer")
         self.workers = workers
 
     def submit_all(
@@ -115,12 +117,30 @@ class LocalJobQueue(JobQueue):
         ctx = multiprocessing.get_context("spawn")
         try:
             with ProcessPoolExecutor(max_workers=self.workers, mp_context=ctx) as pool:
-                futures = [pool.submit(fn, *args) for args in args_list]
-                for fut in as_completed(futures):
-                    result = fut.result()
-                    results.append(result)
-                    if on_result is not None:
-                        on_result(result)
+                # Keep queued futures proportional to parallelism, rather
+                # than retaining one Future for every evidence file.
+                worker_count = self.workers or getattr(os, "process_cpu_count", os.cpu_count)() or 1
+                if sys.platform == "win32":
+                    worker_count = min(worker_count, 61)
+                pending = set()
+                args_iter = iter(args_list)
+                exhausted = False
+                while pending or not exhausted:
+                    while not exhausted and len(pending) < 2 * worker_count:
+                        try:
+                            args = next(args_iter)
+                        except StopIteration:
+                            exhausted = True
+                            break
+                        pending.add(pool.submit(fn, *args))
+                    if not pending:
+                        break
+                    completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in completed:
+                        result = fut.result()
+                        results.append(result)
+                        if on_result is not None:
+                            on_result(result)
         except BrokenProcessPool as e:
             hint = _unguarded_main_error(fn)
             if hint is None:

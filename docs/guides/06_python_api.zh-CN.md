@@ -6,8 +6,53 @@
 
 ---
 
-命令行能做的一切，都有对应的 Python API，且全程返回 `pandas.DataFrame` 对象——可以直接嵌入到你日常使用的 Jupyter notebook 与 pandas 分析流程中。下面用到的有界内存（`_chunks`）与
+Python API 为 Notebook 和脚本提供 DataFrame、分块迭代器、导入报告与任务状态对象。下面用到的有界内存（`_chunks`）与
 `search()` 内存安全机制，完整讲解见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)。
+
+## Notebook 环境
+
+使用本项目独立于 `base` 的 conda `python314` 环境：
+
+```bash
+conda activate python314
+python -m pip install -e .
+python -m jupyterlab
+```
+
+这些命令要求该环境中已安装 JupyterLab 和 `ipykernel`。若内核列表没有对应选项，可执行 `python -m ipykernel install --user --name python314 --display-name "Python (python314)"` 注册。选择该内核后，在单元格中运行 `import sys; print(sys.executable)` 确认解释器。非交互脚本使用 `conda run --no-capture-output -n python314 python ...`。后台导入启动当前解释器，因此 Notebook 内核环境也决定后台导入的 Python 环境。
+
+## Notebook 大批量导入的资源设置
+
+```python
+from seclogx import Case, IngestOptions
+
+c = Case.create("large_case")  # 后续会话用 Case.open("large_case")
+options = IngestOptions(
+    memory_limit="2GB",
+    threads=2,
+    staging_chunk_bytes=64 * 1024 * 1024,
+    flatten_batch_bytes=256 * 1024 * 1024,
+    staging_format="auto",
+)
+report = c.ingest([r"E:\evidence:HOST01"], workers=2, options=options)
+print(report.summary_text())
+```
+
+示例中的 `IngestOptions` 是库的默认值，`workers=2` 则显式设置解析并行度。`workers` 是两条通路共享的本地解析总预算；`workers=1` 在调用方进程中串行执行。`threads` 和 `memory_limit` 作用于单个 DuckDB 转换，同一个 Notebook 进程中的转换会串行运行，独立后台任务则各有预算。这些配置用于导入转换，不作用于之后的分析查询。**2GB 不是内核及工作进程总 RSS 的硬上限**。两个字节参数分别设置未压缩暂存分片和转换分组的目标大小，完整记录及分片不会被切断。
+
+默认 `staging_format="auto"` 按每个受支持的辅助来源文件大小选择：达到 16 MiB 时使用 Arrow IPC / ZSTD level 1，小于 16 MiB 时使用 gzip NDJSON。也可显式设为 `"arrow"` 或 `"ndjson"`。EVTX 暂存仍使用 NDJSON；辅助来源生成的 Parquet 在两种暂存路径下均使用 ZSTD level 1。两条路径都保留固定文本输入列和相同的 SQL 规范化规则。
+
+若工作站有足够空闲内存和 CPU，可选用 `IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")`，并将导入的 `workers` 设为 `8`。库的通用默认值仍为 2GB 和两个转换线程，也不构成进程 RSS 上限；需要给 Notebook、解析进程和其他程序预留内存。
+
+需要后台执行时，将前台调用替换为 `job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`，然后用 `c.job_status(job_id)` 查看状态。不要对同一份证据先后执行两种导入：当前没有跨批次去重或续跑。默认仍保留暂存，`keep_staging=False` 在转换成功后才删除，不能消除暂存磁盘峰值。解析限制和编码验证 I/O 见[性能与规模](08_performance_and_scale.zh-CN.md)。
+
+各通路先完成本批暂存再转换，后台执行并不提供提前查询保证，也不保证正在写入的数据湖呈现原子快照。应等状态为 `done`、检查任务日志与逐文件报告后再重新打开 Case。`done` 也可能包含部分恢复、失败或无法识别的来源文件。可捕获异常会标记为 `failed`；强制终止或状态写入失败可能留下过期快照，当前没有独立的存活监督器或自动续跑。状态与标准输出/错误位于 `c.case_dir / "jobs"`；找不到任务时 `job_status()` 返回 `None`。重新打开 Case 可避免后台导入前已创建对象中的缓存视图过期。
+
+CLI 对应参数为 `--staging-format auto`，也接受 `arrow`、`ndjson`，配合 `--background` 同样有效。辅助文本导入会在一次读取中完成 SHA-256 和严格 UTF-8 验证，其他编码保留严格回退读取；有界分区清单完整时，也会省去 Windows 上通常需要的额外分区预扫，旧清单、不支持或超出上限的元数据仍走兼容扫描。
+
+导入完成后，无范围限制的 `c.query()`、`c.web_logs()` 仍会构造完整 DataFrame，可能耗尽 Jupyter 内核内存。应先用 SQL 筛选，或逐批消费 `c.query_chunks()`、`c.web_logs_chunks()`；导入预算不会限制返回的 DataFrame 大小。分块按行数而非字节数限制，应按记录宽度设置 `chunksize`，并在处理后释放每块。
+
+## 常规 API 示例
 
 > **在 `.py` 脚本里调用 `ingest()`？请把它放在 `if __name__ == "__main__":`
 > 保护块里。** 导入过程会用 Python 的 `spawn`
@@ -29,36 +74,42 @@
 > ```
 
 ```python
-from seclogx import Case
+from seclogx import Case, IngestOptions
 
 # 创建或打开一个案例
 c = Case.create("incident42")          # 首次创建
-c = Case.open("incident42")            # 后续会话中打开
+# c = Case.open("incident42")          # 后续会话改用此行
 
 # 导入（语义与命令行一致；接受 "PATH" 或 "PATH:HOST" 字符串）
 report = c.ingest(
     ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
     workers=8,
+    on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
 )
 print(report.summary_text())
 report.to_dataframe()                  # 每个文件的暂存详情，以 DataFrame 形式返回（EVTX 一侧）
-report.aux.to_dataframe()              # 计划任务/IIS/Web/Exchange 一侧的同等信息
+report.aux.to_dataframe()              # 已发现的辅助候选文件及其状态
+```
 
-# 实时进度反馈，而不是一次阻塞式调用、期间毫无输出：on_progress 会被调用，
-# 参数是一个 dict 快照（当前阶段、已扫描/已暂存文件数、成功/部分/失败/不支持计数、
-# 目前各表已写入的行数），并做了节流（大约每 0.3 秒或每 25 条一次）——足够便宜，
-# 可以直接打印，或接入 notebook 里的进度组件，不会拖慢导入本身。
-report = c.ingest(
-    ["/mnt/kape_output/WKS01:WKS01"],
-    on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
+`on_progress` 提供阶段、遍历/分类/暂存计数、文件状态汇总和各表已写入行数。进度事件会节流（约 0.3 秒或 25 个完成文件），这不是固定心跳或逐字节剩余时间估计；大文件处理期间计数可能不变。回调应保持轻量。
+
+也可将上面的前台 `c.ingest(...)` 调用**替换**为以下后台调用，不要对同一份证据依次执行两种导入：
+
+```python
+job_id = c.ingest_background(
+    ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
+    workers=8,
+    options=IngestOptions(staging_format="auto"),
 )
+c.job_status(job_id)                   # dict 快照；任务不存在则返回 None
+c.job_status()                         # 最近一次启动的任务
+c.list_jobs()                          # list[dict]，按启动时间从新到旧排列
+```
 
-# 同样的导入，但放到后台执行（对应命令行的 `seclogx ingest --background`）：
-# 会启动一个独立的子进程并立即返回一个 job_id，而不会阻塞调用方进程/notebook 内核。
-job_id = c.ingest_background(["/mnt/kape_output/WKS01:WKS01"], workers=8)
-c.job_status(job_id)                   # -> dict 快照，字段结构与 on_progress 收到的一致
-c.job_status()                         # 不传 job_id -> 最近一次启动的任务
-c.list_jobs()                          # -> list[dict]，按启动时间从新到旧排列
+以下分析示例假定已选择的导入已经完成。对于可能超过可用内存的结果，请先过滤或改用 `_chunks()` 方法。
+
+```python
+c = Case.open("incident42")
 
 # 探索
 c.summary()
@@ -73,8 +124,8 @@ df = c.query("""
     WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 """)
 
-# 不确定某张表里到底有什么字段，或者该查哪一个？fields() 能从这个案例的真实数据中给出答案——
-# 每一行是一个字段（真实列，或者 event_data 这类 JSON 兜底字段里找到的某个 key），
+# 不确定某张表里到底有什么字段，或者该查哪一个？fields() 会采样案例中的真实数据——
+# 每一行是一个字段（真实列，或者样本中 event_data 这类 JSON 兜底字段里的某个 key），
 # 附带出现频率和一个真实的示例值。完整讲解与速查表见第 2 节的“我能查询哪些字段？”。
 c.fields("events")       # -> Image、CommandLine、TargetUserName 等（来自 event_data）+ 真实列
 c.fields("web_logs")     # -> status、uri_stem、client_ip 等（真实列）
@@ -150,8 +201,9 @@ with Case.open("incident42") as c:
 
 | 分类 | 方法 |
 |---|---|
-| 生命周期 | `Case.create(name, case_root=)`、`Case.open(name, case_root=)`、`Case.list_cases(case_root=)`、`c.info()` |
-| 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=)` -> `IngestReport`；`c.ingest_background(sources, workers=, keep_raw=, keep_staging=)` -> `job_id`；`c.job_status(job_id=)` -> `dict \| None`；`c.list_jobs()` -> `list[dict]` |
+| 生命周期 | `Case.create(name, case_root=, cluster_config=)`、`Case.open(name, case_root=, cluster_config=)`、`Case.list_cases(case_root=)`、`c.info()` |
+| 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`；`c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`；`c.job_status(job_id=)` -> `dict \| None`；`c.list_jobs()` -> `list[dict]` |
+| 导入资源 | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto")` |
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
 | 原生 SQL | `c.query(sql)`、`c.query_chunks(sql, chunksize=)`、`c.db.table(name)`、`c.db.table_chunks(name, chunksize=)` |
@@ -165,12 +217,8 @@ with Case.open("incident42") as c:
 
 ## 在 Python 中使用分布式模式
 
-这里不存在另一套单独的 API——`Case.open()`/`Case.create()`/`Case.ingest()`/`Case.hunt()`
-每次运行时都会自动从环境变量中解析
-`seclogx.distributed.config.ClusterConfig`。只需在构造/使用
-`Case` 之前，设置好[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)中描述的那些
-`SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*`
-环境变量，导入与狩猎就会像命令行一样，自动通过配置好的任务队列与存储后端来执行——不需要修改任何代码。如果你需要在同一个进程里驱动多个配置各不相同的案例，也可以不依赖环境变量，直接在调用时传入显式的
-`cluster_config=` 参数来覆盖。
+`Case.create()` 与 `Case.open()` 在构造 Case 时从环境变量解析 `ClusterConfig`，也可传入显式的 `cluster_config=`。之后的前台 `ingest()` 与 `hunt()` 使用 Case 保存的配置，两个方法本身均不接受 `cluster_config` 参数。请在创建或打开 Case 前设置[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)所述的 `SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*` 环境变量，或在这两个工厂方法中传入配置。
+
+`ingest_background()` 会启动新的 CLI 进程，由子进程从继承的环境变量解析集群配置；内存中的显式 `c.cluster_config` 不会序列化给它。因此应在启动后台任务前配置环境变量。本地 `workers` 预算不控制分布式队列的工作进程总数。
 
 下一步：[《7. 常用查询》](07_recipes.zh-CN.md)，用这套 API（以及对应的 `seclogx search` 免 SQL 写法）给出的实际可用的例子。

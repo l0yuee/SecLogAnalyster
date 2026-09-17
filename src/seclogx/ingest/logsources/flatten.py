@@ -11,12 +11,17 @@ manifest-join is needed here.
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import ExitStack
 from pathlib import Path
 
 import duckdb
 
+from ..resources import CONVERSION_LOCK, IngestOptions
+from ..arrow_staging import arrow_reader
+
 from ...distributed.config import ClusterConfig
 from ...distributed.storage import ensure_hive_partition_dirs, get_storage_backend
+from .partitioning import PartitionRow
 from .schema import TABLES, cast_sql_for
 
 
@@ -27,6 +32,9 @@ def flatten_table(
     batch_id: str,
     ingested_at: datetime,
     cluster_config: ClusterConfig | None = None,
+    options: IngestOptions | None = None,
+    *,
+    partition_rows: list[PartitionRow] | None = None,
 ) -> int:
     if not ndjson_paths:
         return 0
@@ -36,63 +44,74 @@ def flatten_table(
     lake_location = backend.table_location(case_dir, table)
     backend.ensure_dir(lake_location)
 
-    con = duckdb.connect()
-    backend.configure_duckdb(con)
+    options = options or IngestOptions()
+    with CONVERSION_LOCK, duckdb.connect() as con, ExitStack() as inputs:
+        options.configure_connection(con)
+        backend.configure_duckdb(con)
 
-    paths_sql = "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in ndjson_paths) + "]"
-    # union_by_name: different staged files for the same table can have
-    # slightly different key sets (e.g. an Exchange log variant with extra
-    # '#Fields:' columns) -- union rather than requiring identical schemas.
-    from_sql = f"FROM read_ndjson_auto({paths_sql}, union_by_name=true) AS raw"
+        paths_sql = "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in ndjson_paths) + "]"
+        # Read normalized fields as text before applying the canonical casts.
+        # Automatic inference can interpret a timestamp-shaped message/user
+        # name as TIMESTAMP in one shard, changing its original spelling when
+        # cast back to VARCHAR. Fixed input types also make missing fields
+        # NULL consistently across sparse batches. Parser catchalls (extra,
+        # fields, actions, ...) are already JSON-serialized strings.
+        input_columns = "{" + ", ".join(f"'{col}': 'VARCHAR'" for col, _ in table_def["columns"]) + "}"
+        from_sql = f"FROM read_ndjson({paths_sql}, columns={input_columns}) AS raw"
+        is_arrow = [Path(path).suffix == ".arrow" for path in ndjson_paths]
+        if any(is_arrow) and not all(is_arrow):
+            raise ValueError("a conversion batch cannot mix Arrow and NDJSON staging")
 
-    cast_sql = cast_sql_for(table)
-    overrides = {
-        "ingest_batch_id": f"'{batch_id}'",
-        "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
-        "schema_version": "1",
-    }
-    # Columns DuckDB actually inferred from this batch's staged files -- a
-    # column every parser can emit but that happens to be absent from
-    # every row in this particular batch (e.g. no Exchange log variant
-    # with a given optional field) won't be in `raw`'s schema at all.
-    raw_columns = set(con.sql(f"SELECT * {from_sql}").columns)
+        def bind_arrow() -> None:
+            # RecordBatchReaders are single-pass. A legacy manifest fallback
+            # may need a separate reader for partition discovery and COPY.
+            inputs.close()
+            reader = inputs.enter_context(arrow_reader(ndjson_paths, [col for col, _ in table_def["columns"]]))
+            con.register("staged_arrow", reader)
 
-    select_exprs = []
-    for col, duckdb_type in table_def["columns"]:
-        if col in overrides:
-            expr = overrides[col]
-        else:
-            # A column absent from every staged file for this batch isn't
-            # in DuckDB's inferred schema for `raw`; fall back to NULL
-            # rather than referencing a column that doesn't exist.
-            expr = f"CAST(NULL AS {duckdb_type})" if col not in raw_columns else cast_sql[col]
-        select_exprs.append(f"{expr} AS {col}")
-    select_sql = ",\n  ".join(select_exprs)
+        if all(is_arrow):
+            bind_arrow()
+            from_sql = "FROM staged_arrow AS raw"
 
-    partition_columns = table_def["partition_by"]
-    partition_by = ", ".join(partition_columns)
-    select_query = f"SELECT {select_sql} {from_sql}"
+        cast_sql = cast_sql_for(table)
+        overrides = {
+            "ingest_batch_id": f"'{batch_id}'",
+            "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
+            "schema_version": "1",
+        }
+        select_exprs = []
+        for col, _ in table_def["columns"]:
+            expr = overrides[col] if col in overrides else cast_sql[col]
+            select_exprs.append(f"{expr} AS {col}")
+        select_sql = ",\n  ".join(select_exprs)
 
-    # DuckDB creates Hive partition directories as part of COPY. Two
-    # concurrent writers targeting the same new partition can race on
-    # Windows, where the losing CreateDirectory call is an error. Python's
-    # mkdir(exist_ok=True) handles this race, so initialize the finite set of
-    # partitions before COPY there. Enumerating them costs a second full
-    # pass over every staged file, so it's skipped on backends that don't
-    # have the race (POSIX local, and object storage, which has no
-    # directories at all) -- see StorageBackend.precreates_partition_dirs.
-    if backend.precreates_partition_dirs:
-        partition_rows = con.execute(f"SELECT DISTINCT {partition_by} FROM ({select_query})").fetchall()
-        ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+        partition_columns = table_def["partition_by"]
+        partition_by = ", ".join(partition_columns)
+        select_query = f"SELECT {select_sql} {from_sql}"
 
-    (row_count,) = con.execute(
-        f"""
-        COPY (
-          {select_query}
-        ) TO '{backend.copy_target(lake_location)}' (
-          FORMAT PARQUET, PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
-        )
-        """
-    ).fetchone()
-    con.close()
-    return int(row_count)
+        # DuckDB creates Hive partition directories as part of COPY. Two
+        # concurrent writers targeting the same new partition can race on
+        # Windows, where the losing CreateDirectory call is an error. Python's
+        # mkdir(exist_ok=True) handles this race, so initialize the finite set of
+        # partitions before COPY there. New manifests carry a bounded complete
+        # partition list, avoiding a second full pass over staged files.
+        # None retains the authoritative scan for legacy/unsupported metadata.
+        # Backends without this race need neither path.
+        if backend.precreates_partition_dirs:
+            if partition_rows is None:
+                partition_rows = con.execute(f"SELECT DISTINCT {partition_by} FROM ({select_query})").fetchall()
+                if all(is_arrow):
+                    bind_arrow()
+            ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+
+        (row_count,) = con.execute(
+            f"""
+            COPY (
+              {select_query}
+            ) TO '{backend.copy_target(lake_location)}' (
+              FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 1,
+              PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
+            )
+            """
+        ).fetchone()
+        return int(row_count)

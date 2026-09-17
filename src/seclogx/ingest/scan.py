@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from .common import MAX_CANDIDATE_SIZE, SKIP_SUFFIXES, SourceSpec
+from .common import SKIP_SUFFIXES, SourceSpec
 from .evtx.discovery import DiscoveredFile
 from .logsources.discovery import ClassifiedFile
 from .logsources.sniff import classify_file
@@ -110,10 +110,21 @@ def _identity(path: Path, st: os.stat_result) -> object:
     On Windows, `os.DirEntry.stat()` documents `st_ino`/`st_dev` as always
     zero (they aren't in the data the directory scan returns), which would
     otherwise collapse every file onto one key and drop the entire
-    acquisition after the first file. There we fall back to the resolved
-    path -- the pre-existing behavior, and correct, just not free."""
+    acquisition after the first file. Retry Path.stat() for a consistent
+    identity across directory and direct-file sources, then fall back to
+    the resolved path when the filesystem has no inode information."""
     if st.st_ino:
         return (st.st_dev, st.st_ino)
+    # Windows DirEntry.stat() can omit the inode although Path.stat()
+    # supplies it. Use the same identity for directory and direct-file
+    # sources, including hard links; mixing inode and path keys duplicates
+    # evidence and needlessly parses it again.
+    try:
+        identity_stat = path.stat()
+        if identity_stat.st_ino:
+            return (identity_stat.st_dev, identity_stat.st_ino)
+    except OSError:
+        pass
     try:
         return path.resolve()
     except OSError:
@@ -129,7 +140,8 @@ def scan_sources(
     EVTX candidate (by extension -- no content read needed) or an aux
     candidate (peeked and classified by content, matching
     `logsources.discovery.discover_and_classify`'s prior rules exactly:
-    same skip-suffix set, same size ceiling, same cross-source dedup).
+    same skip-suffix set and cross-source dedup). Nonempty auxiliary files
+    have no size ceiling; streaming parsers enforce individual record limits.
 
     `on_walked` is called during the walk with a running count of files
     seen so far (batched, see `_WALK_REPORT_INTERVAL`); `on_scanned` is
@@ -162,7 +174,7 @@ def scan_sources(
 
             if suffix in SKIP_SUFFIXES or identity in aux_seen:
                 continue
-            if st.st_size == 0 or st.st_size > MAX_CANDIDATE_SIZE:
+            if st.st_size == 0:
                 continue
             aux_seen[identity] = (path, host, st.st_size)
 

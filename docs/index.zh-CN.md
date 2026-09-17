@@ -4,12 +4,12 @@
 
 面向取证日志采集的、pandas 原生的快速威胁狩猎与分析工具：Windows 事件日志、计划任务、
 IIS/nginx/Apache/Tomcat Web 访问与错误日志、Exchange 日志，以及 Linux syslog/auditd/systemd
-journal 日志。
+journal 日志、数据库日志、腾讯云主机安全日志与 Windows 注册表配置单元。
 
 ## 指南
 
 1. **[快速上手](guides/01_getting_started.zh-CN.md)** -- seclogx 是做什么的、如何安装、案例工作区，以及快速上手示例。
-2. **[日志类型与模式](guides/02_log_types_and_schema.zh-CN.md)** -- 十一张表分别存放什么、该看什么、该查哪些字段。
+2. **[日志类型与模式](guides/02_log_types_and_schema.zh-CN.md)** -- 十二张表分别存放什么、该看什么、该查哪些字段。
 3. **[查询与搜索](guides/03_querying_and_search.zh-CN.md)** -- 原生 SQL、免 SQL 的 `search()` 接口，以及有界内存交付。
 4. **[威胁狩猎](guides/04_threat_hunting.zh-CN.md)** -- Sigma 规则、ATT&CK 标签，以及扩展检测能力。
 5. **[命令行参考](guides/05_cli_reference.zh-CN.md)** -- 每一个 `seclogx` 子命令。
@@ -28,4 +28,4 @@ journal 日志。
 - **[sigma_backend.md](sigma_backend.md)** -- 自定义的 DuckDB Sigma 后端是怎么工作的，以及如何扩展字段映射。
 - **[known_limitations.md](known_limitations.md)** -- 完整、最新的 v1 范围决策与边界情况列表。这是权威来源；上面的各指南只链接到它，不重复其内容。
 
-30 秒装好并跑起来的说明，以及一份精简的命令行/API 速查表，见仓库根目录的 `README.md`。
+安装说明及精简的命令行/API 速查表，见仓库根目录的 [README.md](../README.md)。

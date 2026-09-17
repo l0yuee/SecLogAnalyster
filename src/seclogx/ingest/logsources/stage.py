@@ -1,10 +1,11 @@
 """Per-file staging worker for the non-EVTX log families -- runs in a
 worker process (files are independent), dispatches on the classification
-from discover_and_classify(), and never raises: any parse exception is
-caught and reported as a failed file.
+from discover_and_classify(), and reports parse exceptions as failed or
+partially recovered files. I/O failures propagate so damaged staging is
+never published as successful input.
 
-Parsed rows are written straight to a per-file NDJSON staging file (same
-pattern as `ingest/evtx/stage.py`) rather than returned in-memory -- so the
+Parsed rows are written to bounded NDJSON or Arrow staging shards rather
+than returned in-memory -- so the
 coordinator never has to hold every row of every file in a batch at once,
 and only a small manifest object crosses the worker/coordinator boundary
 (over IPC locally, or over the job queue in distributed mode).
@@ -12,13 +13,19 @@ and only a small manifest object crosses the worker/coordinator boundary
 
 from __future__ import annotations
 
-import gzip
 import hashlib
-import json
+from contextlib import nullcontext
 from pathlib import Path
+
+from ..resources import IngestOptions
+from ..staging import StagingWriter
+from ..arrow_staging import ArrowStagingWriter
+from ...textdecode import prepare_text, use_prepared_text
 
 from .discovery import ClassifiedFile, sha256_file
 from .manifest import AuxStagedFile, StageStatus, now_iso
+from .partitioning import PartitionCollector
+from .schema import TABLES
 from .parsers.auditd import parse_auditd_file
 from .parsers.dblogs import (
     parse_mssql_file,
@@ -74,26 +81,15 @@ from .sniff import (
 )
 
 
-# See ingest/evtx/stage.py for why staged NDJSON is gzipped and why
-# level 1 -- same tradeoff, same DuckDB-side transparency on read.
-_GZIP_LEVEL = 1
-
-# One reusable encoder for the staging hot path. `json.dumps(...)` with any
-# non-default keyword argument constructs a fresh JSONEncoder per call and
-# skips the module's cached one, which showed up as a top-three cost when
-# profiling a multi-hundred-thousand-row ingest; `_stage_qcloud_stream`
-# below already avoided it, and this is the same fix for the main path.
-# `default=str` matches what the main path has always passed: a value no
-# encoder handles natively (a stray datetime, say) is staged as its text
-# form rather than failing the whole file.
-_encode_json = json.JSONEncoder(default=str, ensure_ascii=False, separators=(",", ":")).encode
-
 _QCLOUD_STREAM_PARSERS = {
     KIND_QCLOUD_YDSERVICE: stream_qcloud_ydservice_file,
     KIND_QCLOUD_GO: stream_qcloud_go_file,
     KIND_QCLOUD_SCANNER: stream_qcloud_scanner_file,
     KIND_QCLOUD_YDEYES: stream_qcloud_ydeyes_file,
 }
+
+# Keep small artifacts cheap; amortize IPC schemas/buffers over larger input.
+AUTO_ARROW_MIN_BYTES = 16 * 1024 * 1024
 
 
 def _short_hash(text: str) -> str:
@@ -106,72 +102,7 @@ def _staging_path(cf: ClassifiedFile, staging_dir: Path, table: str) -> Path:
     return host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson.gz"
 
 
-def _stage_qcloud_stream(
-    cf: ClassifiedFile, staging_dir: Path, file_sha256: str
-) -> AuxStagedFile:
-    """Stream a large Tencent client log directly into compressed staging."""
-    ndjson_path = _staging_path(cf, staging_dir, "qcloud_logs")
-    record_count = 0
-    error_count = 0
-    parse_error: str | None = None
-    encode_json = _encode_json
-
-    try:
-        with gzip.open(
-            ndjson_path, "wt", compresslevel=_GZIP_LEVEL, encoding="utf-8", newline="\n"
-        ) as out:
-
-            def emit(row: dict) -> None:
-                nonlocal record_count
-                row["source_path"] = str(cf.path)
-                row["source_file"] = cf.path.name
-                row["file_sha256"] = file_sha256
-                # Streaming rows are sparse: DuckDB's union_by_name + explicit
-                # schema supplies NULL for omitted optional columns. Reusing one
-                # encoder avoids per-record encoder construction on this hot path.
-                out.write(encode_json(row) + "\n")
-                record_count += 1
-
-            _, error_count = _QCLOUD_STREAM_PARSERS[cf.kind](cf.path, cf.host, emit)
-    except Exception as exc:  # noqa: BLE001 -- preserve successfully staged prefix
-        parse_error = str(exc)
-
-    if record_count == 0:
-        status = StageStatus.FAILED
-        ndjson_path.unlink(missing_ok=True)
-        ndjson_out = None
-    elif parse_error is not None or error_count:
-        status = StageStatus.PARTIAL
-        ndjson_out = str(ndjson_path)
-    else:
-        status = StageStatus.OK
-        ndjson_out = str(ndjson_path)
-
-    if parse_error is not None:
-        error_message = f"parse error: {parse_error}"
-    elif error_count:
-        error_message = f"{error_count} row(s) rejected (format mismatch)"
-    else:
-        error_message = None
-
-    return AuxStagedFile(
-        source_path=str(cf.path),
-        source_file=cf.path.name,
-        host=cf.host,
-        file_sha256=file_sha256,
-        size_bytes=cf.size_bytes,
-        kind=cf.kind,
-        table="qcloud_logs",
-        status=status,
-        record_count=record_count,
-        error_count=error_count,
-        error_message=error_message,
-        ndjson_path=ndjson_out,
-        staged_at=now_iso(),
-    )
-
-
-def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
+def stage_aux_file(cf: ClassifiedFile, staging_dir: Path, options: IngestOptions | None = None) -> AuxStagedFile:
     # Checked before hashing: an unrecognized file (PE/ELF binaries and
     # any other non-log content mixed into evidence, which sniff.py
     # already spent only a cheap 16KB peek on) is never staged, and its
@@ -197,8 +128,13 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
             staged_at=now_iso(),
         )
 
+    prepared = None
     try:
-        file_sha256 = sha256_file(cf.path)
+        if cf.kind not in (KIND_REGISTRY_HIVE, KIND_SCHEDULED_TASK):
+            prepared = prepare_text(cf.path, utf16_requires_bom=cf.kind in _QCLOUD_STREAM_PARSERS)
+            file_sha256 = prepared.sha256
+        else:
+            file_sha256 = sha256_file(cf.path)
     except OSError as e:
         return AuxStagedFile(
             source_path=str(cf.path),
@@ -215,48 +151,53 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
             staged_at=now_iso(),
         )
 
-    if cf.kind in _QCLOUD_STREAM_PARSERS:
-        return _stage_qcloud_stream(cf, staging_dir, file_sha256)
+    options = options or IngestOptions()
+    table = _table_for_kind(cf.kind)
+    staging_path = _staging_path(cf, staging_dir, table)
+    if options.staging_format == "arrow" or (
+        options.staging_format == "auto" and cf.size_bytes >= AUTO_ARROW_MIN_BYTES
+    ):
+        staging_path = staging_path.with_name(staging_path.name.removesuffix(".ndjson.gz") + ".arrow")
+        writer = ArrowStagingWriter(staging_path, options.staging_chunk_bytes,
+                                    [col for col, _ in TABLES[table]["columns"]])
+    else:
+        writer = StagingWriter(staging_path, options.staging_chunk_bytes)
+    partitions = PartitionCollector(table)
+    error_count = 0
+    parse_error = None
+    source_path, source_file = str(cf.path), cf.path.name
+
+    def emit(row: dict) -> None:
+        row["source_path"] = source_path
+        row["source_file"] = source_file
+        row["file_sha256"] = file_sha256
+        writer.write(row)
+        partitions.add(row)
 
     try:
-        rows, table, ok_count, error_count = _parse(cf)
-    except Exception as e:  # noqa: BLE001 -- never let one bad file abort the ingest run
-        return AuxStagedFile(
-            source_path=str(cf.path),
-            source_file=cf.path.name,
-            host=cf.host,
-            file_sha256=file_sha256,
-            size_bytes=cf.size_bytes,
-            kind=cf.kind,
-            table=None,
-            status=StageStatus.FAILED,
-            record_count=0,
-            error_count=0,
-            error_message=f"parse error: {e}",
-            staged_at=now_iso(),
-        )
+        with writer, (use_prepared_text(prepared) if prepared else nullcontext()):
+            if cf.kind == KIND_SCHEDULED_TASK and cf.size_bytes > 8 * 1024 * 1024:
+                raise ValueError("Scheduled Task XML exceeds the 8 MiB document limit")
+            _, _, _, error_count = _parse(cf, emit=emit)
+    except OSError:
+        # A full disk / write failure is not a recoverable parse error. Do
+        # not present potentially damaged staging shards as successful input.
+        for chunk in writer.chunks:
+            Path(chunk.path).unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        parse_error = f"parse error: {exc}"
+        error_count += 1
 
-    for row in rows:
-        row["source_path"] = str(cf.path)
-        row["source_file"] = cf.path.name
-        row["file_sha256"] = file_sha256
-
+    ok_count = writer.record_count
     if ok_count == 0:
         status = StageStatus.FAILED
-    elif error_count > 0:
+    elif error_count > 0 or parse_error:
         status = StageStatus.PARTIAL
     else:
         status = StageStatus.OK
 
-    ndjson_out: str | None = None
-    if rows:
-        # Hash suffix avoids collisions when files with the same basename
-        # are discovered under the same host from different acquisition
-        # paths (same scheme as ingest/evtx/stage.py).
-        ndjson_path = _staging_path(cf, staging_dir, table)
-        with gzip.open(ndjson_path, "wt", compresslevel=_GZIP_LEVEL, encoding="utf-8", newline="\n") as out:
-            out.writelines(_encode_json(row) + "\n" for row in rows)
-        ndjson_out = str(ndjson_path)
+    ndjson_out = writer.chunks[0].path if writer.chunks else None
 
     return AuxStagedFile(
         source_path=str(cf.path),
@@ -269,64 +210,98 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path) -> AuxStagedFile:
         status=status,
         record_count=ok_count,
         error_count=error_count,
-        error_message=(f"{error_count} row(s) rejected (format mismatch)" if error_count else None),
+        error_message=parse_error or (f"{error_count} row(s) rejected (format mismatch)" if error_count else None),
         ndjson_path=ndjson_out,
         staged_at=now_iso(),
+        chunks=writer.chunks,
+        partition_rows=partitions.rows,
     )
 
 
-def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
+def _table_for_kind(kind: str) -> str:
+    if kind == KIND_SCHEDULED_TASK:
+        return "scheduled_tasks"
+    if kind in (KIND_IIS, KIND_WEB_ACCESS):
+        return "web_logs"
+    if kind == KIND_EXCHANGE_MESSAGE_TRACKING:
+        return "exchange_message_tracking"
+    if kind == KIND_EXCHANGE_GENERIC:
+        return "exchange_logs"
+    if kind in (KIND_WEB_ERROR_NGINX, KIND_WEB_ERROR_APACHE, KIND_WEB_ERROR_TOMCAT, KIND_IIS_HTTPERR):
+        return "web_error_logs"
+    if kind == KIND_SYSLOG:
+        return "syslog"
+    if kind == KIND_AUDITD:
+        return "auditd_logs"
+    if kind == KIND_JOURNAL_EXPORT:
+        return "journal_logs"
+    if kind in (KIND_MYSQL_ERROR, KIND_MYSQL_GENERAL, KIND_MYSQL_SLOW, KIND_POSTGRESQL, KIND_MSSQL, KIND_ORACLE_ALERT):
+        return "db_logs"
+    if kind in _QCLOUD_STREAM_PARSERS:
+        return "qcloud_logs"
+    if kind == KIND_REGISTRY_HIVE:
+        return "registry"
+    raise ValueError(f"no parser registered for kind {kind!r}")
+
+
+def _parse(cf: ClassifiedFile, *, emit=None) -> tuple[list[dict], str, int, int]:
     if cf.kind == KIND_SCHEDULED_TASK:
         row = parse_task_xml(cf.path, cf.host)
+        if emit is not None:
+            emit(row)
+            return [], "scheduled_tasks", 1, 0
         return [row], "scheduled_tasks", 1, 0
+    if cf.kind in _QCLOUD_STREAM_PARSERS and emit is not None:
+        ok, err = _QCLOUD_STREAM_PARSERS[cf.kind](cf.path, cf.host, emit)
+        return [], "qcloud_logs", ok, err
     if cf.kind == KIND_IIS:
-        rows, ok, err = parse_iis_file(cf.path, cf.host)
+        rows, ok, err = parse_iis_file(cf.path, cf.host, emit=emit)
         return rows, "web_logs", ok, err
     if cf.kind == KIND_WEB_ACCESS:
         log_type = guess_web_log_type(cf.path)
-        rows, ok, err = parse_web_access_file(cf.path, cf.host, log_type)
+        rows, ok, err = parse_web_access_file(cf.path, cf.host, log_type, emit=emit)
         return rows, "web_logs", ok, err
     if cf.kind in (KIND_EXCHANGE_MESSAGE_TRACKING, KIND_EXCHANGE_GENERIC):
-        table, rows, ok, err = parse_exchange_csv(cf.path, cf.host, cf.kind)
+        table, rows, ok, err = parse_exchange_csv(cf.path, cf.host, cf.kind, emit=emit)
         return rows, table, ok, err
     if cf.kind == KIND_WEB_ERROR_NGINX:
-        rows, ok, err = parse_nginx_error_file(cf.path, cf.host)
+        rows, ok, err = parse_nginx_error_file(cf.path, cf.host, emit=emit)
         return rows, "web_error_logs", ok, err
     if cf.kind == KIND_WEB_ERROR_APACHE:
-        rows, ok, err = parse_apache_error_file(cf.path, cf.host)
+        rows, ok, err = parse_apache_error_file(cf.path, cf.host, emit=emit)
         return rows, "web_error_logs", ok, err
     if cf.kind == KIND_WEB_ERROR_TOMCAT:
-        rows, ok, err = parse_tomcat_error_file(cf.path, cf.host)
+        rows, ok, err = parse_tomcat_error_file(cf.path, cf.host, emit=emit)
         return rows, "web_error_logs", ok, err
     if cf.kind == KIND_IIS_HTTPERR:
-        rows, ok, err = parse_iis_httperr_file(cf.path, cf.host)
+        rows, ok, err = parse_iis_httperr_file(cf.path, cf.host, emit=emit)
         return rows, "web_error_logs", ok, err
     if cf.kind == KIND_SYSLOG:
-        rows, ok, err = parse_syslog_file(cf.path, cf.host)
+        rows, ok, err = parse_syslog_file(cf.path, cf.host, emit=emit)
         return rows, "syslog", ok, err
     if cf.kind == KIND_AUDITD:
-        rows, ok, err = parse_auditd_file(cf.path, cf.host)
+        rows, ok, err = parse_auditd_file(cf.path, cf.host, emit=emit)
         return rows, "auditd_logs", ok, err
     if cf.kind == KIND_JOURNAL_EXPORT:
-        rows, ok, err = parse_journal_file(cf.path, cf.host)
+        rows, ok, err = parse_journal_file(cf.path, cf.host, emit=emit)
         return rows, "journal_logs", ok, err
     if cf.kind == KIND_MYSQL_ERROR:
-        rows, ok, err = parse_mysql_error_file(cf.path, cf.host)
+        rows, ok, err = parse_mysql_error_file(cf.path, cf.host, emit=emit)
         return rows, "db_logs", ok, err
     if cf.kind == KIND_MYSQL_GENERAL:
-        rows, ok, err = parse_mysql_general_file(cf.path, cf.host)
+        rows, ok, err = parse_mysql_general_file(cf.path, cf.host, emit=emit)
         return rows, "db_logs", ok, err
     if cf.kind == KIND_MYSQL_SLOW:
-        rows, ok, err = parse_mysql_slow_file(cf.path, cf.host)
+        rows, ok, err = parse_mysql_slow_file(cf.path, cf.host, emit=emit)
         return rows, "db_logs", ok, err
     if cf.kind == KIND_POSTGRESQL:
-        rows, ok, err = parse_postgresql_file(cf.path, cf.host)
+        rows, ok, err = parse_postgresql_file(cf.path, cf.host, emit=emit)
         return rows, "db_logs", ok, err
     if cf.kind == KIND_MSSQL:
-        rows, ok, err = parse_mssql_file(cf.path, cf.host)
+        rows, ok, err = parse_mssql_file(cf.path, cf.host, emit=emit)
         return rows, "db_logs", ok, err
     if cf.kind == KIND_ORACLE_ALERT:
-        rows, ok, err = parse_oracle_alert_file(cf.path, cf.host)
+        rows, ok, err = parse_oracle_alert_file(cf.path, cf.host, emit=emit)
         return rows, "db_logs", ok, err
     if cf.kind == KIND_QCLOUD_YDSERVICE:
         rows, ok, err = parse_qcloud_ydservice_file(cf.path, cf.host)
@@ -341,6 +316,6 @@ def _parse(cf: ClassifiedFile) -> tuple[list[dict], str, int, int]:
         rows, ok, err = parse_qcloud_ydeyes_file(cf.path, cf.host)
         return rows, "qcloud_logs", ok, err
     if cf.kind == KIND_REGISTRY_HIVE:
-        rows, ok, err = parse_registry_hive_file(cf.path, cf.host)
+        rows, ok, err = parse_registry_hive_file(cf.path, cf.host, emit=emit)
         return rows, "registry", ok, err
     raise ValueError(f"no parser registered for kind {cf.kind!r}")

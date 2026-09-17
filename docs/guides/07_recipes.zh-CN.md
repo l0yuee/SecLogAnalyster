@@ -11,7 +11,28 @@
 SQL，前两个查询同时给出了 `seclogx search` / `Case.search()` 的对应写法——下面每一个查询都可以照这个模式（用条件字典代替
 `WHERE` 子句）改写，不限于 `events` 表。
 
-**发现 LOLBin 滥用（由异常父进程启动的进程）：**
+本项目的本地 Python 和 JupyterLab 都先执行 `conda activate python314`，并选择
+`python314` 内核。`c.query()` 会返回完整 DataFrame；预览时先在 SQL 中过滤、聚合或
+加 `LIMIT`。先取全量结果再调用 pandas `.head()` 并不能减少取数内存。
+确实需要全部大结果时，使用 `c.query_chunks(sql, chunksize=100_000)` 逐块消费，
+不要把所有块收集成列表或重新拼接。SQL 扫描、排序和聚合仍有自身资源开销。
+
+大批量导入后，可先用小结果确认能够进入分析：
+
+```python
+c.query("SELECT status, count(*) AS n FROM web_logs GROUP BY status ORDER BY status")
+c.query("""
+    SELECT client_ip, count(*) AS n FROM web_logs
+    WHERE status >= 400 AND status < 600
+    GROUP BY client_ip ORDER BY n DESC LIMIT 10
+""")
+```
+
+下文的明细 SQL 表达的是匹配条件；匹配量大时，应添加主机、时间过滤和预览上限，或用分块 API。
+`auth_events()` 会先用 SQL 筛选候选，但仍物化候选与派生结果；狩猎和可疑项辅助方法也返回
+DataFrame，不是通用的流式结果接口。
+
+**检查 rundll32 执行及其父进程，排查可能的 LOLBin 滥用：**
 
 ```sql
 SELECT time_created, host, computer,
@@ -106,7 +127,7 @@ r.matches[["time_created", "host", "sigma_rule_title", "sigma_attack_ids"]].sort
 ```sql
 SELECT host, log_type, time_created, client_ip, method, uri_stem, status
 FROM web_logs
-WHERE status >= 400
+WHERE status >= 400 AND status < 600
 ORDER BY time_created
 ```
 
@@ -224,8 +245,13 @@ ORDER BY time_created
 **数据库日志：`rows_examined` 最高的 MySQL 慢查询（可能是数据泄露式的大范围扫描），以及所有引擎上的数据库认证失败/错误：**
 
 ```python
-slow = c.db_logs(log_type="mysql_slow").sort_values("rows_examined", ascending=False)
-slow[["time_created", "host", "user_name", "client_address", "query_time_sec", "rows_examined", "message"]].head(20)
+slow = c.query("""
+    SELECT time_created, host, user_name, client_address,
+           query_time_sec, rows_examined, message
+    FROM db_logs WHERE log_type = 'mysql_slow'
+    ORDER BY rows_examined DESC NULLS LAST LIMIT 20
+""")
+slow
 ```
 
 ```sql
@@ -240,7 +266,11 @@ ORDER BY time_created
 **注册表：找出所有配置单元中熵值偏高的二进制值（可能是藏在注册表值里的编码/打包载荷），以及一次快速的持久化排查：**
 
 ```python
-c.registry().query("entropy > 7.5 and value_size >= 64").sort_values("entropy", ascending=False)
+c.query("""
+    SELECT host, hive_type, full_path, value_name, entropy, value_size
+    FROM registry WHERE entropy > 7.5 AND value_size >= 64
+    ORDER BY entropy DESC LIMIT 100
+""")
 
 c.suspicious_registry()[["host", "full_path", "value_name", "suspicion_reasons"]]
 ```

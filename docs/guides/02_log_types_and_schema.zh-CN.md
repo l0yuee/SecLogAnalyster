@@ -6,7 +6,7 @@
 
 ---
 
-本指南回答的问题是：seclogx 归一化的九大日志家族里，每张表分别存放什么，以及应该先看什么。逐列的精确参考（类型、可空性、分区键）见
+本指南回答的问题是：seclogx 支持的日志家族里，每张表分别存放什么，以及应该先看什么。逐列的精确参考（类型、可空性、分区键）见
 `docs/schema.md`；每种格式具体是怎么导入的见 `docs/architecture.md`。
 
 ## 归一化事件模式（Normalized event schema）
@@ -39,7 +39,7 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 ```
 
 > **只要 `WHERE` 子句中把 `(event_data ->> 'Field')` 与其他条件用
-> `AND`/`OR`/`LIKE` 组合在一起，就务必给它加上括号。** 经过实测确认，DuckDB
+> `AND`/`OR`/`LIKE` 组合在一起，就务必给它加上括号。** DuckDB
 > 的 `->`/`->>` 运算符在复合表达式中与 `LIKE`/`AND` 的结合优先级并不符合直觉——不加括号的
 > `event_data ->> 'Image' LIKE '%foo%' AND ...`
 > 可能会被错误解析，并在执行时报出一个令人困惑的类型转换错误
@@ -57,6 +57,16 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 访问器，直接返回 `pandas.DataFrame`（`c.web_logs()`、`c.scheduled_tasks()` 等），与
 `events` 通过 `summary()`/`hosts()`/`channels()` 获得的一等待遇完全相同——见[《6. Python API》](06_python_api.zh-CN.md)。
 
+两种暂存格式使用相同的归一化列。默认情况下，非 EVTX 源文件达到 16 MiB 时使用
+Arrow IPC/ZSTD level 1，更小的文件使用 gzip NDJSON。二者均使用固定输入类型再转换为规范类型：
+缺失字段及无效的类型值成为 `NULL`，形似时间戳的普通文本保持原样。`extra`、`fields`
+等 JSON 列在 Parquet 中实际保存为 JSON 文本。显式带时区偏移的时间归一为 UTC；
+不带偏移的时间保留原始钟面值，不猜测时区。
+
+导入会逐条输出解析结果，但整表 DataFrame 仍会占用与结果总量相应的内存。大结果应使用
+`_chunks` 访问器，见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)。每条管线仍先完成暂存，
+再分批转换为 Parquet；超过 2 GiB 的源文件可以进入解析，单条记录等限制仍然适用。
+
 | 表 | 存放内容 | 关键列 |
 |---|---|---|
 | `web_logs` | **访问日志**：IIS、nginx、Apache、Tomcat 的 HTTP 访问日志，统一存放 | `log_type`、`client_ip`、`method`、`uri_stem`、`uri_query`、`status`、`user_agent`、`referer` |
@@ -73,12 +83,12 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 
 在查询这些表之前，有几点需要了解：
 
-- **格式判定基于文件内容，而非文件名或扩展名**——活跃系统上的计划任务文件根本没有扩展名，取证工具也经常重命名导出的日志。任何不匹配已支持格式的文件都会在导入摘要中被报告为“无法识别”，绝不会被静默跳过。
+- **进入分类的文件按内容判定格式**——活跃系统上的计划任务文件根本没有扩展名，取证工具也经常重命名导出的日志。分类后不匹配已支持格式的文件会被报告为“无法识别”；空文件、配置的跳过扩展名和不可访问路径不一定计入该统计，见[已知限制](../known_limitations.md)。
 - **`web_logs` 覆盖访问日志类别，`web_error_logs` 覆盖错误/诊断日志类别**——这是每个
   Web 应用都会产生的两大日志类别。二者被拆成两张独立的表，因为它们在结构上完全不相关（访问日志有请求/响应的形态；错误日志只是严重级别加自由文本）。
 - **在 `web_logs` 中，nginx、Apache、Tomcat 之间的区分是尽力而为的标签，并非确切检测**——三者默认使用的
   Common/Combined 日志格式在字节层面完全一致；当没有路径/文件名线索时，`log_type` 会回退为
-  `web_access`。IIS 总能被可靠识别（其头部自描述）。
+  `web_access`。IIS 根据自描述头部识别；头部缺失或不符合格式时仍可能无法识别。
 - **在 `web_error_logs` 中，引擎标签才是真正的检测结果**——与访问日志不同，每种引擎的错误日志格式各不相同且互不歧义。只有各引擎的默认/标准格式会被识别（自定义的
   `log_format`/`ErrorLogFormat`，或混入 Tomcat `catalina.out`
   中的原始未结构化标准输出，会导致这些行被报告为解析错误，而不是被错误解析）。
@@ -100,8 +110,8 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   json`），而不是二进制 journal 本身（`/var/log/journal/**`）——后者不具备可移植性，未被导入。
 - **`db_logs` 通过 `log_type` 统一了六种子格式**：`mysql_error`、
   `mysql_general`、`mysql_slow`、`postgresql`、`mssql`、`oracle`。只有
-  `mysql_slow` 会写入 `query_time_sec`/`rows_examined`/`user_name`/
-  `client_address`；只有 `mysql_error`/`oracle` 会写入
+  `mysql_slow` 会写入 `query_time_sec`/`rows_examined`/`client_address`；
+  PostgreSQL 中存在用户名时也会写入 `user_name`。只有 `mysql_error`/`oracle` 会写入
   `error_code`；某个引擎不产生的列，对应行就直接为 NULL——各子格式具体写入哪些列见
   `docs/schema.md`。检测方式与本页其他表一样基于内容，但 MySQL
   的通用查询日志、慢查询日志与 Oracle 告警日志都依赖文件早期出现的标记行/头部行/时间戳行——如果某个数据库日志没有被正确识别，见
@@ -115,7 +125,8 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
   + `key_path`，例如 `HKEY_LOCAL_MACHINE\SOFTWARE\...`、
   `HKEY_USERS\<用户>\...`）——这与取证注册表工具本身呈现配置单元的方式一致。每个值一行，另外每个没有任何值的键也单独一行（避免键本身的存在与最后写入时间被丢失）；`entropy`
   只针对二进制类型的值计算。事务日志恢复与配置单元类型识别方面的注意事项见
-  `docs/known_limitations.md`。
+  `docs/known_limitations.md`。遍历使用可寻址的文件，但事务日志恢复和单个大值仍可能消耗较多内存；
+  保存的二进制十六进制文本只覆盖前 8 KiB 原始字节，熵则按完整二进制值计算。
 - 常用查询见[《7. 常用查询》](07_recipes.zh-CN.md)，完整的取舍决定见 `docs/known_limitations.md`。
 
 ## 速查表：如何分析每一类日志

@@ -14,6 +14,14 @@ import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from ....textdecode import iter_text_lines
+
+# A malformed file can otherwise attach every remaining line to one record.
+# Exceeding either limit raises, so staging reports a partial/failed source;
+# it never emits a silently truncated logical record.
+_MAX_LOGICAL_RECORD_CHARS = 4 * 1024 * 1024
+_MAX_LOGICAL_RECORD_LINES = 100_000
+
 _YDSERVICE_RE = re.compile(
     r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) "
     r"(?P<pid>\d+) (?P<tid>\d+) (?P<level>[A-Za-z]+) "
@@ -171,7 +179,9 @@ def _enrich(row: dict) -> None:
         extra["file_exists"] = match.group("file_exists").lower() == "true"
         extra["process_exists"] = match.group("proc_exists").lower() == "true"
 
-    match = _EXECUTE_COMMAND_RE.match(message) if message.startswith("Execute Command ") else None
+    # Command summaries describe their first line; subsequent output belongs
+    # to the same raw record but must not prevent identifying the command.
+    match = _EXECUTE_COMMAND_RE.match(message.partition("\n")[0]) if message.startswith("Execute Command ") else None
     if match:
         row["event_type"] = "command_execution"
         extra.update(uid=int(match.group("uid")), gid=int(match.group("gid")), command=match.group("command"))
@@ -212,28 +222,10 @@ def _enrich(row: dict) -> None:
         row["extra"] = json.dumps(extra, ensure_ascii=False)
 
 
-def _stream_encoding(path: Path) -> str:
-    """Choose an encoding from a bounded prefix without loading the file."""
-    with path.open("rb") as source:
-        prefix = source.read(64 * 1024)
-    if prefix.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return "utf-16"
-    try:
-        prefix.decode("utf-8-sig")
-        return "utf-8-sig"
-    except UnicodeError:
-        try:
-            prefix.decode("gb18030")
-            return "gb18030"
-        except UnicodeError:
-            return "latin-1"
-
-
 def _iter_qcloud_lines(path: Path) -> Iterator[str]:
-    encoding = _stream_encoding(path)
-    with path.open("r", encoding=encoding, errors="replace", newline="") as source:
-        for line in source:
-            yield line.rstrip("\r\n")
+    # QCloud historically only treats BOM-marked files as UTF-16; trying
+    # BOM-less UTF-16 before GB18030 can accept Chinese log bytes as gibberish.
+    yield from iter_text_lines(path, utf16_requires_bom=True)
 
 
 def _stream_parsed_rows(
@@ -244,31 +236,53 @@ def _stream_parsed_rows(
 ) -> tuple[int, int]:
     """Parse with one-row look-behind and emit completed logical records.
 
-    Holding one row is necessary because Tencent scanner/account records can
-    continue on the next physical line. It also keeps memory independent of
-    file size when staging multi-million-line logs.
+    Continuations accumulate in a bounded list and are joined/enriched once,
+    when the complete record is known. Limits apply to a logical record,
+    rather than the file, and exceeding them raises instead of truncating.
     """
     pending: dict | None = None
+    continuation_lines: list[str] = []
+    pending_chars = 0
     record_count = 0
     error_count = 0
+
+    def flush() -> None:
+        nonlocal record_count
+        if pending is None:
+            return
+        if continuation_lines:
+            suffix = "\n" + "\n".join(continuation_lines)
+            pending["message"] += suffix
+            pending["raw_line"] += suffix
+        _enrich(pending)
+        emit(pending)
+        record_count += 1
+
     for line in _iter_qcloud_lines(path):
         if not line.strip():
             continue
         match = pattern.match(line)
         if match:
-            if pending is not None:
-                emit(pending)
-                record_count += 1
+            flush()
+            if len(line) > _MAX_LOGICAL_RECORD_CHARS:
+                raise ValueError(
+                    f"QCloud logical record exceeds {_MAX_LOGICAL_RECORD_CHARS:,} characters in {path}; "
+                    "record was not truncated"
+                )
             pending = make_row(match, line)
+            continuation_lines = []
+            pending_chars = len(line)
         elif pending is None:
             error_count += 1
         else:
-            pending["message"] = f"{pending['message']}\n{line}"
-            pending["raw_line"] = f"{pending['raw_line']}\n{line}"
-            _enrich(pending)
-    if pending is not None:
-        emit(pending)
-        record_count += 1
+            pending_chars += len(line) + 1
+            if pending_chars > _MAX_LOGICAL_RECORD_CHARS or len(continuation_lines) + 2 > _MAX_LOGICAL_RECORD_LINES:
+                raise ValueError(
+                    f"QCloud logical record exceeds {_MAX_LOGICAL_RECORD_CHARS:,} characters or "
+                    f"{_MAX_LOGICAL_RECORD_LINES:,} lines in {path}; record was not truncated"
+                )
+            continuation_lines.append(line)
+    flush()
     return record_count, error_count
 
 
@@ -288,7 +302,6 @@ def stream_qcloud_ydservice_file(
             thread_id=int(match.group("tid")),
             message=match.group("message"),
         )
-        _enrich(row)
         return row
 
     return _stream_parsed_rows(path, _YDSERVICE_RE, make_row, emit)
@@ -308,7 +321,6 @@ def stream_qcloud_go_file(path: Path, host: str, emit: Callable[[dict], None]) -
             source_line=int(match.group("line")),
             message=match.group("message"),
         )
-        _enrich(row)
         return row
 
     return _stream_parsed_rows(path, _GO_RE, make_row, emit)
@@ -327,7 +339,6 @@ def stream_qcloud_scanner_file(
             module=log_type,
             message=match.group("message"),
         )
-        _enrich(row)
         return row
 
     return _stream_parsed_rows(path, _SCANNER_RE, make_row, emit)
@@ -345,7 +356,6 @@ def stream_qcloud_ydeyes_file(
             module="YDEyes",
             message=match.group("message"),
         )
-        _enrich(row)
         return row
 
     return _stream_parsed_rows(path, _YDEYES_RE, make_row, emit)

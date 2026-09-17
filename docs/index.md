@@ -4,15 +4,15 @@
 
 Fast, pandas-friendly threat hunting and analysis over forensic log
 acquisitions: Windows Event Log, Scheduled Tasks, IIS/nginx/Apache/Tomcat
-web access & error logs, Exchange logs, and Linux syslog/auditd/systemd
-journal logs.
+web access & error logs, Exchange logs, Linux syslog/auditd/systemd journal,
+database logs, Tencent Cloud Host Security logs, and Windows Registry hives.
 
 ## Guides
 
 1. **[Getting started](guides/01_getting_started.md)** -- what seclogx is
    for, installation, the case workspace, and a quickstart.
 2. **[Log types and schema](guides/02_log_types_and_schema.md)** -- what
-   each of the eleven tables holds, what to look for, and which fields to
+   each of the twelve tables holds, what to look for, and which fields to
    search on.
 3. **[Querying and search](guides/03_querying_and_search.md)** -- raw
    SQL, the no-SQL `search()` interface, and bounded-memory delivery.
@@ -46,5 +46,5 @@ journal logs.
   current list of v1 scope decisions and edge cases. This is the source
   of truth; the guides above link to it rather than restating it.
 
-See the repo root `README.md` for install-in-30-seconds instructions and
+See the repo root [README.md](../README.md) for installation instructions and
 a condensed CLI/API cheat sheet.

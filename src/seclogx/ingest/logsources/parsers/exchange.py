@@ -14,12 +14,14 @@ dropped just because they aren't message tracking.
 from __future__ import annotations
 
 import csv
-import io
 import json
 from datetime import datetime
+from itertools import chain
 from pathlib import Path
+from typing import Callable, Iterator
 
-from ..sniff import _decode_lines
+from ....textdecode import MAX_TEXT_RECORD_CHARS, TextRecordTooLargeError, iter_text_lines
+from ._stream import RowSink
 
 _MESSAGE_TRACKING_FIELD_MAP = {
     "date-time": "time_created",
@@ -60,44 +62,56 @@ def _parse_datetime(raw: str) -> str | None:
     return None
 
 
-def _read_header(path: Path) -> tuple[list[str] | None, str | None, list[str]]:
-    """Returns (fields, log_type_header, remaining_data_lines) by scanning
-    line-by-line so this doesn't hold the whole file in memory twice."""
-    raw = path.read_bytes()
-    lines = _decode_lines(raw)
+def _record_lines(first: str, lines: Iterator[str], path: Path) -> Iterator[str]:
+    """Feed exactly as many physical lines as csv.reader requests for a row.
+
+    Header-like text inside a quoted field is data, and original newline
+    characters are preserved. Enforce a limit on the whole logical record,
+    including when a malformed quoted field would otherwise consume EOF.
+    """
+    length = 0
+    for line in chain((first,), lines):
+        length += len(line)
+        if length > MAX_TEXT_RECORD_CHARS:
+            raise TextRecordTooLargeError(
+                f"Exchange CSV record exceeds {MAX_TEXT_RECORD_CHARS} characters: {path}"
+            )
+        yield line
+
+
+def parse_exchange_csv(
+    path: Path, host: str, subkind: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[str, list[dict], int, int]:
+    """Returns (table, rows, ok_count, error_count) where table is
+    'exchange_message_tracking' or 'exchange_logs'."""
     fields: list[str] | None = None
     log_type_header: str | None = None
-    data_lines: list[str] = []
+    rows = RowSink(emit)
+    error_count = 0
+    table = "exchange_message_tracking" if subkind == "exchange_message_tracking" else "exchange_logs"
+
+    lines = iter_text_lines(path, keepends=True)
     for line in lines:
         if not line.strip():
             continue
         if line.startswith("#Fields:"):
-            fields = [t.strip() for t in line[len("#Fields:") :].split(",")]
+            fields = [t.strip() for t in line[len("#Fields:"):].split(",")]
             continue
         if line.startswith("#Log-type:"):
-            log_type_header = line[len("#Log-type:") :].strip()
+            log_type_header = line[len("#Log-type:"):].strip()
             continue
         if line.startswith("#"):
             continue
-        data_lines.append(line)
-    return fields, log_type_header, data_lines
-
-
-def parse_exchange_csv(path: Path, host: str, subkind: str) -> tuple[str, list[dict], int, int]:
-    """Returns (table, rows, ok_count, error_count) where table is
-    'exchange_message_tracking' or 'exchange_logs'."""
-    fields, log_type_header, data_lines = _read_header(path)
-    if not fields:
-        return "exchange_logs", [], 0, len(data_lines)
-
-    rows: list[dict] = []
-    error_count = 0
-    table = "exchange_message_tracking" if subkind == "exchange_message_tracking" else "exchange_logs"
-
-    for line in data_lines:
+        if not fields:
+            error_count += 1
+            continue
         try:
-            values = next(csv.reader(io.StringIO(line)))
-        except csv.Error:
+            values = next(csv.reader(_record_lines(line, lines, path), strict=True))
+        except csv.Error as exc:
+            if "field larger than field limit" in str(exc):
+                raise TextRecordTooLargeError(
+                    f"Exchange CSV field exceeds {csv.field_size_limit()} characters: {path}"
+                ) from exc
             error_count += 1
             continue
         if len(values) != len(fields):
@@ -118,7 +132,7 @@ def parse_exchange_csv(path: Path, host: str, subkind: str) -> tuple[str, list[d
                 }
             )
 
-    return table, rows, len(rows), error_count
+    return table if fields else "exchange_logs", rows.rows, rows.count, error_count
 
 
 def _normalize_message_tracking(rec: dict, host: str) -> dict:

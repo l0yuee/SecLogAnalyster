@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
+
+from ..resources import CONVERSION_LOCK, IngestOptions
 import pandas as pd
 
 from ...distributed.config import ClusterConfig
@@ -31,6 +33,7 @@ def flatten_case(
     batch_id: str,
     keep_raw: bool = False,
     cluster_config: ClusterConfig | None = None,
+    options: IngestOptions | None = None,
 ) -> int:
     """Flatten all successfully-staged NDJSON files into the case's Parquet lake.
 
@@ -46,69 +49,71 @@ def flatten_case(
 
     ingested_at = datetime.now(timezone.utc)
 
-    con = duckdb.connect()
-    backend.configure_duckdb(con)
-    manifest_df = pd.DataFrame(
-        [
-            {
-                "ndjson_path": f.ndjson_path,
-                "host": f.host,
-                "source_path": f.source_path,
-                "source_file": f.source_file,
-                "file_sha256": f.file_sha256,
-            }
-            for f in ok_files
-        ]
-    )
-    con.register("manifest_df", manifest_df)
-
-    raw_columns = {"event_record_id": "BIGINT", "timestamp": "VARCHAR", "data": "VARCHAR"}
-    if keep_raw:
-        raw_columns["raw_xml"] = "VARCHAR"
-    raw_columns_sql = "{" + ", ".join(f"'{k}': '{v}'" for k, v in raw_columns.items()) + "}"
-    ndjson_paths_sql = "[" + ", ".join("'" + f.ndjson_path.replace("'", "''") + "'" for f in ok_files) + "]"
-
-    overrides = {
-        "host": "m.host",
-        "source_path": "m.source_path",
-        "source_file": "m.source_file",
-        "file_sha256": "m.file_sha256",
-        "ingest_batch_id": f"'{batch_id}'",
-        "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
-        "raw_xml": "raw.raw_xml" if keep_raw else "NULL::VARCHAR",
-    }
-
-    select_exprs = []
-    for col, _, _ in CORE_COLUMNS:
-        expr = overrides[col] if col in overrides else EXTRACTION_SQL[col]
-        select_exprs.append(f"{expr} AS {col}")
-    select_sql = ",\n  ".join(select_exprs)
-
-    from_sql = f"""
-    FROM read_ndjson({ndjson_paths_sql}, columns={raw_columns_sql}, filename=true) AS raw
-    JOIN manifest_df m ON raw.filename = m.ndjson_path
-    """
-
-    select_query = f"SELECT {select_sql} {from_sql}"
-    # Windows-only concurrent-CreateDirectory workaround; enumerating the
-    # partitions is a second full pass over every staged record, so it's
-    # skipped where the race doesn't exist -- see
-    # StorageBackend.precreates_partition_dirs and logsources/flatten.py.
-    partition_columns = ("host", "channel")
-    if backend.precreates_partition_dirs:
-        partition_rows = con.execute(
-            f"SELECT DISTINCT {', '.join(partition_columns)} FROM ({select_query})"
-        ).fetchall()
-        ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
-
-    (row_count,) = con.execute(
-        f"""
-        COPY (
-          {select_query}
-        ) TO '{backend.copy_target(lake_location)}' (
-          FORMAT PARQUET, PARTITION_BY (host, channel), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
+    options = options or IngestOptions()
+    with CONVERSION_LOCK, duckdb.connect() as con:
+        options.configure_connection(con)
+        backend.configure_duckdb(con)
+        manifest_df = pd.DataFrame(
+            [
+                {
+                    "ndjson_path": f.ndjson_path,
+                    "host": f.host,
+                    "source_path": f.source_path,
+                    "source_file": f.source_file,
+                    "file_sha256": f.file_sha256,
+                }
+                for f in ok_files
+            ]
         )
-        """
-    ).fetchone()
+        con.register("manifest_df", manifest_df)
 
-    return int(row_count)
+        raw_columns = {"event_record_id": "BIGINT", "timestamp": "VARCHAR", "data": "VARCHAR"}
+        if keep_raw:
+            raw_columns["raw_xml"] = "VARCHAR"
+        raw_columns_sql = "{" + ", ".join(f"'{k}': '{v}'" for k, v in raw_columns.items()) + "}"
+        ndjson_paths_sql = "[" + ", ".join("'" + f.ndjson_path.replace("'", "''") + "'" for f in ok_files) + "]"
+
+        overrides = {
+            "host": "m.host",
+            "source_path": "m.source_path",
+            "source_file": "m.source_file",
+            "file_sha256": "m.file_sha256",
+            "ingest_batch_id": f"'{batch_id}'",
+            "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
+            "raw_xml": "raw.raw_xml" if keep_raw else "NULL::VARCHAR",
+        }
+
+        select_exprs = []
+        for col, _, _ in CORE_COLUMNS:
+            expr = overrides[col] if col in overrides else EXTRACTION_SQL[col]
+            select_exprs.append(f"{expr} AS {col}")
+        select_sql = ",\n  ".join(select_exprs)
+
+        from_sql = f"""
+        FROM read_ndjson({ndjson_paths_sql}, columns={raw_columns_sql}, filename=true) AS raw
+        JOIN manifest_df m ON raw.filename = m.ndjson_path
+        """
+
+        select_query = f"SELECT {select_sql} {from_sql}"
+        # Windows-only concurrent-CreateDirectory workaround; enumerating the
+        # partitions is a second full pass over every staged record, so it's
+        # skipped where the race doesn't exist -- see
+        # StorageBackend.precreates_partition_dirs and logsources/flatten.py.
+        partition_columns = ("host", "channel")
+        if backend.precreates_partition_dirs:
+            partition_rows = con.execute(
+                f"SELECT DISTINCT {', '.join(partition_columns)} FROM ({select_query})"
+            ).fetchall()
+            ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
+
+        (row_count,) = con.execute(
+            f"""
+            COPY (
+              {select_query}
+            ) TO '{backend.copy_target(lake_location)}' (
+              FORMAT PARQUET, PARTITION_BY (host, channel), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
+            )
+            """
+        ).fetchone()
+
+        return int(row_count)

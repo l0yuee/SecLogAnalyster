@@ -8,10 +8,12 @@ docs/known_limitations.md).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..sniff import _decode_lines
+from ....textdecode import iter_text_lines
+from ._stream import RowSink
 
 _PROMOTED_FIELDS = {
     "_HOSTNAME": "hostname",
@@ -46,13 +48,15 @@ def _parse_realtime_timestamp(raw) -> str | None:
         return None
 
 
-def parse_journal_file(path: Path, host: str) -> tuple[list[dict], int, int]:
+def parse_journal_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     """Returns (rows, ok_count, error_count). A line that isn't a valid
     JSON object is counted as an error, not silently dropped."""
-    rows: list[dict] = []
+    rows = RowSink(emit)
     error_count = 0
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
 
@@ -75,4 +79,4 @@ def parse_journal_file(path: Path, host: str) -> tuple[list[dict], int, int]:
         row["fields"] = json.dumps(remainder) if remainder else None
         rows.append(row)
 
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count

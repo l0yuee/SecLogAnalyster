@@ -20,13 +20,13 @@ from pathlib import Path
 
 # Non-EVTX candidate filtering, shared by ingest/logsources/discovery.py and
 # ingest/scan.py's unified walk: extensions cheap to skip outright (known-
-# binary or clearly irrelevant), and a size ceiling above which a file isn't
-# even peeked (avoids stat/open overhead across huge binary evidence --
-# memory dumps, disk images -- accidentally left under a source root).
+# binary or clearly irrelevant). Supported logs are classified with a
+# bounded prefix read regardless of source-file size.
 SKIP_SUFFIXES = {
     ".evtx", ".exe", ".dll", ".sys", ".zip", ".gz", ".7z", ".rar", ".pf", ".dmp",
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".pdf", ".db", ".sqlite",
 }
+# Legacy import compatibility only; discovery no longer applies this limit.
 MAX_CANDIDATE_SIZE = 2 * 1024 * 1024 * 1024
 
 

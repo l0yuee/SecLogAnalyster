@@ -4,7 +4,7 @@ Oracle (alert log).
 
 Each sub-format gets its own `parse_*_file` function -- same shape as
 `weberror.py`'s per-engine parsers (`(rows, ok_count, error_count)`,
-built on `_decode_lines`, unmatched/unparseable lines counted as errors
+built on `iter_text_lines`, unmatched/unparseable lines counted as errors
 rather than silently dropped) -- but all map into the single shared
 `db_logs` row schema via `_empty_row`, discriminated by `log_type`. See
 docs/known_limitations.md for the content-sniffing caveats specific to
@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from ..sniff import _decode_lines
+from ....textdecode import iter_text_lines
+from ._stream import RowSink
 
 # -- MySQL/MariaDB error log -------------------------------------------------
 
@@ -81,7 +83,22 @@ _MSSQL_SPID_RE = re.compile(r"^spid(?P<num>\d+)")
 
 _ORACLE_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}:\d{2}$")
 _ORACLE_ERROR_CODE_RE = re.compile(r"ORA-\d{5}")
-_ORACLE_MAX_CONTINUATION_LINES = 200  # cap a single alert entry's attached detail lines
+_ORACLE_MAX_CONTINUATION_LINES = 200
+_MAX_LOGICAL_RECORD_CHARS = 8 * 1024 * 1024
+_MAX_LOGICAL_RECORD_LINES = 100_000
+
+
+def _check_record_size(path: Path, chars: int, lines: int, *, max_lines: int = _MAX_LOGICAL_RECORD_LINES) -> None:
+    """Fail a pathological logical record explicitly, never emit its prefix.
+
+    Staging retains completed records and reports the source as partial.
+    The source remains available for a dedicated parser or manual recovery.
+    """
+    if chars > _MAX_LOGICAL_RECORD_CHARS or lines > max_lines:
+        raise ValueError(
+            f"database log logical record exceeds {_MAX_LOGICAL_RECORD_CHARS:,} characters or "
+            f"{max_lines:,} lines in {path}; record was not truncated"
+        )
 
 
 def _empty_row(host: str, log_type: str) -> dict:
@@ -103,10 +120,12 @@ def _empty_row(host: str, log_type: str) -> dict:
     }
 
 
-def parse_mysql_error_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_mysql_error_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         m = _MYSQL_ERROR_NEW_RE.match(line)
@@ -135,14 +154,16 @@ def parse_mysql_error_file(path: Path, host: str) -> tuple[list[dict], int, int]
             rows.append(row)
             continue
         error_count += 1
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_mysql_general_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_mysql_general_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
     last_timestamp: str | None = None
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip() or _MYSQL_GENERAL_HEADER_RE.match(line):
             continue
         m = _MYSQL_GENERAL_RE.match(line)
@@ -161,14 +182,17 @@ def parse_mysql_general_file(path: Path, host: str) -> tuple[list[dict], int, in
         argument = (m.group("argument") or "").strip()
         row["message"] = argument or None
         rows.append(row)
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_mysql_slow_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_mysql_slow_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
     current: dict | None = None
     sql_lines: list[str] = []
+    sql_chars = 0
 
     def flush() -> None:
         if current is not None:
@@ -176,7 +200,7 @@ def parse_mysql_slow_file(path: Path, host: str) -> tuple[list[dict], int, int]:
             current["message"] = text or None
             rows.append(current)
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         m_time = _SLOW_TIME_RE.match(line)
         if m_time:
             flush()
@@ -186,6 +210,7 @@ def parse_mysql_slow_file(path: Path, host: str) -> tuple[list[dict], int, int]:
             except ValueError:
                 pass
             sql_lines = []
+            sql_chars = 0
             continue
 
         if current is None:
@@ -222,16 +247,20 @@ def parse_mysql_slow_file(path: Path, host: str) -> tuple[list[dict], int, int]:
         if line.strip().startswith("SET timestamp="):
             continue
 
+        sql_chars += len(line) + bool(sql_lines)
+        _check_record_size(path, sql_chars, len(sql_lines) + 1)
         sql_lines.append(line)
 
     flush()
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_postgresql_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_postgresql_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         m = _POSTGRESQL_RE.match(line)
@@ -249,13 +278,15 @@ def parse_postgresql_file(path: Path, host: str) -> tuple[list[dict], int, int]:
         row["severity"] = m.group("severity")
         row["message"] = m.group("message")
         rows.append(row)
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_mssql_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_mssql_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
         m = _MSSQL_RE.match(line)
@@ -276,15 +307,18 @@ def parse_mssql_file(path: Path, host: str) -> tuple[list[dict], int, int]:
             row["thread_id"] = spid_m.group("num")
         row["message"] = m.group("message")
         rows.append(row)
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
-def parse_oracle_alert_file(path: Path, host: str) -> tuple[list[dict], int, int]:
-    rows: list[dict] = []
+def parse_oracle_alert_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
+    rows = RowSink(emit)
     error_count = 0
     current: dict | None = None
     message_lines: list[str] = []
     continuation_count = 0
+    message_chars = 0
 
     def flush() -> None:
         if current is not None:
@@ -295,7 +329,7 @@ def parse_oracle_alert_file(path: Path, host: str) -> tuple[list[dict], int, int
                 current["error_code"] = code_m.group(0)
             rows.append(current)
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         stripped = line.strip()
         if _ORACLE_TIMESTAMP_RE.match(stripped):
             flush()
@@ -306,6 +340,7 @@ def parse_oracle_alert_file(path: Path, host: str) -> tuple[list[dict], int, int
                 pass
             message_lines = []
             continuation_count = 0
+            message_chars = 0
             continue
 
         if not stripped:
@@ -313,11 +348,10 @@ def parse_oracle_alert_file(path: Path, host: str) -> tuple[list[dict], int, int
         if current is None:
             error_count += 1
             continue
-        if continuation_count < _ORACLE_MAX_CONTINUATION_LINES:
-            message_lines.append(line)
-            continuation_count += 1
-        else:
-            error_count += 1
+        message_chars += len(line) + bool(message_lines)
+        continuation_count += 1
+        _check_record_size(path, message_chars, continuation_count, max_lines=_ORACLE_MAX_CONTINUATION_LINES)
+        message_lines.append(line)
 
     flush()
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count

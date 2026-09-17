@@ -18,7 +18,7 @@ workspace instead of raw XML and inconsistent text logs.
   into one queryable table) and error/diagnostic logs (each engine's
   native error-log format, unified into a second table).
 - **Exchange logs**: Message Tracking (mail flow, first-class columns) plus
-  every other Exchange CSV log type via a generic, nothing-dropped catchall.
+  generic handling of recognized Exchange CSV logs that retains their fields.
 - **Linux system logs**: generic syslog (BSD/RFC-3164 and RFC 5424 --
   `/var/log/syslog`, `messages`, `kern.log`, `auth.log`/`secure`, ...), the
   Linux Audit Framework (`auditd`), and systemd journal export
@@ -52,25 +52,24 @@ workspace instead of raw XML and inconsistent text logs.
   match, or regular expressions, case-insensitive by default, any number
   of conditions combined with AND/OR -- for analysts who'd rather not
   write SQL by hand. Not sure what fields exist or which one to search
-  on? `seclogx fields` / `Case.fields()` lists every field a table
-  actually has in this case's real data -- columns and JSON-catchall keys
-  alike -- with a popularity count and a real example value.
+  on? `seclogx fields` / `Case.fields()` lists table columns and JSON-catchall
+  keys found in a bounded sample, with counts and example values.
 - **pandas-native**: every log family -- events, web access/error logs,
   Scheduled Tasks, Exchange logs, syslog, auditd, systemd journal, database
   logs, Tencent Cloud Host Security logs, Registry hives -- is reachable as a `pandas.DataFrame` through a
   named accessor
   (`c.web_logs()`, `c.scheduled_tasks()`, `c.syslog()`, ...), the same
   first-class treatment `events` gets, ready for a notebook.
-- **Bounded-memory analysis for every log family.** Web access/error logs
-  especially can reach terabyte scale -- every DataFrame accessor has a
+- **Chunked analysis for every log family.** Each log-table DataFrame accessor has a
   `_chunks()` sibling (`c.web_logs_chunks()`, `c.query_chunks()`,
   `c.search_chunks()`, ...) that streams the result as an iterator of
   DataFrames instead of one, and `--out`/console preview in the CLI use
-  this automatically, so neither exporting nor previewing a huge table
-  requires it to fit in memory first. `search()` goes further and checks
-  the result against the machine's actual available memory before
+  this for query, table, search and timeline output, so these exports and
+  previews do not materialize the full result. `search()` also estimates
+  result size against the machine's available memory before
   fetching, refusing (with the chunked/streamed alternative named in the
-  error) rather than risking an out-of-memory crash.
+  error) when the estimate exceeds its budget. Row width and query execution
+  still affect memory use; unchunked DataFrames and derived analyses can be large.
 - **Handles realistic case volumes on a single workstation**, lazily --
   DuckDB + Parquet, no cluster required. An opt-in distributed mode is
   also available (job-queue-based ingest/hunt fan-out, S3-backed shared
@@ -79,10 +78,11 @@ workspace instead of raw XML and inconsistent text logs.
   effect unless configured. See
   [10. Distributed deployment](docs/guides/10_distributed_deployment.md)
   and `deploy/`.
-- **Never silently drops data.** Every parse error, partial file read,
-  unrecognized log file, and unsupported Sigma rule is reported
-  explicitly, not swallowed -- the direct answer to "importing into ELK
-  silently drops records."
+- **Reconciliation reports.** Discovered files have parsing status and recovered
+  record counts; unrecognized classification candidates and unsupported Sigma
+  rules are reported. Discovery filters known unrelated suffixes and empty
+  files, and can skip inaccessible paths, so this is not a complete evidence
+  inventory. See [known limitations](docs/known_limitations.md).
 
 **Full documentation: [English](docs/index.md) | [中文](docs/index.zh-CN.md)**
 
@@ -94,13 +94,15 @@ edge cases.
 ## Install
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+conda activate python314
+python -m pip install -e .
 ```
 
-Requires Python >= 3.10. Run from a checkout of this repo (editable
-install) so the bundled Sigma rules under `data/` are found.
+The package requires Python >= 3.10; this project's designated development and
+analysis environment is **conda `python314`**, isolated from `base`. Use it for
+installation, scripts, tests and Jupyter. In a noninteractive shell, use
+`conda run --no-capture-output -n python314 python ...`. Run from this checkout
+(editable install) so the bundled Sigma rules under `data/` are found.
 
 ## Quickstart
 
@@ -109,16 +111,16 @@ install) so the bundled Sigma rules under `data/` are found.
 # .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat access AND
 # error logs, Exchange CSV logs, Linux syslog/auth.log, auditd, and
 # systemd journal export logs, MySQL/PostgreSQL/MSSQL/Oracle database
-# logs, and raw Windows Registry hive files are all discovered and
+# logs, Tencent Cloud Host Security logs, and raw Windows Registry hives are discovered and
 # classified automatically in the same pass. Each --source can carry an
 # explicit host label (PATH:HOST); if omitted, the source directory's
 # name is used.
 seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
 
-# Large import: run it detached and check progress separately instead of
-# blocking the terminal
-seclogx ingest incident42 --source /evidence/full_kape_output --background
-seclogx ingest-status incident42 --watch
+# Alternative for a large import: start a separate case in the background.
+# Do not re-import the same evidence into one case; imports are additive.
+seclogx ingest large_case --source /evidence/full_kape_output --background --staging-format auto
+seclogx ingest-status large_case --watch
 
 # See what's in it
 seclogx summary incident42
@@ -152,6 +154,26 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 
 ## Python / notebook usage
 
+For large imports, see the [Notebook resource settings](docs/guides/06_python_api.md)
+and [performance/scale boundaries](docs/guides/08_performance_and_scale.md)
+([中文](docs/guides/08_performance_and_scale.zh-CN.md)). `IngestOptions`
+controls conversion memory, threads and staging batches; it does not set a
+total-process RSS cap. The default `staging_format="auto"` uses Arrow IPC with
+ZSTD level 1 for supported auxiliary sources of at least 16 MiB and gzip NDJSON
+for smaller sources. Explicit `"arrow"` and `"ndjson"` modes are also available;
+EVTX staging remains NDJSON. Auxiliary Parquet output uses ZSTD level 1.
+
+If the workstation has enough spare memory and CPU capacity, an optional setting is
+`IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")` with
+`workers=8`; the library defaults remain 2GB and two conversion threads.
+The same options work with foreground and background imports. Full DataFrame
+queries can still exhaust Notebook memory; filter or use `_chunks()` accessors.
+Launch Jupyter from `python314` and select that kernel; check `sys.executable`
+inside the Notebook. Background ingest uses the caller's Python interpreter.
+It frees the Notebook to do other work, but does not implement resumable jobs,
+early-query guarantees or atomic visibility of a partially written lake. Wait
+for `done`, inspect the reconciliation report, then reopen the Case to query it.
+
 ```python
 from seclogx import Case
 
@@ -182,24 +204,22 @@ c.auth_events()                   # heuristic SSH/sudo/PAM/account triage over s
 c.db.table("web_logs")            # generic escape hatch: any table this case has, by name
 
 # Not sure what fields a table has, or which one to search on? fields()
-# lists them all from this case's real data (columns + JSON-catchall
-# keys), with a popularity count and a real example value.
+# lists columns and JSON-catchall keys found in a bounded sample,
+# with counts and example values; rare keys may be absent from the sample.
 c.fields("events")       # -> Image, CommandLine, TargetUserName, ... (from event_data)
 
 # No SQL required: exact/fuzzy/regex conditions against any table, AND/OR,
-# case-insensitive by default. Refuses (pointing at the alternatives below)
-# rather than risking an out-of-memory crash if the estimated result is
-# too large for this machine.
+# case-insensitive by default. Refuses when estimated result size exceeds
+# the memory budget; the estimate is not a hard process-memory guarantee.
 c.search("web_logs", contains={"uri_stem": "admin"}, eq={"status": [401, 403]})
 c.search("events", regex={"CommandLine": r".*-enc.*"})
 for chunk in c.search_chunks("web_logs", contains={"uri_stem": "admin"}):
     process(chunk)
 c.search_to_csv("web_logs", "admin_hits.csv", contains={"uri_stem": "admin"})
 
-# Every accessor above has a bounded-memory "_chunks()" sibling for tables
-# too large to hold as one DataFrame (web logs especially) -- an iterator
-# of DataFrames instead of one, each independently small regardless of
-# total result size.
+# Log-table accessors, query, search and timeline have "_chunks()" variants.
+# Consume and discard each chunk; accumulating them recreates a full result.
+# A chunk is bounded in rows, so wide records can still require substantial RAM.
 for chunk in c.web_logs_chunks(log_type="nginx"):
     process(chunk)                # each chunk is a normal pandas.DataFrame
 for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'error'"):
@@ -210,14 +230,14 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 
 | Command | Purpose |
 |---|---|
-| `seclogx case init/list/info <name>` | Manage case workspaces |
-| `seclogx ingest <case> --source PATH[:HOST]...` | Parse and normalize `.evtx` into the case (`--background` to run detached) |
+| `seclogx case init <name>` / `case list` / `case info <name>` | Manage case workspaces (`--dir` overrides the case root) |
+| `seclogx ingest <case> --source PATH[:HOST]...` | Discover and normalize all supported log families (`--background` to run detached; `--staging-format auto/arrow/ndjson`) |
 | `seclogx ingest-status <case> [job_id] [--watch]` | Check on a `--background` ingest job |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
 | `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, qcloud_logs, registry) |
-| `seclogx table <case> <name>` | Full contents of any table this case has, as a DataFrame (CLI counterpart to `Case.web_logs()` etc.) |
-| `seclogx fields <case> <table>` | List every field a table actually has in this case's real data (columns + JSON-catchall keys), with a popularity count and example value |
+| `seclogx table <case> <name>` | Preview any table or stream its rows to CSV with `--out` |
+| `seclogx fields <case> <table>` | List columns and sampled JSON-catchall keys, with counts and example values |
 | `seclogx search <case> <table> [--eq/--contains/--regex FIELD=VALUE]...` | Query any table without writing SQL: exact/fuzzy/regex conditions, case-insensitive by default, combined with AND (or `--match-any` for OR) |
 | `seclogx tasks <case> [--suspicious]` | List ingested Scheduled Task definitions, optionally filtered by a built-in heuristic |
 | `seclogx auth <case>` | List SSH/sudo/PAM/account-management events recognized in `syslog` (a heuristic view, not Sigma) |
@@ -233,11 +253,12 @@ Run any command with `--help` for full options.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest
+conda activate python314
+python -m pip install -e ".[dev]"
+python -m pytest
 ```
 
-`pip install -e ".[cluster]"` adds `redis`/`rq`/`boto3`, needed only for
+`python -m pip install -e ".[cluster]"` in the same environment adds `redis`/`rq`/`boto3`, needed only for
 distributed mode (`seclogx worker`, `seclogx cluster status`,
 `SECLOGX_STORAGE_BACKEND=s3`) -- see
 [10. Distributed deployment](docs/guides/10_distributed_deployment.md).

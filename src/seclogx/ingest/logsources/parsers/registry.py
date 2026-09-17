@@ -34,9 +34,11 @@ import math
 import os
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO
 
-from regipy.exceptions import RegipyException
+from regipy.exceptions import RegipyException, UnidentifiedHiveException
 from regipy.hive_types import (
     AMCACHE_HIVE_TYPE,
     BCD_HIVE_TYPE,
@@ -48,8 +50,11 @@ from regipy.hive_types import (
     USRCLASS_HIVE_TYPE,
 )
 from regipy.recovery import apply_transaction_logs
-from regipy.registry import RegistryHive
-from regipy.utils import convert_wintime
+from regipy.registry import NKRecord, RegistryHive
+from regipy.structs import REGF_HEADER
+from regipy.utils import boomerang_stream, convert_wintime, identify_hive_type
+
+from ._stream import RowSink
 
 _BINARY_VALUE_TYPES = {
     "REG_BINARY",
@@ -71,6 +76,34 @@ _HIVE_ROOTS = {
     AMCACHE_HIVE_TYPE: "HKEY_LOCAL_MACHINE\\AMCACHE",
     BCD_HIVE_TYPE: "BCD00000000",
 }
+
+
+class _FileBackedRegistryHive(RegistryHive):
+    """The subset of regipy's initialization needed by this parser.
+
+    RegistryHive normally copies the complete file into BytesIO. Its cell
+    readers also accept an ordinary seekable binary file, owned/closed by
+    parse_registry_hive_file instead. This adapter relies on regipy's
+    _stream, header, root, name, hive_type and partial_hive_path attributes
+    and the same REGF_HEADER/HBin/NKRecord initialization as RegistryHive.
+    Keep the hive fixture tests when upgrading regipy. Transaction-log
+    recovery still uses regipy's own, potentially in-memory, recovery path.
+    """
+
+    def __init__(self, stream: BinaryIO):
+        self._stream = stream
+        self.partial_hive_path = None
+        self.hive_type = None
+        with boomerang_stream(stream) as source:
+            self.header = REGF_HEADER.parse_stream(source)
+            root_hbin = self.get_hbin_at_offset()
+            root_cell = next(root_hbin.iter_cells(source))
+            self.root = NKRecord(root_cell, source)
+        self.name = self.header.file_name
+        try:
+            self.hive_type = identify_hive_type(self.name)
+        except UnidentifiedHiveException:
+            pass
 
 
 def _shannon_entropy(data: bytes) -> float:
@@ -212,49 +245,70 @@ def _value_to_row(host: str, hive_type: str, hive_root: str, key_path: str, key_
     return row
 
 
-def _walk(nk, key_path: str, rows: list[dict], host: str, hive_type: str, hive_root: str, tx_log: bool) -> int:
+def _walk(nk, key_path: str, rows: RowSink, host: str, hive_type: str, hive_root: str, tx_log: bool) -> int:
     error_count = 0
-    key_last_write = convert_wintime(nk.header.last_modified)
+    try:
+        key_last_write = convert_wintime(nk.header.last_modified)
+    except RegipyException:
+        return 1
 
-    values = []
+    values_seen = 0
     if nk.values_count:
-        try:
-            values = list(nk.iter_values(trim_values=False))
-        except RegipyException:
-            error_count += 1
-
-    if not values:
-        rows.append(_base_row(host, hive_type, hive_root, key_path, key_last_write, tx_log))
-    else:
-        for value in values:
-            rows.append(_value_to_row(host, hive_type, hive_root, key_path, key_last_write, value, tx_log))
-
-    if nk.subkey_count:
-        try:
-            children = list(nk.iter_subkeys())
-        except RegipyException:
-            children = []
-            error_count += 1
-        for child in children:
-            child_path = f"{key_path}\\{child.name}" if key_path else f"\\{child.name}"
+        values = iter(nk.iter_values(trim_values=False))
+        while True:
             try:
-                error_count += _walk(child, child_path, rows, host, hive_type, hive_root, tx_log)
+                value = next(values)
+            except StopIteration:
+                # Some regipy corruption paths log an error and return,
+                # rather than raising. A short iterator must still make
+                # the source partial instead of reporting a clean import.
+                if values_seen != nk.values_count:
+                    error_count += 1
+                break
             except RegipyException:
                 error_count += 1
+                break
+            # Keep callback failures outside parser exception handling: a
+            # failed disk writer must abort, not be counted as a bad hive cell.
+            rows.append(_value_to_row(host, hive_type, hive_root, key_path, key_last_write, value, tx_log))
+            values_seen += 1
+
+    if not values_seen:
+        rows.append(_base_row(host, hive_type, hive_root, key_path, key_last_write, tx_log))
+
+    if nk.subkey_count:
+        children_seen = 0
+        children = iter(nk.iter_subkeys())
+        while True:
+            try:
+                child = next(children)
+            except StopIteration:
+                if children_seen != nk.subkey_count:
+                    error_count += 1
+                break
+            except RegipyException:
+                error_count += 1
+                break
+            children_seen += 1
+            child_path = f"{key_path}\\{child.name}" if key_path else f"\\{child.name}"
+            error_count += _walk(child, child_path, rows, host, hive_type, hive_root, tx_log)
 
     return error_count
 
 
-def parse_registry_hive_file(path: Path, host: str) -> tuple[list[dict], int, int]:
+def parse_registry_hive_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     parse_path, transaction_log_applied, cleanup_path = _maybe_recover(path)
     try:
-        hive = RegistryHive(str(parse_path))
-        hive_type = _identify_hive_type(hive)
-        hive_root = _hive_root(hive_type, path, hive.name or "")
+        with parse_path.open("rb") as source:
+            hive = _FileBackedRegistryHive(source)
+            hive_type = _identify_hive_type(hive)
+            hive_root = _hive_root(hive_type, path, hive.name or "")
 
-        rows: list[dict] = []
-        error_count = _walk(hive.root, "", rows, host, hive_type, hive_root, transaction_log_applied)
-        return rows, len(rows), error_count
+            rows = RowSink(emit)
+            error_count = _walk(hive.root, "", rows, host, hive_type, hive_root, transaction_log_applied)
+            return rows.rows, rows.count, error_count
     finally:
         if cleanup_path:
             cleanup_path.unlink(missing_ok=True)

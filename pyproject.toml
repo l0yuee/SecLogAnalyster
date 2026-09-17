@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "seclogx"
 version = "0.1.0"
-description = "Fast, pandas-friendly threat hunting and analysis over Windows Event Log (.evtx) forensic acquisitions"
+description = "Security log ingestion and pandas-friendly analysis with DuckDB and Parquet"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

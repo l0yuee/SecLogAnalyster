@@ -24,22 +24,41 @@ directory to see the exact conversion/field-mapping error per rule, then
 see "Extending detection" in [04. Threat hunting](04_threat_hunting.md).
 
 **An ingest run shows files as `partial`**
-Expected for corrupted `.evtx` files -- the parser recovers what it can
-before the corruption point and reports exactly how many records that
-was. Not a bug; see the known-limitations section below.
+This can occur with damaged EVTX files, rejected text records or a parser
+error after valid records were recovered. Inspect the per-file record count,
+error count and error message before deciding whether the result is usable.
+A staging write or flush failure is fatal, not a successful partial parse.
 
 **`ingest` seems slow on a huge single file**
-A single very large `.evtx` file isn't split across workers (parallelism
-is per-file); `--workers` helps most when you have many files. Consider
-whether `--keep-raw` is enabled unnecessarily, as it roughly doubles
-per-file cost.
+Parsing parallelism is per source file: a single large source is not split
+across workers. More workers help only when there are independent files and
+enough memory/I/O capacity. EVTX `--keep-raw` adds XML parsing and temporary
+SQLite indexing; its cost is workload-dependent. Check the reported staging
+and conversion phases before tuning; see [Performance & scale](08_performance_and_scale.md).
 
 **I want to re-run ingest after fixing something**
-Ingest is additive per run and safe to re-run; if you kept staging
-(`--keep-staging`, the default), reprocessing existing NDJSON without
-re-parsing the source `.evtx` is possible by calling the flatten step
-directly (see `src/seclogx/ingest/evtx/flatten.py`) -- most users can
-simply re-run `seclogx ingest` against the same sources.
+Ingest appends records. Repeating the same source can duplicate data, and a
+failed conversion can leave some Parquet output. There is no automatic
+resume, deduplication or transactional rollback. Use a fresh case when
+rebuilding the same evidence. Retained NDJSON/Arrow shards help diagnose a
+failure; calling internal flatten functions is not a supported resume protocol.
+
+**Jupyter stays busy, or the kernel uses the wrong Python environment**
+Activate `python314` before starting local Python or JupyterLab and verify the
+selected kernel's `sys.executable`. `c.ingest()` blocks until it completes;
+`c.ingest_background(..., options=IngestOptions(...))` starts a detached child
+using that interpreter. Poll `c.job_status(job_id)` and inspect
+`<case>/jobs/<job_id>.log` on failure. After phase `done`, reopen the case for
+fresh query views. Background execution does not reduce memory requirements
+or implement recovery; avoid concurrent writes to the same case.
+
+**Why are there `.arrow` files, and why is staging still large?**
+Auxiliary sources use `staging_format="auto"`: Arrow IPC/ZSTD for source files
+at least 16 MiB and gzip NDJSON for smaller files. `"arrow"` and `"ndjson"`
+force either path; EVTX still uses NDJSON. Each ingest path stages its inputs
+before conversion, and staging is kept by default. `keep_staging=False`
+deletes that run's shards after successful conversion, not as a disk-space
+backpressure mechanism. Reserve source, staging, Parquet and temporary space.
 
 **A file I expected to be ingested shows up under "files unrecognized"**
 Its content didn't match any supported format's detection (see the
@@ -82,8 +101,8 @@ in the same situation, telling you to add `--out` instead.
 
 **`seclogx search` / `Case.search()` says a field "is not a column ... and this table has no JSON field to search inside either"**
 The field name isn't one of the table's real columns, and the table has
-no JSON-object catchall to look inside either (this only happens on
-`scheduled_tasks` among the bundled tables -- see "Searching without
+no JSON-object catchall to look inside either (for example, the bundled
+`scheduled_tasks` and `registry` tables -- see "Searching without
 SQL" in [03. Querying & search](03_querying_and_search.md)). The error
 message lists the table's actual column names. If you're trying to
 search inside `actions`/`triggers` specifically, search that column
@@ -93,8 +112,8 @@ objects, so keyed extraction doesn't apply.
 
 ## Known limitations
 
-The complete, current list of v1 scope decisions and empirically
-discovered edge cases lives in **`docs/known_limitations.md`** -- treat
+The complete, current list of v1 scope decisions and known
+edge cases lives in **`docs/known_limitations.md`** -- treat
 that file as the source of truth (it's kept current as the project
 evolves; this section is not a substitute for it). Highlights most
 likely to come up in day-to-day use:
@@ -108,11 +127,15 @@ likely to come up in day-to-day use:
 - Non-EVTX format detection is content-based, not guaranteed --
   nonstandard log headers can be misclassified as unrecognized (reported,
   never silently dropped).
-- Ingest is bounded-memory per file (one file's parse footprint x
-  `--workers`), not per whole batch -- but each worker still reads one
-  whole file at a time, so a single pathologically large file is still a
-  per-file memory cost. See
+- Ingest emits text/registry records to bounded staging batches rather than
+  retaining all rows of each source. Whole-document Scheduled Task XML,
+  registry recovery and large individual values remain exceptions. Worker
+  count multiplies parser/buffer costs; `memory_limit` controls one DuckDB
+  conversion's managed memory, not total RSS. See
   [08. Performance & scale](08_performance_and_scale.md).
+- Parsing and conversion do not yet form a disk-backpressured pipeline.
+  Automatic resume, cross-run idempotency and atomic lake commits/snapshots
+  are not implemented. Metadata locks do not make concurrent ingest transactional.
 - `.query()`/`.table()`/`.web_logs()`/etc. materialize the full result as
   one DataFrame; use the `_chunks` sibling for anything not already
   filtered/aggregated down to something small (see

@@ -6,17 +6,16 @@ logs, Exchange CSV logs, Linux syslog/auditd/systemd-journal exports,
 MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, Tencent Cloud Host
 Security client logs, and Windows Registry hives -- into one queryable,
 huntable case workspace,
-favoring set-based DuckDB SQL over per-record Python wherever possible
-(validated during design: the `evtx` package's real bottleneck is
-per-record Python marshaling, not parsing). This is two parallel
+using set-based DuckDB SQL for canonical conversion. There are two
 pipelines sharing one case workspace and one query layer: the EVTX
-pipeline (stages 1-3 below, the original and still the most
-performance-critical path) and a second one for everything else ("Non-EVTX
+pipeline (stages 1-3 below) and a second one for everything else ("Non-EVTX
 log families" further down). `Case.ingest()` walks every `--source` root
 exactly once (`ingest/scan.py:scan_sources()`, bucketing files for both
 pipelines from a single pass instead of two independent tree walks) and
-then runs both pipelines *concurrently* over that same scan result --
-each still manages its own bounded worker pool underneath, and an
+then shares a total local `workers` budget across both pipelines. With
+`workers=1`, the pipelines run serially in the calling process; with a
+larger budget, they can parse concurrently. Each has a bounded worker
+queue underneath, and an
 optional progress callback (`ingest/jobs.py:ProgressReporter`) is threaded
 through both, which is what backs `seclogx ingest`'s live progress display
 and its `--background`/`ingest-status` job tracking (see
@@ -32,13 +31,13 @@ between them at the query layer.
  [1] discovery + parallel staging  (ingest/evtx/discovery.py, ingest/evtx/stage.py, ingest/evtx/orchestrator.py)
         |  ProcessPoolExecutor, one worker per file
         v
- cases/<name>/staging/<host>/*.ndjson.gz   (+ staging/manifest via IngestReport)
+ cases/<name>/staging/<batch_id>/<host>/*.ndjson.gz   (+ chunk manifests via IngestReport)
         |
         v
  [2] DuckDB bulk flatten  (ingest/evtx/flatten.py, schema.py)
-        |  one set-based SQL statement over all staged files
+        |  set-based SQL over bounded groups of staged shards
         v
- cases/<name>/lake/host=<h>/channel=<c>/*.parquet
+ cases/<name>/lake/events/host=<h>/channel=<c>/*.parquet
         |
         v
  [3] query + detection  (query.py, detect/*, timeline.py)
@@ -51,7 +50,8 @@ between them at the query layer.
 
 `ingest/evtx/discovery.py` recursively finds `.evtx` under one or more `--source
 PATH[:HOST]` inputs (forensic acquisitions rarely live under one tidy
-directory) and dedupes by resolved path; `ingest/common.py` holds the
+directory). The shared scanner deduplicates physical file identity where
+available, falling back to a resolved path; `ingest/common.py` holds the
 `SourceSpec`/`sha256_file`/`parse_source_arg` primitives it shares with
 the non-EVTX pipeline's own discovery module (see "Non-EVTX log
 families" below).
@@ -60,16 +60,26 @@ families" below).
 (`ingest/evtx/orchestrator.py` coordinates via `ProcessPoolExecutor` --
 files are independent and parsing is CPU/IO-bound, so this is where
 parallelism buys speed). Each worker streams `PyEvtxParser.records_json()`
-straight to `staging/<host>/<file>.ndjson.gz` with minimal Python-side
-transformation. Staged NDJSON is gzipped (level 1): rendered-as-JSON EVTX
+straight to `staging/<batch_id>/<host>/` with minimal Python-side
+transformation. `ingest/staging.py:StagingWriter` rotates gzip NDJSON
+shards at record boundaries, targeting 64 MiB of uncompressed encoded
+bytes by default. It retains one encoded record, not a shard-sized
+Python buffer; compression writes use a bounded 256 KiB buffer. Batch
+directories isolate independent ingest attempts.
+Staged NDJSON is gzipped (level 1): rendered-as-JSON EVTX
 records run considerably larger than the source binary `.evtx` (verbose
 field names, string-encoded binary values), and `staging/` is kept by
 default (see "Case workspace layout" below) -- uncompressed, that
 combination was the dominant driver of a case directory growing to
-several times the source evidence size. DuckDB's `read_ndjson`/
-`read_ndjson_auto` (Stage 2) decompress `.gz` input transparently, so
+several times the source evidence size. DuckDB's `read_ndjson`
+(Stage 2) decompresses `.gz` input transparently, so
 nothing downstream treats compressed and uncompressed staging
 differently.
+
+With `keep_raw=True`, raw XML is indexed by event record ID in a temporary
+SQLite database on disk, then looked up during the JSON pass. This avoids
+a whole-file XML dictionary, while retaining the cost of an extra parse,
+SQLite I/O, and temporary disk space. XML capture remains best effort.
 
 Staging catches parse failures at the file level and records a `partial`
 status with the exact number of records recovered, rather than letting a
@@ -83,7 +93,9 @@ helper both pipelines' manifests share.)
 
 ## Stage 2: DuckDB bulk flatten
 
-`ingest/evtx/flatten.py` reads all staged NDJSON for an ingest batch in one
+After staging completes for a pipeline, its orchestrator groups shards
+by their recorded uncompressed size (256 MiB per conversion by default).
+`ingest/evtx/flatten.py` reads each group in a
 DuckDB `read_ndjson(..., filename=true)` call, joins it against an
 in-memory manifest table for provenance (host, source path, file hash),
 and extracts every normalized column via the SQL expressions defined
@@ -96,7 +108,25 @@ The result is written as Parquet, Hive-partitioned by `host` then
 `channel` (`COPY ... PARTITION_BY (host, channel)`). DuckDB percent-encodes
 partition values containing `/` (common in channel names like
 `Microsoft-Windows-Sysmon/Operational`) and decodes them back
-transparently on read -- verified empirically.
+transparently on read.
+
+`IngestOptions`, exported by `seclogx`, supplies `memory_limit="2GB"`,
+`threads=2`, `staging_chunk_bytes=64 * 1024 * 1024`, and
+`flatten_batch_bytes=256 * 1024 * 1024`, and `staging_format="auto"`. Both `Case.ingest(options=...)`
+and `Case.ingest_background(options=...)` accept it. Chunk and batch
+sizes are byte targets: indivisible records/shards can exceed a target.
+Encoded records above 32 MiB are explicitly rejected.
+
+The process-local `CONVERSION_LOCK` serializes DuckDB ingest conversions
+within one coordinator or Notebook process. It does not coordinate
+separate processes/machines or limit unrelated queries. DuckDB's memory
+setting applies to one conversion instance's managed memory, not total
+RSS: parser processes, Python objects, library buffers and other jobs
+need additional memory. Windows local storage still pre-creates Hive
+partition directories. Auxiliary staging records a bounded partition set,
+so it usually avoids a second scan; legacy manifests, unsupported values,
+or exceeded metadata bounds retain the scan fallback. EVTX retains its
+existing partition scan.
 
 ## Stage 3: query + detection
 
@@ -129,14 +159,17 @@ across a case), at which point one in-memory DataFrame for a whole table
 is the actual bottleneck, independent of how lazy the query engine
 underneath is. `.sql_chunks()`/`.table_chunks()` use DuckDB's
 `fetch_df_chunk()` on a dedicated cursor instead, yielding an
-`Iterator[pd.DataFrame]` of roughly `chunksize`-row chunks -- bounded
-memory regardless of total result size. See "Bounded-memory access for
+`Iterator[pd.DataFrame]` of roughly `chunksize`-row chunks. This bounds
+result delivery by row count when the caller releases each chunk; row
+width, retained chunks, and DuckDB joins/sorts/aggregations still consume
+additional memory. `IngestOptions` configures ingest conversions, not
+these query connections or pandas allocations. See "Bounded-memory access for
 large tables" in
 [03. Querying & search](guides/03_querying_and_search.md) for the full
-mechanism and a worked before/after memory measurement.
+mechanism and usage examples.
 
-Every DataFrame-returning accessor -- `CaseDB`'s and `Case`'s alike -- has
-a `_chunks` sibling built the same way (`Case.query_chunks()`,
+The table/query accessors have
+`_chunks` siblings built the same way (`Case.query_chunks()`,
 `Case.web_logs_chunks()`, `Case.timeline_chunks()`, ...), and the CLI
 (`query`/`table`/`tasks`/`timeline`) uses the chunked path automatically
 for both `--out` (streamed straight to CSV, one chunk at a time -- see
@@ -191,9 +224,9 @@ run, in three steps:
    `ResultTooLargeError` -- naming `search_chunks()`/`search_to_csv()` as
    the alternatives -- rather than materializing a result too large for
    the machine's available memory. `search_chunks()`/`search_to_csv()`
-   skip the check entirely, since they're memory-safe at any result size
-   regardless (same `sql_chunks()`/`export_chunks_to_csv()` as the rest of
-   the bounded-memory delivery story above).
+   skip the eager-result check and deliver one DataFrame at a time
+   (the same `sql_chunks()`/`export_chunks_to_csv()` path described above).
+   This does not impose a hard memory ceiling on query execution.
 
 `discover_fields()` (`seclogx fields` / `Case.fields()`) answers "what
 can I even search on" by reading real data rather than documentation: it
@@ -225,12 +258,18 @@ tags (`attack.py`), and reports rules that failed to convert or execute
 (including "this case has no `<table>` table ingested") rather than
 dropping them silently.
 
+Hunting still materializes each rule's matches as a DataFrame, retains
+them, and concatenates the results. There is no `hunt_chunks()` path or
+search-style eager-result guard; distributed hunting also returns match
+frames to the coordinator. A broad rule can therefore exceed available
+memory even when ingest and ordinary chunked queries remain bounded.
+
 `timeline.py` is a thin cross-host, filterable time-sorted view over the
 same `events` table.
 
 ## Non-EVTX log families
 
-Every `--source` also gets a second discovery/staging/flatten pass, for
+The shared source scan also feeds a separate staging/flatten pipeline for
 artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
 IIS/nginx/Apache/Tomcat HTTP access **and** error/diagnostic logs, IIS
 HTTP.sys (HTTPERR) logs, Exchange's self-describing CSV logs, three
@@ -268,15 +307,14 @@ happens when a source has one but not the other.
         v
  [2] parse + stage  (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal,dblogs,qcloud,registry}.py)
         |  dispatched by ingest/logsources/orchestrator.py's
-        |  ProcessPoolExecutor, one worker per file -- parses to Python
-        |  dicts, then writes them to a per-file NDJSON staging file
-        |  under staging_aux/<host>/, the same pattern EVTX stage 1 uses
+        |  bounded worker queue, one file task per worker -- emits each
+        |  completed dict to gzip NDJSON or bounded Arrow/ZSTD shards under
+        |  staging_aux/<batch_id>/<host>/
         v
  [3] flatten    (ingest/logsources/flatten.py, ingest/logsources/schema.py)
-        |  DuckDB reads each table's staged NDJSON straight off disk
-        |  (read_ndjson_auto, out-of-core) and applies an explicit
-        |  TRY_CAST per column -- same union_by_name stable-typing
-        |  discipline as schema.py's event_data fix
+        |  DuckDB reads bounded shard groups for each table off disk
+        |  (read_ndjson or streaming Arrow reader, fixed text columns) and applies
+        |  canonical TRY_CAST expressions, with missing fields as NULL
         v
  cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs,syslog,auditd_logs,journal_logs,db_logs,qcloud_logs,registry}/host=<h>/[log_type=<t>/]*.parquet
 ```
@@ -296,12 +334,13 @@ each web applications' two major log categories, and are kept as
 separate tables since they're structurally unrelated (access logs have a
 request/response shape; error logs are severity + free text).
 
-Unlike EVTX, classification never trusts a file's name or extension --
-only content (see `sniff.classify_file`) -- because these artifacts are
+After discovery's suffix/empty-file filters, auxiliary classification
+uses content (see `sniff.classify_file`) because these artifacts are
 routinely renamed or relocated during acquisition (a live Task Scheduler
-task file has *no* extension at all). A file matching none of the
-supported formats is reported as `unrecognized`, never silently dropped
-(`AuxIngestReport.unknown_samples`).
+task file has *no* extension at all). A classified file matching none of
+the supported formats is reported as `unrecognized`
+(`AuxIngestReport.unknown_samples`). This is not an inventory of filtered
+or unreadable paths; see the discovery caveat in known limitations.
 
 IIS and Exchange logs are both self-describing (`#Fields:` header naming
 the columns actually enabled for that site/log), so the parsers read the
@@ -312,13 +351,63 @@ are engine-specific and unambiguous) -- see `docs/known_limitations.md`'s
 detection versus a best-effort path/filename heuristic
 (`sniff.guess_web_log_type`).
 
+Text log and registry parsers expose an `emit` path used by ingest.
+Their public collecting calls still return complete lists when `emit`
+is omitted; those compatibility calls are not bounded by record count.
+`textdecode.iter_text_lines` validates encoding through fixed-size reads
+before emitting any rows, then reopens the file for strict decoding.
+This adds sequential I/O but prevents a late decoding failure from
+switching encoding after part of a file has already been emitted.
+QCloud retains its BOM-required UTF-16 detection policy. Exchange CSV
+keeps quoted multiline fields and their original line endings; multiline
+parsers emit completed logical records.
+
+Auxiliary flattening declares each input field as VARCHAR before canonical
+casts, instead of sampling and inferring a schema for each shard group.
+This prevents date-shaped free text from becoming a timestamp and changing
+spelling when different shard boundaries produce different samples.
+
+`staging_format="auto"` selects Arrow IPC/ZSTD level 1 for auxiliary source
+files at least 16 MiB, and gzip NDJSON for smaller files. Explicit `arrow`
+and `ndjson` override the selection. Arrow buffers are bounded by a 16 MiB
+conservative estimate and 16,384 rows, with the same 32 MiB encoded-record
+ceiling; one large record can exceed the batch target. IPC schemas fix raw
+columns as strings, then DuckDB applies the existing canonical casts. The
+reader opens one shard at a time. A fixed 1 MiB output buffer coalesces IPC
+metadata and column writes; closing the sink must succeed before a shard
+is published. Mixed formats for one table are converted
+in separate groups. Auxiliary Parquet uses ZSTD level 1. EVTX staging is
+unchanged. This still writes intermediate files and is not direct
+parser-to-Parquet streaming.
+
+Text preparation computes SHA-256 and strict UTF-8 validation in one pass.
+Fallback encodings retain their complete validation and priority order.
+Parsing reuses the prepared encoding only inside a matching path/policy
+scope. File identity, size and timestamps are checked for ordinary source
+changes; this is not an immutable evidence snapshot. A detected change or
+staging persistence error is fatal rather than published as a partial parse
+when detected during parsing. A preparation read/change failure is reported
+as a failed source before rows are emitted. Already-rejected UTF-8 is not
+decoded again during fallback. These checks cover prepared text logs;
+EVTX, Registry and task XML retain their separate hash/read paths.
+Partition collection is bounded to 4,096 values/1 MiB per source, and uses
+the canonical text spelling before Hive path escaping.
+
+Physical text lines have an 8 Mi-character limit; logical-record limits
+and exceptions are documented in [known limitations](known_limitations.md).
+Registry traversal uses a seekable file-backed hive and emits rows;
+transaction-log recovery still uses regipy's potentially in-memory path.
+Scheduled Task XML remains a whole-document parser, with an 8 MiB
+document limit enforced by ingest. Supported non-EVTX files are no longer
+excluded simply because their source size exceeds 2 GiB.
+
 ## Case workspace layout
 
 ```
 cases/<case_name>/
   case.json                     # hosts, source paths, ingest run history
-  staging/<host>/*.ndjson.gz       # gzipped records_json() output, one file per source .evtx
-  staging_aux/<host>/*.ndjson.gz   # gzipped staged non-EVTX rows, one file per source file, named <table>.<file>.<hash>.ndjson.gz
+  staging/<batch_id>/<host>/*.ndjson.gz      # one or more gzip shards per source EVTX
+  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # bounded auxiliary shards
   logs/ingest_<batch_id>.log    # reconciliation summary per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet
@@ -387,10 +476,10 @@ of whether cluster mode is ever turned on:
 - `flatten_case`/`flatten_table`'s `COPY ... TO ... PARTITION_BY (...)`
   had no unique-filename guarantee across independent COPY invocations --
   fine when flattening was always serialized per case (true before this),
-  but a real collision risk once distributed ingest workers can flatten
-  into the same case concurrently. Fixed via DuckDB's
-  `FILENAME_PATTERN '{uuid}'` COPY option, so concurrent flatten calls can
-  never collide on a filename inside the same Hive partition. The finite
+  but a collision risk when independent coordinators flatten
+  into the same case concurrently. DuckDB's
+  `FILENAME_PATTERN '{uuid}'` COPY option assigns distinct output names.
+  This does not make a whole ingest atomic. The finite
   set of local Hive partition directories is also pre-created with
   `mkdir(exist_ok=True)` before COPY, avoiding a Windows race when two
   DuckDB connections create the same new partition simultaneously -- no
@@ -403,21 +492,22 @@ of whether cluster mode is ever turned on:
   once a broker is configured (more reliable than a POSIX file lock over a
   network filesystem for coordinating genuinely separate machines).
 
-**Ingest is now bounded-memory across a batch, the same way EVTX always
-was.** The EVTX pipeline stages to NDJSON on disk per file, then flattens
-by reading that back via DuckDB's own streaming `read_ndjson()`, never
-loading every record into a Python list at once. The non-EVTX pipeline
-(`ingest/logsources/orchestrator.py`) now follows the same pattern: each
-worker still parses a file straight to a Python `list[dict]` (bounded to
-that one file's size), but writes it to a per-file NDJSON staging file
-instead of returning it in-memory, and `run_aux_ingest()` groups staged
-*file paths* by table rather than accumulating rows -- `flatten_table()`
-reads each table's staged files via `read_ndjson_auto()`, out-of-core,
-instead of building one `pd.DataFrame` from every row in the batch.
-Coordinator-side peak memory during ingest is now bounded by (one file's
-parse footprint) x `workers`, not by total batch size across every file
-of a given table. What's still per-file, not per-batch: each worker's own
-whole-file read (needed for encoding detection, see
-`textdecode.decode_text`) means a single pathologically
-large individual file is still a per-file memory cost, same as EVTX
-staging.
+**Resource bounds are staged, not a fully overlapped producer/consumer
+pipeline.** Text/registry records are emitted to disk without retaining a
+whole file's rows, and only shard manifests cross the worker boundary.
+File discovery and manifests still scale with file/shard count. Each
+pipeline completes staging before its bounded flatten calls begin, so
+temporary disk usage can grow with the full staged dataset. The local
+job queue bounds in-flight tasks, but there is no immediate flattening
+with disk-space backpressure.
+
+Arrow IPC staging is supported; a direct parser-to-Parquet path without
+intermediate files, resumable/idempotent ingest and atomic queryable
+snapshots are not implemented. Resource targets do not guarantee a fixed
+throughput or RSS for arbitrary formats, record sizes or machines.
+Repeated ingestion can add duplicate rows, and a failure after some
+flatten batches were written can leave partial output. Batch-isolated
+scratch space and unique Parquet filenames do not provide a transaction
+or a commit manifest for the lake. See the
+[performance guide](guides/08_performance_and_scale.md) for resource settings
+and their limits.

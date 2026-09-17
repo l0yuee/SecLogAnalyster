@@ -8,6 +8,8 @@ from ...distributed.queue import INGEST_QUEUE_NAME, get_job_queue
 from ...errors import NoSourcesFoundError
 from ..common import SourceSpec, StageStatus, now_iso
 from ..jobs import PHASE_FLATTENING, PHASE_STAGING, ProgressReporter
+from ..resources import IngestOptions
+from ..staging import staged_batches, remove_staged
 from .discovery import DiscoveredFile, discover_evtx_files
 from .flatten import flatten_case
 from .manifest import IngestReport, StagedFile
@@ -24,7 +26,9 @@ def run_ingest(
     cluster_config: ClusterConfig | None = None,
     discovered: list[DiscoveredFile] | None = None,
     progress: ProgressReporter | None = None,
+    options: IngestOptions | None = None,
 ) -> IngestReport:
+    options = options or IngestOptions()
     cluster_config = cluster_config or ClusterConfig.from_env()
     started_at = now_iso()
     batch_id = str(uuid.uuid4())
@@ -36,7 +40,7 @@ def run_ingest(
     if not discovered:
         raise NoSourcesFoundError("no .evtx files found under the given source path(s)")
 
-    staging_dir = case_dir / "staging"
+    staging_dir = case_dir / "staging" / batch_id
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
@@ -51,7 +55,7 @@ def run_ingest(
     queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
     on_result = progress.on_evtx_result if progress else None
     staged_files: list[StagedFile] = queue.submit_all(
-        stage_file, [(d, staging_dir, keep_raw) for d in discovered], on_result=on_result
+        stage_file, [(d, staging_dir, keep_raw, options) for d in discovered], on_result=on_result
     )
 
     # Deterministic ordering for reproducible reports/logs.
@@ -64,14 +68,16 @@ def run_ingest(
 
     if progress:
         progress.set_phase(PHASE_FLATTENING)
-    records_flattened = flatten_case(case_dir, staged_files, batch_id, keep_raw=keep_raw, cluster_config=cluster_config)
-    if progress:
-        progress.on_table_flattened("events", records_flattened)
+    records_flattened = 0
+    for batch in staged_batches(staged_files, options.flatten_batch_bytes):
+        rows = flatten_case(case_dir, batch, batch_id, keep_raw=keep_raw, cluster_config=cluster_config, options=options)
+        records_flattened += rows
+        if progress:
+            progress.on_table_flattened("events", rows)
 
     if not keep_staging:
         for f in staged_files:
-            if f.ndjson_path:
-                Path(f.ndjson_path).unlink(missing_ok=True)
+            remove_staged(f)
 
     report = IngestReport(
         batch_id=batch_id,

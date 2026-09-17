@@ -6,13 +6,17 @@
 
 ---
 
-Every command accepts `--case-root <dir>` (default `./cases`) to point
-at a different case workspace location. Run any command with `--help`
-for the full, current option list.
+Activate `conda activate python314` before running commands in this checkout.
+Case operations (`case init/list/info`) use `--dir <root>`; most case-scoped
+analysis and ingest commands use `--case-root <root>` (default `./cases`).
+Commands such as `worker`, `cluster` and `rules validate` do not take a case
+root. Run a command with `--help` for its complete option list. The examples
+below use shell-style `\` line continuation; in PowerShell, use one line or
+PowerShell's backtick continuation.
 
 ## `seclogx case init <name>`
 
-Creates a new case workspace.
+Creates a new case workspace under `--dir` (default `./cases`).
 
 ```bash
 seclogx case init incident42
@@ -26,6 +30,7 @@ Lists all cases under `--dir` (default `./cases`).
 
 Prints the case's metadata as JSON: hosts ingested so far, and the
 history of every ingest run (batch id, timestamps, file/record counts).
+Use `--dir` to select a different case root.
 
 ```bash
 seclogx case info incident42
@@ -35,7 +40,7 @@ seclogx case info incident42
 
 Discovers, classifies, and normalizes every supported file under the
 given source paths into the case in one pass: `.evtx`, Scheduled Task
-definitions, IIS/nginx/Apache/Tomcat access logs, Exchange CSV logs,
+definitions, IIS/nginx/Apache/Tomcat access and error logs, Exchange CSV logs,
 Linux syslog/`auth.log`, auditd, and systemd journal export logs,
 MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, Tencent Cloud Host
 Security client logs, and raw Windows Registry hive files. This is the
@@ -43,27 +48,39 @@ core command.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--source PATH[:HOST]` | required, repeatable | A file or directory to scan recursively. Optionally tag it with an explicit host label (`PATH:HOST`); if omitted, the source directory's own name is used as the host label. |
-| `--workers N` | up to 8 | Parallel staging workers. The bounded default balances CPU throughput, process memory, and evidence-disk contention; set it explicitly for the host and storage in use. |
-| `--keep-raw` | off | `.evtx` sources only: also capture each record's raw XML into the lake (`raw_xml` column), for cases needing full evidentiary completeness. Roughly doubles ingest time and memory for the files it's applied to. |
-| `--keep-staging` / `--no-keep-staging` | keep | Whether to keep the intermediate NDJSON after flattening -- `staging/` for `.evtx` sources, `staging_aux/` for every other log family. Keeping it makes reprocessing cheap if you change something; deleting it saves disk. |
+| `--source PATH[:HOST]` | required, repeatable | A file or directory to scan recursively. An optional `:HOST` sets the host label; otherwise the source root's name is used (including a filename for a direct-file source). Quote paths containing spaces. |
+| `--workers N` | up to 8 | Total local parsing-worker budget shared by EVTX and auxiliary pipelines. `1` stages in the caller process and runs both pipelines serially. Classification uses a separate bounded thread pool. |
+| `--keep-raw` | off | EVTX only: capture raw XML in the `raw_xml` column. Adds XML parsing and a disk-backed index; cost depends on the records. |
+| `--keep-staging` / `--no-keep-staging` | keep | Retain EVTX NDJSON and auxiliary NDJSON/Arrow shards after conversion. Removal happens after conversion, so it does not eliminate staging's peak disk requirement. Retained shards are not an automatic resume mechanism. |
+| `--memory-limit SIZE` | `2GB` | Managed memory budget per DuckDB conversion connection, not a hard limit on process-tree RSS. |
+| `--duckdb-threads N` | `2` | Threads per DuckDB conversion. Independent of the parsing-worker budget. |
+| `--staging-chunk-mb N` | `64` | Target uncompressed MiB per staging shard; a record is never split. Despite the flag name, one unit is 1,048,576 bytes. |
+| `--flatten-batch-mb N` | `256` | Target uncompressed MiB per conversion group; an individual staging shard remains indivisible. |
+| `--staging-format FORMAT` | `auto` | Auxiliary staging: `auto` selects Arrow IPC / ZSTD level 1 for sources >=16 MiB, gzip NDJSON otherwise; `arrow` or `ndjson` forces a format. EVTX remains NDJSON. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
 | `--background` / `-b` | off | Detach the import into a background process and return immediately -- see below. |
 
-If `<case>` doesn't already exist, `ingest` creates it automatically. A
-source with no `.evtx` files at all is not an error as long as it has at
-least one supported non-EVTX artifact, or vice versa -- `ingest` only
-fails if neither pass finds anything.
+If `<case>` does not exist, `ingest` creates it. EVTX and auxiliary logs may
+be imported independently. An empty discovery result raises
+`NoSourcesFoundError`; unknown auxiliary candidates can instead produce a report
+with zero imported rows. Inspect the per-file statuses and table counts.
 
-The `.evtx` pass and the non-EVTX pass now run **concurrently** (each
-still manages its own bounded worker pool underneath), and the whole
-source tree is walked **once**, not twice -- classifying every candidate
-file's content is itself parallelized. In the default foreground mode,
-`ingest` shows a live progress display (phase, files scanned/staged,
-ok/partial/failed/unsupported counts) instead of sitting silent until
-everything finishes; see
-[08. Performance & scale](08_performance_and_scale.md) for why this
-mattered for real evidence volumes.
+The source tree is walked once and auxiliary content-prefix classification is
+parallelized. When both pipelines have recognized work and `workers > 1`, they
+share the worker budget and run concurrently; with `workers=1`, they run serially.
+DuckDB conversions within one coordinator process are serialized. Auxiliary
+Parquet uses ZSTD level 1 regardless of staging format. Byte targets bound work
+groups, not total parser, Arrow, DuckDB, or process-tree memory.
+
+Foreground progress reports the phase, walked/classified/staged counts and rows
+written by table. These are file/batch progress counters, not byte-level progress
+or an ETA; a large file can take time without advancing them. See
+[08. Performance & scale](08_performance_and_scale.md).
+
+Every invocation appends a new batch. Cross-run deduplication and checkpoint/resume
+are not implemented. Each pipeline stages its batch before conversion; neither
+`--background` nor retained staging provides early-query or atomic-publication
+guarantees. Wait for completion and inspect the report before querying the Case.
 
 Examples:
 
@@ -80,17 +97,18 @@ seclogx ingest incident42 \
 # Keep raw XML for a small, high-value evidence set; use more workers
 seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
 
-# Large import: don't block the terminal -- check progress separately
-seclogx ingest incident42 --source /evidence/full_kape_output --background
-seclogx ingest-status incident42 --watch
+# Alternative large import in a new case; choose budgets for available resources
+seclogx ingest large_case --source /evidence/full_kape_output --background --workers 8 --memory-limit 4GB --duckdb-threads 8 --staging-format auto
+seclogx ingest-status large_case --watch
 ```
 
-After every ingest run, seclogx prints a **reconciliation report**:
+After a completed foreground import, seclogx prints a **reconciliation report**:
 files discovered vs. staged OK vs. partially recovered vs. failed, and
 staged records vs. rows actually written to the lake. Any file that
 didn't parse cleanly is listed with its exact error and how many
-records were recovered before the failure -- this report is also saved
-to `cases/<name>/logs/ingest_<batch_id>.log`.
+records were recovered. The EVTX report is also saved to
+`cases/<name>/logs/ingest_<batch_id>.log`; background jobs capture both reports
+in `cases/<name>/jobs/<job_id>.log`.
 
 ```
 Ingest batch 66777433-... for case 'incident42'
@@ -104,14 +122,14 @@ Ingest batch 66777433-... for case 'incident42'
      /evidence/.../sysmon.evtx -- Failed to parse chunk header (358 recovered)
 ```
 
-A `partial` file is not an error to panic over -- it means exactly what
-it says: some number of records were successfully recovered before a
-corrupted chunk stopped the rest of that file. Nothing before the
-failure point is lost.
+A `partial` file contains recovered records and one or more errors. Some parsers
+continue past malformed records; other errors stop a file. Review the error and
+recovered count rather than treating `partial` as complete evidence.
 
 Right after the EVTX reconciliation report, a second one covers the
-non-EVTX pass, with the same never-silently-drop philosophy -- files it
-couldn't classify at all are called out explicitly rather than skipped:
+non-EVTX pass, including candidates that could not be classified. Known
+unrelated suffixes, empty auxiliary files and inaccessible paths may be excluded
+during discovery; they are not all represented by `files unrecognized`:
 
 ```
 Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange):
@@ -155,11 +173,14 @@ seclogx ingest-status incident42
 seclogx ingest-status incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f --watch
 ```
 
-If the background job crashes with something other than "no supported
-files found", its status is recorded as `failed` with the exception
-message rather than left stuck at whatever phase it was last in --
-check `cases/<name>/jobs/<job_id>.log` (the job's captured stdout/stderr)
-for the full traceback.
+Background imports use the same Python interpreter as the caller and return a
+job ID immediately. Caught exceptions are recorded as `failed`; inspect
+`cases/<name>/jobs/<job_id>.log` for details. A forced process termination, OS
+crash or failed status write can leave the last snapshot stale: there is no
+separate liveness supervisor, and `--watch` may continue waiting. `done` means
+the job finished, not that every source parsed without errors. There is no
+cancel/resume command. After completion, reopen an existing Python `Case` handle
+to refresh its cached views.
 
 ## `seclogx query <case> "<SQL>"`
 
@@ -173,7 +194,7 @@ volume (see [08. Performance & scale](08_performance_and_scale.md)).
 | Option | Meaning |
 |---|---|
 | `--out FILE.csv` | Stream the full result to CSV instead of printing a preview |
-| `--limit N` | Cap the number of rows -- pushed into the query itself (`LIMIT`), not applied after fetching, so a limited query on a huge table doesn't pay to read more than it asked for |
+| `--limit N` | Apply SQL `LIMIT` before fetching rows. This bounds returned rows; the query may still need substantial scanning, aggregation or sorting. |
 
 ```bash
 seclogx query incident42 "
@@ -204,7 +225,7 @@ Sysmon was running).
 
 Row count per table currently in the case -- `events`, `web_logs`,
 `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`,
-`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`,
+`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `qcloud_logs`,
 `registry`, whichever are present. The quickest way to see what log
 families a case actually has before writing queries against them.
 
@@ -214,10 +235,9 @@ seclogx sources incident42
 
 ## `seclogx table <case> <name>`
 
-Full contents of any table this case has, as a DataFrame -- the CLI
-counterpart to `Case.web_logs()`/`Case.scheduled_tasks()`/etc., useful for
-tables that don't have their own dedicated command. Streamed in
-bounded-size chunks, same as `query` above.
+Preview any table or stream its rows to CSV with `--out`, including tables with
+no dedicated command. Results are fetched in chunks, as with `query`; the CLI
+does not first build the complete DataFrame returned by `Case.web_logs()`.
 
 | Option | Meaning |
 |---|---|
@@ -231,10 +251,11 @@ seclogx table incident42 exchange_message_tracking --out mailflow.csv
 
 ## `seclogx fields <case> <table>`
 
-What can I search on? Lists every field this case's real, ingested data
-has for a table -- see "Which fields can I search on?" in
+What can I search on? Lists table columns and JSON keys found in a bounded
+sample of the case's data -- see "Which fields can I search on?" in
 [02. Log types & schema](02_log_types_and_schema.md). Computed from a
-bounded sample, so it's safe to run against a table of any size.
+bounded sample; rare JSON keys can be absent, and very wide sampled rows can
+still require substantial memory.
 
 | Option | Meaning |
 |---|---|
@@ -282,6 +303,9 @@ seclogx search incident42 web_error_logs --eq severity=error,SEVERE --out errors
 
 Lists ingested Scheduled Task definitions from `scheduled_tasks`.
 
+The normal listing/export streams chunks; `--suspicious` materializes the task
+table for its pandas heuristics.
+
 | Option | Meaning |
 |---|---|
 | `--suspicious` | Only tasks flagged by a built-in heuristic (action path under Temp/AppData/Public, a LOLBin-style command, hidden, no recorded author, or masquerading as a known Microsoft task -- see "The other tables" in [02. Log types & schema](02_log_types_and_schema.md) for the full list and the `suspicion_reasons` column that explains each match). Not a Sigma rule -- see [04. Threat hunting](04_threat_hunting.md). |
@@ -298,6 +322,10 @@ Lists `syslog` rows recognized as SSH/sudo/PAM/account-management events
 for exactly what's recognized). Not a Sigma rule -- a heuristic filter over
 already-ingested `syslog` data, the `auth.log`/`secure` equivalent of
 `tasks --suspicious`.
+
+This command currently materializes syslog data for pandas heuristics.
+`--out` does not make this path streaming; for large syslog tables, use a filtered
+`query`/`search` export or chunked Python analysis.
 
 | Option | Meaning |
 |---|---|
@@ -316,10 +344,13 @@ entropy heuristics (see [02. Log types & schema](02_log_types_and_schema.md)
 for exactly what's covered), same "heuristic filter, not Sigma" pattern
 as `tasks --suspicious`/`auth`.
 
+The normal listing/export streams chunks; the suspicious result is currently
+materialized as a DataFrame before preview or export.
+
 | Option | Meaning |
 |---|---|
 | `--suspicious` | Only entries flagged by the built-in heuristics |
-| `--hive-type TYPE` | Filter to one hive type (`system`/`software`/`sam`/`security`/`default`/`ntuser`/`usrclass`/`amcache`/`bcd`) |
+| `--hive-type TYPE` | Filter the normal listing to one hive type (`system`/`software`/`sam`/`security`/`default`/`ntuser`/`usrclass`/`amcache`/`bcd`). Currently ignored with `--suspicious`. |
 | `--out FILE.csv` | Export the full result |
 
 ```bash
@@ -439,5 +470,9 @@ no cluster to report on.
 ```bash
 seclogx cluster status
 ```
+
+## `seclogx version`
+
+Prints the installed package version. Use `seclogx --help` for the command list.
 
 Next: [06. Python API](06_python_api.md) for the equivalent Python/notebook surface.

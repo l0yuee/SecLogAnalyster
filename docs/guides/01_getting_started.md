@@ -29,39 +29,40 @@ seclogx exists to make the first hours of triage fast:
   access logs *and* error/diagnostic logs (both major log categories a
   web application produces, including IIS HTTP.sys/HTTPERR),
   **Exchange** CSV logs (Message Tracking gets first-class columns;
-  every other Exchange log type lands in a nothing-dropped catchall),
+  other recognized Exchange CSV types retain their fields in a generic table),
   **Linux** syslog (BSD/RFC-3164 and RFC 5424 -- `auth.log`/`secure`
   content included), the Linux Audit Framework (auditd), and systemd
   journal export logs, **database** logs (MySQL/MariaDB error/
   general/slow query logs, PostgreSQL, MSSQL, Oracle alert log), **Tencent
   Cloud Host Security** client text logs (YDService, HIDS/YDLive, scanners,
   YDFlame/YDUtils/YDQuaraV2, YDEyes), and **Windows Registry** hives (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
-  per-user NTUSER.DAT/UsrClass.dat). Each format is detected by content,
-  not filename, so renamed/relocated evidence still works. See
+  per-user NTUSER.DAT/UsrClass.dat). EVTX discovery uses the `.evtx` suffix;
+  auxiliary candidates are classified from a bounded content prefix, with
+  suffix exclusions and some format-specific filename/path hints. Renaming
+  evidence can therefore affect detection. See
   [02. Log types & schema](02_log_types_and_schema.md) for the full
   twelve-table picture.
-- You get a `pandas.DataFrame`-native interface throughout (CLI
-  tables/CSV, or a Python `Case` object for a notebook) plus built-in
+- You get DataFrames and chunk iterators through a Python `Case` object,
+  plus CLI previews/CSV export and built-in
   Sigma-rule threat hunting with MITRE ATT&CK tagging, covering both
   Windows Event Log and web access logs. **No SQL required either**:
   `seclogx search` / `Case.search()` filter any table with plain
   field/value conditions -- exact, fuzzy, or regex matching.
-- Every parse error, unrecognized file, and unsupported rule is reported
-  explicitly. Nothing is silently dropped.
-- **Bounded memory at every step that touches the analyst directly.**
-  Web access/error logs especially can reach terabyte scale across a
-  case -- every DataFrame-returning method has a chunked/streamed
-  alternative, and `search()` actively checks a result against the
-  machine's available memory before fetching, refusing rather than
-  risking a crash (see [03. Querying & search](03_querying_and_search.md)
+- Reconciliation reports identify discovered files that parsed partially,
+  failed, or could not be classified; unsupported rules are also reported.
+  Known unrelated suffixes and empty auxiliary files are filtered, and
+  inaccessible paths may be skipped. This is not a complete acquisition inventory.
+- **Chunked access for large log tables.** Log-table accessors, SQL queries,
+  search and timelines offer streaming alternatives; `search()` estimates
+  result size before fetching. Ordinary DataFrame methods and derived analyses
+  can still exhaust memory. Consume chunks one at a time rather than retaining
+  all of them (see [03. Querying & search](03_querying_and_search.md)
   and [08. Performance & scale](08_performance_and_scale.md)).
 
-It's designed for one workstation by default -- no distributed setup, no
-external services required. Within that, realistic scale varies by log
-family: EVTX cases are typically well under 100GB (comfortable for DuckDB
-+ Parquet's lazy, out-of-core execution outright), while web access/error
-logs can realistically reach terabyte scale, which is what the
-bounded-memory delivery above is specifically for. An opt-in, purely
+It's designed for one workstation by default, with no external services
+required. Import time and disk/memory requirements depend on the log formats,
+record widths, parallelism and storage. Chunked delivery avoids materializing
+the whole query result but does not bound every operation's memory. An opt-in, purely
 environment-variable-activated distributed mode also exists for large
 ingest batches, large Sigma rule sets, or multiple analysts sharing one
 case concurrently -- see
@@ -70,18 +71,25 @@ change anything described above unless you turn it on.
 
 ## Installation
 
-Requires Python 3.10+.
+The package requires Python 3.10+. Work on this checkout uses the dedicated
+conda **`python314`** environment, isolated from `base`.
 
 ```bash
 cd SecLogAnalyster
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+conda activate python314
+python -m pip install -e .
 ```
 
 Run `seclogx` from inside this repo checkout (an editable install), since
 the bundled Sigma rule set lives in `data/sigma_rules/` relative to the
 repo root and is located at runtime from there.
+
+Use this environment for tests and scripts as well. Where activation is not
+available, run `conda run --no-capture-output -n python314 python ...`.
+With JupyterLab and `ipykernel` installed there, launch `python -m jupyterlab` and select
+the `python314` kernel; verify its interpreter with `sys.executable`.
+If needed, register the installed kernel with
+`python -m ipykernel install --user --name python314 --display-name "Python (python314)"`.
 
 Verify the install:
 
@@ -93,14 +101,17 @@ seclogx --help
 ## The case workspace
 
 Everything revolves around a **case** -- a named workspace under
-`./cases/<name>/` (override with `--case-root`) that holds:
+`./cases/<name>/` (`case init/list/info` use `--dir`; ingest/query commands use
+`--case-root`) that holds:
 
 ```
 cases/<name>/
-  case.json                     # hosts, source paths, ingest run history
-  staging/<host>/*.ndjson.gz       # intermediate parsed EVTX records, gzipped (kept by default)
-  staging_aux/<host>/*.ndjson.gz   # intermediate parsed non-EVTX records, gzipped (kept by default)
-  logs/ingest_<batch_id>.log    # reconciliation report per ingest run
+  case.json                         # hosts and ingest run history
+  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX staging shards (kept by default)
+  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # auxiliary staging shards (kept by default)
+  logs/ingest_<batch_id>.log          # EVTX reconciliation report
+  jobs/<job_id>.json                 # background status snapshot
+  jobs/<job_id>.log                  # background stdout/stderr and reports
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows Event Log
     web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat access logs
@@ -119,7 +130,7 @@ cases/<name>/
 `lake/` can live on S3-compatible object storage instead of local disk
 (`SECLOGX_STORAGE_BACKEND=s3` -- opt-in, see
 [10. Distributed deployment](10_distributed_deployment.md)); `case.json`,
-`staging/`, `staging_aux/`, and `logs/` always stay local/NFS, in every
+`staging/`, `staging_aux/`, `logs/`, and `jobs/` always stay local/NFS, in every
 mode.
 
 You create a case once (`seclogx case init`), then `ingest` into it as
@@ -129,6 +140,21 @@ even weeks apart. Every ingest run is additive and recorded in
 format found under the source paths in one pass -- you don't ingest each
 log type separately. A case only exposes the tables it actually has data
 for; check with `seclogx sources <case>` / `Case.table_counts()`.
+
+Imports are additive, without cross-run deduplication or checkpoint/resume.
+Overlapping source paths are deduplicated within one scan, but running the same
+import twice appends duplicate rows. Each pipeline stages its batch before
+conversion; retained staging is not a resumable checkpoint, and deleting it
+after conversion does not eliminate peak disk use. Background ingest does not
+guarantee consistent queries while files are still being written. Wait for
+completion, review the report and reopen the Case before analysis.
+
+Auxiliary staging defaults to `auto`: sources of at least 16 MiB use Arrow IPC
+with ZSTD level 1, smaller files use gzip NDJSON. EVTX always uses NDJSON.
+The CLI accepts `--staging-format auto|arrow|ndjson`; Python uses
+`IngestOptions(staging_format="auto")`. Auxiliary Parquet uses ZSTD level 1.
+Memory/thread budgets and batch sizes are documented in the
+[CLI reference](05_cli_reference.md) and [Notebook API](06_python_api.md).
 
 ## Quickstart
 
@@ -145,7 +171,7 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 Where to go next:
 
 - **[02. Log types & schema](02_log_types_and_schema.md)** -- what each of
-  the eleven tables holds and what to look for in it.
+  the twelve tables holds and what to look for in it.
 - **[03. Querying & search](03_querying_and_search.md)** -- SQL, the
   no-SQL `search()` interface, and bounded-memory delivery.
 - **[04. Threat hunting](04_threat_hunting.md)** -- Sigma rules and ATT&CK

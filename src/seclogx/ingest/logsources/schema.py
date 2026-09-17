@@ -381,13 +381,29 @@ _TEXT_CAST_COLUMNS = {"extra", "actions", "triggers", "fields", "structured_data
 
 
 def cast_sql_for(table: str) -> dict[str, str]:
-    """Per-column SQL casting a value already present in a batch DataFrame
-    under `raw`. Callers add `CAST(NULL AS <type>) AS <col>` themselves for
-    columns absent from a given batch."""
+    """Normalize fixed-schema staging columns exposed under ``raw``.
+
+    Offset-bearing times become UTC timestamps independently of DuckDB's
+    session timezone; times without an offset keep their wall-clock value.
+    Invalid typed values become NULL through TRY_CAST.
+    """
     out = {}
     for col, duckdb_type in TABLES[table]["columns"]:
         if col in _TEXT_CAST_COLUMNS or duckdb_type in ("VARCHAR", "JSON"):
             out[col] = f"CAST(raw.{col} AS VARCHAR)"
+        elif duckdb_type == "TIMESTAMP":
+            text = f"trim(CAST(raw.{col} AS VARCHAR))"
+            # Casting VARCHAR directly to TIMESTAMP discards its UTC offset.
+            # Detect only explicit ISO offsets, so naive times are not given
+            # an invented local timezone. Normalize lowercase z for DuckDB.
+            out[col] = (
+                f"CASE WHEN regexp_matches({text}, '(?i)(z|[+-]([01][0-9]|2[0-3]):?[0-5][0-9])$') "
+                f"THEN (TRY_CAST(regexp_replace({text}, 'z$', 'Z') AS TIMESTAMPTZ) AT TIME ZONE 'UTC') "
+                # DuckDB accepts out-of-range offsets such as +99:99;
+                # reject them instead of normalizing to an invented date.
+                f"WHEN regexp_matches({text}, '[+-][0-9]{{2}}:?[0-9]{{2}}$') THEN NULL::TIMESTAMP "
+                f"ELSE TRY_CAST({text} AS TIMESTAMP) END"
+            )
         else:
             out[col] = f"TRY_CAST(raw.{col} AS {duckdb_type})"
     return out

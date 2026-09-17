@@ -33,19 +33,19 @@ bundled rule set -- not the full ATT&CK framework. Unknown IDs still
 show up as bare `TXXXX` identifiers.
 
 The bundled rule set (37 rules, `data/sigma_rules/`) targets **Sysmon**
-event fields specifically (process creation, network connections, file
-events, registry changes, image loads, DNS queries, named pipes,
-PowerShell script blocks, process access) -- it will only find things if
-Sysmon was actually running and its logs were ingested. It is a curated
-starting point, not exhaustive; see "Extending detection" below to add
-more.
+telemetry and **PowerShell Operational** events. Sysmon categories need
+the corresponding collected Sysmon logs; `ps_script`/`ps_module` use
+PowerShell events 4104/4103 independently of Sysmon. Ingested Security
+4688 events do not substitute for the Sysmon process-creation route.
+The rules are a curated starting point, not exhaustive coverage.
 
 `hunt` also supports Sigma's `category: webserver` rules (against
 `web_logs`, i.e. **access** logs), for supplying your own IIS/nginx/Apache
 webshell or exploitation-pattern rules -- none are bundled by default in
-v1. There is no Sigma logsource category for on-disk Scheduled Task
+v1. This project's routing does not cover on-disk Scheduled Task
 definitions, web application **error** logs (`web_error_logs`), Exchange
-message tracking, database logs (`db_logs`), or the Windows Registry
+message tracking, Linux text logs, database logs (`db_logs`), Tencent
+client logs (`qcloud_logs`), or the Windows Registry
 (`registry` -- Sigma's registry categories model *live* monitoring
 telemetry, not a static offline hive dump), so those aren't part of a
 Sigma hunt; use `Case.suspicious_tasks()` / `seclogx tasks --suspicious`
@@ -53,18 +53,28 @@ for tasks, `Case.suspicious_registry()` / `seclogx registry --suspicious`
 for the registry, and plain SQL/search (see [07. Recipes](07_recipes.md))
 for `web_error_logs`, Exchange, and `db_logs`.
 
+Hunting is not a chunked result API: it loads each rule's matches into
+pandas, retains the matching frames and concatenates them. One event can
+appear for several matching rules. Broad rules can therefore use memory
+proportional to all matches; `IngestOptions` and the `search()` result-size
+check do not limit this path. Distributed hunting still returns matches
+to the coordinator. Use a focused rule directory and `min_level`/
+`--min-level` where appropriate, and run against completed imports when
+complete-batch visibility matters; ingest does not publish atomic snapshots.
+
 ## Extending detection: custom rules and fields
 
 Point `--rules` / `rules_dir=` at any directory of standard Sigma YAML
 rules -- they don't have to come from the bundled set. Before relying on
-a new rule set, run:
+a new rule set, run (a supplied directory replaces the bundled selection):
 
 ```bash
 seclogx rules validate --rules /path/to/your/rules
 ```
 
-This reports, per rule, whether it converts successfully. Common reasons
-a rule won't convert out of the box:
+This reports, per rule, whether it loads and converts successfully. It
+does not execute against a case: an unmapped field can convert successfully
+and then fail at query time. Common reasons a rule needs adaptation:
 
 - **It uses a Sigma field seclogx doesn't map yet.** Add it to
   `FIELD_MAPPING` in `src/seclogx/detect/pipeline.py` (see

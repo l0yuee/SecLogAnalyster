@@ -7,7 +7,7 @@
 ---
 
 This guide answers "what does each table hold, and what should I actually
-look at first" for all nine log families seclogx normalizes. For the exact
+look at first" for the log families seclogx normalizes. For the exact
 column-by-column reference (types, nullability, partition keys), see
 `docs/schema.md`; for how each format is ingested, see `docs/architecture.md`.
 
@@ -70,6 +70,20 @@ rather than being crammed into `events` -- full column reference in
 `c.scheduled_tasks()`, ...), the same first-class treatment `events` gets
 via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md).
 
+The normalized columns are the same for both staging formats. By default,
+auxiliary source files at least 16 MiB use Arrow IPC/ZSTD level 1;
+smaller files use gzip NDJSON. Both apply fixed input types and canonical
+casts, so missing/invalid typed values become `NULL` without reinterpreting
+timestamp-shaped free text. JSON columns such as `extra` and `fields`
+are physically text containing JSON. Explicit timestamp offsets are
+normalized to UTC; timestamps without offsets keep their wall-clock value.
+
+Ingest emits records as they are parsed, but this does not make a full-table
+DataFrame small. Use the `_chunks` accessors for large query results; see
+[03. Querying and search](03_querying_and_search.md). Staging completes
+before flattening within each pipeline, and source files above 2 GiB are
+accepted subject to parser/record limits.
+
 | Table | What it holds | Key columns |
 |---|---|---|
 | `web_logs` | **Access logs**: IIS, nginx, Apache, and Tomcat HTTP access logs, unified | `log_type`, `client_ip`, `method`, `uri_stem`, `uri_query`, `status`, `user_agent`, `referer` |
@@ -89,8 +103,9 @@ A few things worth knowing before you query these:
 - **Format is detected by content, not filename or extension** -- a live
   Task Scheduler task file has no extension at all, and forensic tools
   routinely rename exported logs. A file matching none of the supported
-  formats is reported as unrecognized in the ingest summary, never
-  silently skipped.
+  formats after classification is reported as unrecognized in the ingest
+  summary. Empty files, configured skipped suffixes and unreadable paths
+  are not all represented in that count; see [known limitations](../known_limitations.md).
 - **`web_logs` covers the access-log category; `web_error_logs` covers the
   error/diagnostic-log category** -- the two major log categories every
   web application produces. They're separate tables because they're
@@ -99,8 +114,8 @@ A few things worth knowing before you query these:
 - **In `web_logs`, nginx vs. Apache vs. Tomcat is a best-effort label**,
   not a hard detection -- Common/Combined Log Format is byte-identical
   across all three; `log_type` falls back to `web_access` when no
-  path/filename hint is available. IIS is always detected reliably
-  (self-describing header).
+  path/filename hint is available. IIS identification uses its
+  self-describing header; missing or nonstandard headers can still fail detection.
 - **In `web_error_logs`, the engine label *is* a real detection** -- each
   engine's error-log format is distinct and unambiguous, unlike access
   logs. Only each engine's default/standard format is recognized (a
@@ -131,8 +146,9 @@ A few things worth knowing before you query these:
   isn't portable across systems and isn't ingested.
 - **`db_logs` unifies six sub-formats behind `log_type`**: `mysql_error`,
   `mysql_general`, `mysql_slow`, `postgresql`, `mssql`, `oracle`. Only
-  `mysql_slow` populates `query_time_sec`/`rows_examined`/`user_name`/
-  `client_address`; only `mysql_error`/`oracle` populate `error_code`;
+  `mysql_slow` populates `query_time_sec`/`rows_examined`/`client_address`;
+  `user_name` also comes from PostgreSQL when present. Only
+  `mysql_error`/`oracle` populate `error_code`;
   columns an engine doesn't produce are simply NULL for its rows -- see
   `docs/schema.md` for exactly which columns each sub-format fills in.
   Detection is content-based like every other table here, but MySQL's
@@ -153,7 +169,10 @@ A few things worth knowing before you query these:
   value, plus one row per key with zero values (so key existence/
   last-write-time isn't lost); `entropy` is populated only for
   binary-typed values. See `docs/known_limitations.md` for the
-  transaction-log-recovery and hive-type-identification caveats.
+  transaction-log-recovery and hive-type-identification caveats. Traversal
+  reads a seekable hive file, but recovery and individual large values can
+  still consume substantial memory. Stored binary hex covers the first
+  8 KiB of bytes; entropy uses the full binary value.
 - See [07. Recipes](07_recipes.md) for recipes, and `docs/known_limitations.md`
   for the full list of scope decisions.
 

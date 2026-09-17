@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from ..common import StageStatus, now_iso  # noqa: F401 (now_iso re-exported for existing importers)
+from ..staging import StagedChunk
 
 if TYPE_CHECKING:
     from ..logsources.manifest import AuxIngestReport
@@ -34,6 +35,7 @@ class StagedFile:
     error_message: str | None
     ndjson_path: str | None
     staged_at: str
+    chunks: list[StagedChunk] = field(default_factory=list)
 
 
 @dataclass

@@ -27,6 +27,8 @@ from ...distributed.config import ClusterConfig
 from ...distributed.queue import INGEST_QUEUE_NAME, get_job_queue
 from ..common import SourceSpec, StageStatus
 from ..jobs import PHASE_FLATTENING, PHASE_STAGING, ProgressReporter
+from ..resources import IngestOptions
+from ..staging import staged_batches, remove_staged
 from .discovery import ClassifiedFile, discover_and_classify
 from .flatten import flatten_table
 from .manifest import AuxIngestReport, AuxStagedFile
@@ -41,7 +43,9 @@ def run_aux_ingest(
     cluster_config: ClusterConfig | None = None,
     classified: list[ClassifiedFile] | None = None,
     progress: ProgressReporter | None = None,
+    options: IngestOptions | None = None,
 ) -> AuxIngestReport:
+    options = options or IngestOptions()
     cluster_config = cluster_config or ClusterConfig.from_env()
     batch_id = str(uuid.uuid4())
     if classified is None:
@@ -62,7 +66,7 @@ def run_aux_ingest(
             problem_files=[],
         )
 
-    staging_dir = case_dir / "staging_aux"
+    staging_dir = case_dir / "staging_aux" / batch_id
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
@@ -88,7 +92,7 @@ def run_aux_ingest(
         queue = get_job_queue(cluster_config, workers=workers, queue_name=INGEST_QUEUE_NAME)
         on_result = progress.on_aux_result if progress else None
         staged.extend(
-            queue.submit_all(stage_aux_file, [(cf, staging_dir) for cf in known_classified], on_result=on_result)
+            queue.submit_all(stage_aux_file, [(cf, staging_dir, options) for cf in known_classified], on_result=on_result)
         )
     staged.sort(key=lambda f: f.source_path)
 
@@ -102,25 +106,39 @@ def run_aux_ingest(
         if f.status in (StageStatus.PARTIAL, StageStatus.FAILED)
     ]
 
-    by_table: dict[str, list[str]] = {}
+    by_table: dict[tuple[str, bool], list[AuxStagedFile]] = {}
     for f in staged:
         if f.table and f.ndjson_path:
-            by_table.setdefault(f.table, []).append(f.ndjson_path)
+            # Auto mode can select different staging formats for files in
+            # the same table. Each conversion stream must be homogeneous.
+            by_table.setdefault((f.table, Path(f.ndjson_path).suffix == ".arrow"), []).append(f)
 
     if progress:
         progress.set_phase(PHASE_FLATTENING)
     ingested_at = datetime.now(timezone.utc)
     rows_written: dict[str, int] = {}
-    for table, ndjson_paths in by_table.items():
-        rows = flatten_table(case_dir, table, ndjson_paths, batch_id, ingested_at, cluster_config=cluster_config)
-        rows_written[table] = rows
-        if progress:
-            progress.on_table_flattened(table, rows)
+    for (table, _), files in by_table.items():
+        rows_written.setdefault(table, 0)
+        for batch in staged_batches(files, options.flatten_batch_bytes):
+            paths = [f.ndjson_path for f in batch]
+            partitions = None
+            if all(f.partition_rows is not None for f in batch):
+                unique_partitions = set()
+                for f in batch:
+                    unique_partitions.update(f.partition_rows)
+                    if len(unique_partitions) > 4096:
+                        break
+                else:
+                    partitions = list(unique_partitions)
+            rows = flatten_table(case_dir, table, paths, batch_id, ingested_at,
+                                 cluster_config=cluster_config, options=options, partition_rows=partitions)
+            rows_written[table] += rows
+            if progress:
+                progress.on_table_flattened(table, rows)
 
     if not keep_staging:
         for f in staged:
-            if f.ndjson_path:
-                Path(f.ndjson_path).unlink(missing_ok=True)
+            remove_staged(f)
 
     return AuxIngestReport(
         batch_id=batch_id,

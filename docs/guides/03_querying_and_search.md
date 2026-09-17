@@ -31,10 +31,10 @@ contents with no `WHERE` clause needed. See
 
 ## Searching without SQL
 
-If you're not comfortable writing SQL, every SQL example in this project
-has a no-SQL equivalent: `seclogx search <case> <table>` on the CLI,
-`Case.search()` in Python. Conditions are plain field/value pairs, one of
-three kinds:
+For field-based filtering without SQL, use `seclogx search <case> <table>`
+on the CLI or `Case.search()` in Python. Aggregation, joins and arbitrary
+expressions still use SQL. Search conditions are plain field/value pairs,
+one of three kinds:
 
 | Condition | Meaning | CLI flag | Python |
 |---|---|---|---|
@@ -86,15 +86,15 @@ A few things that make this more than "LIKE with extra steps":
   lookahead/lookbehind support, which log patterns rarely need anyway).
   `--contains` is always a literal substring, never a wildcard pattern --
   reach for `--regex` if you need real pattern matching.
-- **It's memory-safe by design.** `search()` estimates the result size
-  before fetching and refuses -- pointing you at the alternatives below --
-  rather than risking your machine running out of memory. See "The
-  memory-safety check" below for the full mechanics.
+- **`search()` checks estimated result size before fetching.** It refuses
+  an estimated oversized DataFrame and points to the alternatives below.
+  Sampling and changing available memory make this a guard, not a hard
+  memory guarantee. See "The memory-safety check" below.
 
 ## Bounded-memory access for large tables
 
-Every DataFrame-returning accessor -- `.query()`, `.table()`,
-`.web_logs()`, `.timeline()`, all of them -- has a `_chunks` sibling that
+Table/query accessors such as `.query()`, `.table()`,
+`.web_logs()` and `.timeline()` have `_chunks` siblings that
 returns an `Iterator[pd.DataFrame]` instead of one DataFrame. This
 matters because `.query()`/`.table()`/etc. call DuckDB's `.fetchdf()`
 under the hood, which materializes the *entire* result as one DataFrame:
@@ -103,10 +103,16 @@ especially can realistically reach terabyte scale across a case, well
 past what fits in memory as one DataFrame -- DuckDB's lazy, out-of-core
 *query execution* doesn't help once the last step pulls everything into
 one object. The `_chunks` accessors use DuckDB's chunked fetch instead,
-so memory use is bounded by `chunksize` (rows per chunk, default
-100,000), not by how large the total result is. Verified empirically:
-reading 5M rows via chunks added ~190MB of peak memory against ~2.7GB for
-`fetchdf()` on the same query.
+so Python receives approximately `chunksize` rows at a time (default
+100,000, rounded to DuckDB vectors of 2,048 rows).
+
+This controls result delivery, not total query RSS. Wide rows still need
+more memory; DuckDB sorts, joins and aggregations have their own working
+state. Release each chunk after processing it: `list(iterator)` or a final
+`pd.concat()` recreates a full-result allocation. `IngestOptions` applies
+to ingest conversions and does not set limits on these query connections
+or pandas. Sigma hunts and derived heuristic results also have separate
+memory behavior; they do not all offer chunked variants.
 
 ```python
 from seclogx import Case
@@ -137,9 +143,9 @@ for chunk in c.web_logs_chunks(chunksize=20_000):
 
 Every `_chunks` accessor mirrors its eager counterpart's signature (same
 filters, same `log_type=`/`host=`/etc. keywords) plus a `chunksize`
-keyword, and yields nothing (not an error) if the case has no data for
-that table -- consistent with the eager accessors returning an empty
-DataFrame instead of raising.
+keyword. Named table accessors yield nothing when that table is absent,
+matching their eager empty-DataFrame behavior. Arbitrary `query_chunks()`
+SQL still raises for nonexistent tables or an empty case.
 
 The CLI applies this automatically: `seclogx query`/`table`/`tasks`/
 `timeline` stream chunks straight to CSV for `--out`, and the console
@@ -153,9 +159,10 @@ result) -- see [05. CLI reference](05_cli_reference.md). You don't need
 estimates the result size *before* fetching (an exact `count(*)` times a
 bytes-per-row figure from a small sample) and compares it against the
 machine's actual currently-available memory. If materializing the whole
-result as one DataFrame would use more than a quarter of that, it refuses
--- raising `ResultTooLargeError` -- instead of trying and risking an
-out-of-memory crash:
+result as one DataFrame is estimated to use more than a quarter of that,
+it refuses with `ResultTooLargeError`. Row-size variance can make the
+estimate inaccurate, and the count/sample queries themselves still need
+execution resources:
 
 ```python
 from seclogx.errors import ResultTooLargeError
@@ -164,11 +171,9 @@ try:
     df = c.search("web_logs", contains={"uri_stem": "shell"})
 except ResultTooLargeError as e:
     print(e)
-    # "this search matches an estimated 8,400,000 rows (~1200 MB) -- too
-    #  large to safely hold in memory as one DataFrame. Use search_chunks()
-    #  ... or search_to_csv() ..."
+    # The message includes the estimate and names chunked alternatives.
 
-# The two alternatives it names, both memory-safe at any result size:
+# The two alternatives deliver results one chunk at a time:
 for chunk in c.search_chunks("web_logs", contains={"uri_stem": "shell"}):
     ...                                                          # iterate
 c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # or stream to a file
@@ -183,9 +188,15 @@ only ever blocks a fetch that's actually estimated too large; anything
 that fits returns a normal DataFrame exactly like the eager accessors
 above.
 
-On the CLI this never turns into an error -- `seclogx search` always
+The CLI does not request one eager result DataFrame: `seclogx search`
 shows a bounded preview and tells you the estimated row/size count, and
-`--out` always streams every matching row to CSV regardless of size.
+`--out` streams matching rows to CSV. Query execution, disk and I/O
+errors can still occur.
+
+The lake has no atomic ingest snapshot: queries during an import can see
+only some completed groups, and a failed import can leave earlier output.
+Query after a successful ingest when complete-batch visibility matters;
+re-importing the same source can append duplicates.
 
 How the estimate itself works, and its caveats (sampling variance,
 best-effort available-memory detection), are covered in

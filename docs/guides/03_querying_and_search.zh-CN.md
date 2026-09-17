@@ -25,8 +25,8 @@ ORDER BY time_created
 
 ## 不写 SQL 也能查询
 
-如果你不熟悉 SQL，本项目中的每一个 SQL 示例都有对应的免 SQL 写法：命令行用
-`seclogx search <case> <table>`，Python 用 `Case.search()`。条件就是普通的字段/取值对，分三种：
+按字段筛选时，可以使用免 SQL 接口：命令行用 `seclogx search <case> <table>`，Python 用
+`Case.search()`。聚合、连接和任意表达式仍使用 SQL。搜索条件是普通的字段/取值对，分三种：
 
 | 条件 | 含义 | 命令行参数 | Python |
 |---|---|---|---|
@@ -65,20 +65,24 @@ c.search("web_logs", contains={"uri_stem": "shell"}, eq={"status": 200})
   就是这种情况，它没有任何 JSON 对象兜底字段），会得到一个清晰的提示，列出该表实际拥有的列，而不是数据库层面难以理解的报错。不确定一张表有哪些字段？见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)中的“我能查询哪些字段？”。
 - **`--regex` 使用正则表达式**（DuckDB 基于 RE2 的正则引擎——和大多数日志分析工具用的语法一样，不支持前瞻/后顾断言，而日志匹配场景基本用不到这些）。`--contains`
   永远是字面子串匹配，绝不是通配符模式——需要真正的模式匹配时请用 `--regex`。
-- **内存安全是设计使然。** `search()` 会在真正取回结果之前先估算结果规模，如果估算结果太大就会拒绝执行——并直接告诉你该用哪种替代方案——而不是冒着让机器耗尽内存的风险硬取。完整机制见下文“内存安全检查”。
+- **`search()` 在取回结果前检查估算大小。** 估算过大的 DataFrame 会被拒绝，并提示分块替代方案。
+  采样误差和可用内存的变化意味着这是一道保护检查，并非内存硬保证。完整机制见下文“内存安全检查”。
 
 ## 大表的有界内存访问
 
-每一个返回 DataFrame 的访问器——`.query()`、`.table()`、
-`.web_logs()`、`.timeline()`，无一例外——都有一个 `_chunks`
+`.query()`、`.table()`、`.web_logs()`、`.timeline()` 等表/查询访问器都有 `_chunks`
 同名方法，返回 `Iterator[pd.DataFrame]` 而不是单个 DataFrame。这一点很重要，因为
 `.query()`/`.table()`/等方法底层调用的是 DuckDB 的 `.fetchdf()`，会把*整个*结果一次性物化成一个
 DataFrame：对于已经过滤/聚合到较小规模的结果没问题，但 Web
 访问/错误日志在整个案例范围内很可能达到 TB 级别，远超单个 DataFrame 能舒适容纳的规模——DuckDB
 惰性、核外（out-of-core）的*查询执行*本身并不能解决这个问题，因为瓶颈出在最后一步把所有结果一次性拉进一个对象里。`_chunks`
-系列方法改用 DuckDB 的分块获取机制，因此内存占用由 `chunksize`（每块的行数，默认
-100,000）决定，而不是由结果总量决定。经过实测验证：以分块方式读取 500 万行，峰值内存增加约
-190MB，而同样的查询用 `fetchdf()` 则增加约 2.7GB。
+系列方法改用 DuckDB 的分块获取机制，每次向 Python 返回约 `chunksize` 行（默认
+100,000，按 DuckDB 每组 2,048 行的向量取整）。
+
+这里控制的是结果交付批量，不是整个查询的 RSS。行越宽，每块需要的内存越大；DuckDB
+排序、连接和聚合还有自己的执行内存。处理后应释放分块，`list(iterator)` 或最终
+`pd.concat()` 会重新把完整结果留在内存。`IngestOptions` 仅配置导入转换，不限制查询连接
+或 pandas。Sigma 狩猎及派生启发式结果也有各自的内存行为，并非都提供分块版本。
 
 ```python
 from seclogx import Case
@@ -109,8 +113,8 @@ for chunk in c.web_logs_chunks(chunksize=20_000):
 
 每一个 `_chunks` 访问器都与其对应的一次性方法拥有相同的签名（同样的过滤条件、同样的
 `log_type=`/`host=` 等关键字参数），外加一个 `chunksize`
-关键字参数；如果案例中没有该表的数据，会返回一个空的迭代器，而不是报错——与一次性方法在这种情况下返回空
-DataFrame 保持一致。
+关键字参数。按表命名的访问器在该表不存在时返回空迭代器，与其一次性版本返回空 DataFrame 一致；
+任意 `query_chunks()` SQL 查询不存在的表或空案例时仍会报错。
 
 命令行会自动应用这一机制：`seclogx query`/`table`/`tasks`/`timeline`
 在 `--out` 时会将分块直接流式写入 CSV，控制台预览也只会拉取足够填满表格的行数（绝不会拉取完整结果）——见[《5. 命令行参考》](05_cli_reference.zh-CN.md)。你不需要任何 `--chunks` 之类的参数；这就是这些命令本来的工作方式。
@@ -119,8 +123,8 @@ DataFrame 保持一致。
 
 `.search()` 比上面的 `_chunks` 模式更进一步：它会在真正取回结果*之前*先估算结果规模（精确的
 `count(*)`，乘以一个从小样本得出的单行字节数），并与机器当前实际可用的内存做比较。如果把整个结果物化成一个
-DataFrame 会用掉超过四分之一的可用内存，它就会拒绝执行——抛出
-`ResultTooLargeError`——而不是硬取一把、冒着耗尽内存崩溃的风险：
+DataFrame 预计会用掉超过四分之一的可用内存，它就会拒绝执行并抛出
+`ResultTooLargeError`。行宽差异会影响估算准确性，计数和采样查询本身也需要执行资源：
 
 ```python
 from seclogx.errors import ResultTooLargeError
@@ -129,11 +133,9 @@ try:
     df = c.search("web_logs", contains={"uri_stem": "shell"})
 except ResultTooLargeError as e:
     print(e)
-    # "this search matches an estimated 8,400,000 rows (~1200 MB) -- too
-    #  large to safely hold in memory as one DataFrame. Use search_chunks()
-    #  ... or search_to_csv() ..."
+    # 提示中包含结果大小估算和分块替代方案。
 
-# 它提示的两种替代方案，无论结果多大都是内存安全的：
+# 它提示的两种替代方案会逐块交付结果：
 for chunk in c.search_chunks("web_logs", contains={"uri_stem": "shell"}):
     ...                                                          # 逐块迭代
 c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # 或流式写入文件
@@ -144,9 +146,12 @@ c.search_to_csv("web_logs", "hits.csv", contains={"uri_stem": "shell"})  # 或�
 `_chunks` 同名方法。如果你已经知道某个 `.search()` 查询的结果很小（比如条件已经收得很窄），也不需要做任何特殊处理——这个检查只会拦截真正被估算为过大的取回操作；能装得下的结果会像上面的一次性方法一样，正常返回一个
 DataFrame。
 
-在命令行中这永远不会变成一个错误——`seclogx search`
+命令行不会请求一个容纳全部结果的 DataFrame：`seclogx search`
 总是会展示一个有界大小的预览，并告诉你估算的行数/大小；`--out`
-则始终会把所有匹配行流式导出到 CSV，无论结果有多大。
+则会把匹配行流式导出到 CSV。查询执行、磁盘空间和 I/O 错误仍可能发生。
+
+数据湖没有原子导入快照：导入期间查询可能只看见已完成的部分批次；导入失败也可能留下前面已写入的数据。
+需要完整批次视图时，应在导入成功后查询。重新导入相同源文件可能追加重复行。
 
 这个估算本身是怎么工作的，以及它的注意事项（采样带来的误差、尽力而为的可用内存检测），见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
 

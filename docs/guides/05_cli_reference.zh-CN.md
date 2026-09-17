@@ -6,11 +6,11 @@
 
 ---
 
-所有命令都支持 `--case-root <dir>` 参数（默认 `./cases`）以指向不同位置的案例工作区。执行任意命令加 `--help` 可查看最新、完整的参数列表。
+在本项目中先执行 `conda activate python314`。案例管理命令 `case init/list/info` 使用 `--dir <root>`；多数导入和分析命令使用 `--case-root <root>`（默认 `./cases`）。`worker`、`cluster`、`rules validate` 等命令不接受案例根目录。执行具体命令加 `--help` 可查看完整参数。下面的多行示例采用 Shell 的 `\` 续行；在 PowerShell 中请合为一行或改用反引号续行。
 
 ## `seclogx case init <name>`
 
-创建一个新的案例工作区。
+在 `--dir`（默认 `./cases`）下创建新的案例工作区。
 
 ```bash
 seclogx case init incident42
@@ -22,7 +22,7 @@ seclogx case init incident42
 
 ## `seclogx case info <name>`
 
-以 JSON 形式打印案例元数据：目前已导入的主机，以及每次导入运行的历史记录（批次 ID、时间戳、文件/记录数）。
+以 JSON 形式打印案例元数据：目前已导入的主机，以及每次导入运行的历史记录（批次 ID、时间戳、文件/记录数）。使用 `--dir` 指定其他案例根目录。
 
 ```bash
 seclogx case info incident42
@@ -31,26 +31,31 @@ seclogx case info incident42
 ## `seclogx ingest <case> --source PATH[:HOST] [--source ...]`
 
 在来源路径下一次性发现、分类并归一化所有支持的文件，导入到案例中：`.evtx`、计划任务定义、IIS/nginx/Apache/Tomcat
-访问日志、Exchange CSV 日志、Linux syslog/`auth.log`、auditd 与 systemd
+访问与错误日志、Exchange CSV 日志、Linux syslog/`auth.log`、auditd 与 systemd
  journal 导出日志、MySQL/MariaDB/PostgreSQL/MSSQL/Oracle 数据库日志、腾讯云主机安全
 客户端日志，以及原始 Windows 注册表配置单元文件。这是核心命令。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
-| `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。可选地用 `PATH:HOST` 语法显式指定主机标签；若省略，则使用来源目录本身的名称作为主机标签。 |
-| `--workers N` | 最多 8 | 并行处理文件的工作进程数。受限的默认值用于平衡 CPU 吞吐、进程内存与证据磁盘争用；可根据机器和存储性能显式调整。 |
-| `--keep-raw` | 关闭 | 仅对 `.evtx` 来源生效：同时将每条记录的原始 XML 一并写入数据湖（`raw_xml` 列），适用于需要完整证据保真度的场景。会使被应用文件的导入耗时与内存占用大致翻倍。 |
-| `--keep-staging` / `--no-keep-staging` | 保留 | 是否在归一化完成后保留中间 NDJSON 文件——EVTX 来源存放在 `staging/` 下，其他所有日志类型存放在 `staging_aux/` 下。保留可以在后续调整时低成本重新处理；删除则节省磁盘空间。 |
+| `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。`:HOST` 可显式指定主机标签；省略时使用来源根路径的名称，直接传入文件时就是文件名。含空格路径请加引号。 |
+| `--workers N` | 最多 8 | EVTX 与辅助通路共享的本地解析工作进程总预算。`1` 表示在调用方进程中暂存，且两条通路串行运行；文件分类另有有界线程池。 |
+| `--keep-raw` | 关闭 | 仅 EVTX：将原始 XML 写入 `raw_xml` 列，会增加 XML 解析和磁盘索引开销，实际成本随记录而异。 |
+| `--keep-staging` / `--no-keep-staging` | 保留 | 转换后是否保留 EVTX NDJSON、辅助 NDJSON/Arrow 分片。删除发生在转换后，不能消除暂存磁盘峰值；保留分片不代表支持自动续跑。 |
+| `--memory-limit SIZE` | `2GB` | 单个 DuckDB 转换连接的受管内存预算，不是进程树 RSS 硬上限。 |
+| `--duckdb-threads N` | `2` | 单个 DuckDB 转换使用的线程数，与解析工作进程预算独立。 |
+| `--staging-chunk-mb N` | `64` | 单个暂存分片未压缩大小的目标值，单位实际为 MiB（1,048,576 字节）；不会拆开完整记录。 |
+| `--flatten-batch-mb N` | `256` | 单组转换的未压缩大小目标，单位为 MiB；单个暂存分片不可再拆分。 |
+| `--staging-format FORMAT` | `auto` | 辅助暂存格式：`auto` 对 >=16 MiB 的来源使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；`arrow` 或 `ndjson` 可强制指定。EVTX 仍使用 NDJSON。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
 | `--background` / `-b` | 关闭 | 将导入过程放到后台进程中执行并立即返回——见下文。 |
 
-如果 `<case>` 尚不存在，`ingest` 会自动创建它。只要来源路径下至少有一种受支持的非
-EVTX 产物（反之亦然），即使没有任何 `.evtx` 文件也不算错误——只有当两条通路都一无所获时，`ingest`
-才会报错。
+如果 `<case>` 尚不存在，`ingest` 会自动创建它。可以单独导入 EVTX 或辅助日志；发现结果为空时抛出 `NoSourcesFoundError`。仅含无法识别的辅助候选文件时，也可能返回导入零行的报告，因此应检查逐文件状态与表行数。
 
-`.evtx` 通路与非 EVTX 通路现在会**并发**执行（各自仍然维护自己有上限的工作进程池），并且整棵来源目录树只会被遍历**一次**而不是两次——对每个候选文件的内容分类本身也做了并行化。默认的前台模式下，`ingest`
-会展示一个实时进度显示（当前阶段、已扫描/已暂存文件数、成功/部分/失败/不支持的计数），而不是在整个过程中保持沉默直到全部完成；具体原因见[《8.
-性能与规模》](08_performance_and_scale.zh-CN.md)。
+来源目录树只遍历一次，辅助文件的内容前缀分类并行进行。当两条通路都有已识别的任务且 `workers > 1` 时，它们共享预算并发运行；`workers=1` 时串行运行。同一协调进程内的 DuckDB 转换会串行化。辅助 Parquet 在两种暂存格式下均采用 ZSTD level 1。字节目标限制工作分组，并非解析器、Arrow、DuckDB 或整个进程树的内存上限。
+
+前台进度展示阶段、遍历/分类/暂存计数及各表写入行数。这些是文件/批次级进度，不是逐字节进度或剩余时间估计；处理大文件时计数可能较久不变。详见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
+
+每次调用都会追加新批次，目前不支持跨批次去重或断点续跑。各通路先完成本批暂存再转换；`--background` 和保留暂存均不保证提前查询或数据湖的原子发布。应等导入完成并检查报告后再查询 Case。
 
 示例：
 
@@ -67,13 +72,12 @@ seclogx ingest incident42 \
 # 对一小部分高价值证据保留原始 XML；使用更多工作进程
 seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
 
-# 大批量导入：不要占用终端——用另一条命令单独查看进度
-seclogx ingest incident42 --source /evidence/full_kape_output --background
-seclogx ingest-status incident42 --watch
+# 另一种选择：在新 Case 后台导入，按可用资源设置预算
+seclogx ingest large_case --source /evidence/full_kape_output --background --workers 8 --memory-limit 4GB --duckdb-threads 8 --staging-format auto
+seclogx ingest-status large_case --watch
 ```
 
-每次导入结束后，seclogx 都会打印一份**核对报告（reconciliation report）**：发现的文件数、成功导入数、部分恢复数、失败数，以及暂存记录数与最终写入数据湖的行数是否一致。任何解析不完整的文件都会附带具体错误原因及失败点之前已恢复的记录数——该报告同时也会保存到
-`cases/<name>/logs/ingest_<batch_id>.log`。
+前台导入正常结束后，seclogx 会打印**核对报告（reconciliation report）**：发现的文件数、成功导入数、部分恢复数、失败数，以及暂存记录数与写入数据湖的行数。解析不完整的文件会附带错误原因和恢复计数。EVTX 报告同时保存到 `cases/<name>/logs/ingest_<batch_id>.log`；后台任务会把两份报告都写入 `cases/<name>/jobs/<job_id>.log`。
 
 ```
 Ingest batch 66777433-... for case 'incident42'
@@ -87,9 +91,9 @@ Ingest batch 66777433-... for case 'incident42'
      /evidence/.../sysmon.evtx -- Failed to parse chunk header (358 recovered)
 ```
 
-出现 `partial`（部分恢复）状态的文件不需要惊慌——它准确地表示：在某个损坏的数据块导致解析中断之前，已经成功恢复了一定数量的记录。失败点之前的数据不会丢失。
+`partial`（部分恢复）表示该文件有恢复出的记录，也有解析错误。部分解析器会越过损坏记录继续处理，其他错误则会中止文件解析；应检查具体错误和恢复计数，不能将它当成完整导入。
 
-紧接着 EVTX 的核对报告之后，还会打印第二份针对非 EVTX 数据的核对报告，遵循同样“绝不静默丢弃”的原则——完全无法识别的文件会被明确列出，而不是被跳过：
+紧接着 EVTX 报告之后会打印辅助来源报告，包括无法分类的候选文件。已知无关后缀、空的辅助文件和不可访问路径可能在发现阶段被排除，不会全部计入 `files unrecognized`：
 
 ```
 Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange):
@@ -127,9 +131,7 @@ seclogx ingest-status incident42
 seclogx ingest-status incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f --watch
 ```
 
-如果后台任务因为"没有发现受支持的文件"以外的原因崩溃，其状态会被记录为
-`failed` 并附带异常信息，而不会停留在崩溃前的某个阶段不再更新——完整的
-traceback 可以在 `cases/<name>/jobs/<job_id>.log`（该任务被捕获的标准输出/标准错误）中查看。
+后台导入使用调用方的 Python 解释器，立即返回任务 ID。可捕获异常会记录为 `failed`，详情见 `cases/<name>/jobs/<job_id>.log`。强制终止进程、系统崩溃或状态写入失败可能留下过期快照：当前没有独立的进程存活监督器，`--watch` 可能持续等待。`done` 仅表示任务结束，不表示所有文件都无错误。当前没有取消/续跑命令。任务完成后，已有的 Python `Case` 对象应重新打开，以更新缓存视图。
 
 ## `seclogx query <case> "<SQL>"`
 
@@ -140,7 +142,7 @@ Web 日志表做查询时尤为重要（见[《8. 性能与规模》](08_perform
 | 参数 | 含义 |
 |---|---|
 | `--out FILE.csv` | 将完整结果流式写入 CSV，而不是打印表格 |
-| `--limit N` | 限制返回行数——直接下推到查询本身（`LIMIT`），而不是取回结果后再截断，因此对一张巨大的表加限制不会白白多读数据 |
+| `--limit N` | 取回结果前在 SQL 中应用 `LIMIT`，限制返回行数；查询仍可能需要大量扫描、聚合或排序。 |
 
 ```bash
 seclogx query incident42 "
@@ -165,7 +167,7 @@ seclogx query incident42 "SELECT * FROM web_logs WHERE status >= 400" --out web_
 
 ## `seclogx sources <case>`
 
-列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`registry`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
+列出案例当前拥有的每张表（`events`、`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`qcloud_logs`、`registry`，视实际情况而定）及其行数。在针对具体表写查询之前，这是了解案例实际拥有哪些日志类型最快的方式。
 
 ```bash
 seclogx sources incident42
@@ -173,8 +175,7 @@ seclogx sources incident42
 
 ## `seclogx table <case> <name>`
 
-以 DataFrame 形式返回案例中任意一张表的完整内容——是 `Case.web_logs()`/`Case.scheduled_tasks()`
-等方法在命令行侧的对应物，适合那些还没有专属命令的表。与上面的 `query` 一样，采用分块流式获取。
+预览任意表，或通过 `--out` 将行流式导出为 CSV，适用于没有专属命令的表。它与 `query` 一样分块取回结果，不会先构造 `Case.web_logs()` 返回的完整 DataFrame。
 
 | 参数 | 含义 |
 |---|---|
@@ -188,7 +189,7 @@ seclogx table incident42 exchange_message_tracking --out mailflow.csv
 
 ## `seclogx fields <case> <table>`
 
-我能查询哪些字段？列出这个案例真实、已导入的数据中，某张表实际拥有的每一个字段——见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)中的“我能查询哪些字段？”。基于一个有界样本计算，因此无论表有多大都能安全运行。
+我能查询哪些字段？列出表的列及有界样本中发现的 JSON 键，见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)中的“我能查询哪些字段？”。低频 JSON 键可能未出现在样本中，特别宽的采样行仍可能占用较多内存。
 
 | 参数 | 含义 |
 |---|---|
@@ -232,6 +233,8 @@ seclogx search incident42 web_error_logs --eq severity=error,SEVERE --out errors
 
 列出已导入的 `scheduled_tasks` 计划任务定义。
 
+普通列表与导出按块读取；`--suspicious` 会先构造整个计划任务表的 DataFrame 做启发式分析。
+
 | 参数 | 含义 |
 |---|---|
 | `--suspicious` | 只显示内置启发式规则标记出的任务（动作可执行文件位于 Temp/AppData/Public 之下、命令类似 LOLBin、任务被隐藏、未记录作者，或伪装成已知的微软计划任务——完整列表以及说明每行具体匹配原因的 `suspicion_reasons` 列，见[《2. 日志类型与 Schema》](02_log_types_and_schema.zh-CN.md)中的“其他表”一节）。这不是 Sigma 规则——参见[《4. 威胁狩猎》](04_threat_hunting.zh-CN.md)。 |
@@ -247,6 +250,8 @@ seclogx tasks incident42 --suspicious
 `Case.auth_events()` / [《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)）。这不是
 Sigma 规则——是对已导入 `syslog` 数据的启发式筛选，相当于
 `auth.log`/`secure` 版本的 `tasks --suspicious`。
+
+当前该命令会将 syslog 数据整体读入 pandas 做启发式分析，`--out` 不会使此路径变成流式处理。对于大 syslog 表，应使用带过滤条件的 `query`/`search` 导出或 Python 分块分析。
 
 | 参数 | 含义 |
 |---|---|
@@ -264,10 +269,12 @@ seclogx auth incident42 --out auth_events.csv
 日志类型与模式》](02_log_types_and_schema.zh-CN.md)），与 `tasks --suspicious`/`auth`
 一样，是"启发式筛选，不是 Sigma"。
 
+普通列表与导出按块读取；可疑项结果目前会先整体构造为 DataFrame，再预览或导出。
+
 | 参数 | 含义 |
 |---|---|
 | `--suspicious` | 只显示被内置启发式规则标记的条目 |
-| `--hive-type TYPE` | 只看某一类配置单元（`system`/`software`/`sam`/`security`/`default`/`ntuser`/`usrclass`/`amcache`/`bcd`） |
+| `--hive-type TYPE` | 普通列表只看某一类配置单元（`system`/`software`/`sam`/`security`/`default`/`ntuser`/`usrclass`/`amcache`/`bcd`）；当前与 `--suspicious` 同用时会被忽略。 |
 | `--out FILE.csv` | 导出完整结果 |
 
 ```bash
@@ -371,5 +378,9 @@ seclogx cluster config
 ```bash
 seclogx cluster status
 ```
+
+## `seclogx version`
+
+打印已安装的包版本。`seclogx --help` 可查看命令列表。
 
 下一步：[《6. Python API》](06_python_api.zh-CN.md)，对应的 Python / notebook 接口。

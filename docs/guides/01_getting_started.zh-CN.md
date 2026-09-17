@@ -17,39 +17,35 @@ seclogx 的目标就是让排查的最初几个小时变得高效：
 - 同一次导入过程中，它还会发现并归一化：磁盘上的**计划任务**定义（一种持久化痕迹）、**IIS/nginx/Apache/Tomcat**
   的访问日志*以及*错误/诊断日志（Web 应用会产生的两大日志类别都覆盖，包括 IIS 的
   HTTP.sys/HTTPERR）、**Exchange** CSV 日志（邮件跟踪日志拥有一等列，其余 Exchange
-  日志类型进入一个不丢弃任何数据的兜底表）、**Linux** syslog（BSD/RFC-3164 与 RFC
+  已识别的 CSV 日志类型将字段保留在通用表中）、**Linux** syslog（BSD/RFC-3164 与 RFC
   5424，含 `auth.log`/`secure` 的内容）、Linux 审计框架（auditd）与 systemd journal
   导出日志、**数据库**日志（MySQL/MariaDB 错误/通用查询/慢查询日志、PostgreSQL、
   MSSQL、Oracle 告警日志）、**腾讯云主机安全**客户端文本日志（YDService、HIDS/YDLive、
   漏洞/基线扫描器、YDFlame/YDUtils/YDQuaraV2、YDEyes），以及 **Windows 注册表**配置单元（SYSTEM/SOFTWARE/SAM/
-  SECURITY/DEFAULT，以及每个用户的 NTUSER.DAT/UsrClass.dat）。每种格式都是根据内容而非文件名判断的，因此被重命名或迁移过的证据文件同样能被正确识别。完整的十二张表全貌见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)。
-- 你得到的是从头到尾原生的 `pandas.DataFrame` 接口（命令行表格/CSV 导出，或在 notebook
-  中使用的 Python `Case` 对象），并内置基于 Sigma 规则的威胁狩猎能力，自动打上 MITRE
+  SECURITY/DEFAULT，以及每个用户的 NTUSER.DAT/UsrClass.dat）。EVTX 通过 `.evtx` 后缀发现；辅助来源候选文件通过有限大小的内容前缀分类，同时受后缀排除规则和部分格式的文件名/路径提示影响，因此重命名可能影响识别。完整的十二张表全貌见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)。
+- Python `Case` 对象提供 DataFrame 与分块迭代器，命令行提供预览和 CSV 导出，并内置基于 Sigma 规则的威胁狩猎能力，自动打上 MITRE
   ATT&CK 标签，覆盖 Windows 事件日志与 Web 访问日志两类数据。**同样不需要写 SQL**：
   `seclogx search` / `Case.search()` 可以用纯字段/取值条件——精确、模糊或正则匹配——过滤任意一张表。
-- 每一个解析错误、每一个无法识别的文件、以及每一条不支持的规则都会被明确报告，绝不会被静默丢弃。
-- **凡是直接面向分析师的环节，内存占用都是有界的。** Web 访问/错误日志尤其可能在整个案例范围内达到 TB
-  级别——每一个返回 DataFrame 的方法都有对应的分块/流式替代方案，`search()`
-  还会在真正取回结果之前主动检查结果规模是否超出机器可用内存，超出就拒绝执行，而不是冒着让机器崩溃的风险（见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)与[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)）。
+- 核对报告会指出已发现文件中的部分恢复、解析失败与无法分类情况；不支持的规则也会报告。已知无关后缀和空的辅助文件会被过滤，无权访问的路径可能被跳过，因此它不是完整的采集清单。
+- **大日志表支持分块访问。** 日志表访问器、SQL 查询、搜索与时间线都有流式替代方案；`search()` 会在取回结果前估算规模。普通 DataFrame 方法及派生分析仍可能耗尽内存，应逐块处理并释放结果，避免将所有分块再次聚合（见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)与[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)）。
 
-seclogx 默认面向单台工作站设计——不需要分布式部署，也不依赖外部服务。在此前提下，不同日志类别的现实规模差异很大：EVTX
-案例通常远低于 100GB（DuckDB + Parquet 惰性、核外执行本身就能轻松应对），而 Web
-访问/错误日志现实中可以达到 TB 级别——上面提到的有界内存交付机制，正是为此而设计的。此外还提供一种可选启用、完全通过环境变量激活的分布式模式，适用于大批量导入、大规模
+seclogx 默认面向单台工作站设计，不依赖外部服务。导入耗时及磁盘、内存需求取决于日志格式、记录宽度、并行度与存储性能；分块交付避免整体取回查询结果，但不能限制每个操作的内存。此外还提供一种可选启用、通过环境变量配置的分布式模式，适用于大批量导入、大规模
 Sigma 规则集，或多名分析师需要共同使用同一个案例的场景——见[《10.
 分布式部署》](10_distributed_deployment.zh-CN.md)；只要不主动开启，上述一切都不会有任何变化。
 
 ## 安装
 
-需要 Python 3.10 及以上版本。
+包本身要求 Python 3.10 及以上版本。本项目的开发与分析统一使用独立于 `base` 的 conda **`python314`** 环境。
 
 ```bash
 cd SecLogAnalyster
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+conda activate python314
+python -m pip install -e .
 ```
 
 请在本仓库的检出目录内以可编辑模式（editable install）运行 `seclogx`，因为内置的 Sigma 规则集位于仓库根目录下的 `data/sigma_rules/`，程序在运行时会基于此相对路径查找。
+
+测试和脚本也使用该环境；不能激活环境的非交互式场合，使用 `conda run --no-capture-output -n python314 python ...`。在该环境安装 JupyterLab 与 `ipykernel` 后，通过 `python -m jupyterlab` 启动，选择 `python314` 内核，并在单元格内用 `sys.executable` 确认解释器。如果尚未注册内核，可执行 `python -m ipykernel install --user --name python314 --display-name "Python (python314)"`。
 
 验证安装：
 
@@ -60,14 +56,16 @@ seclogx --help
 
 ## 案例工作区（Case workspace）
 
-一切都围绕**案例（case）**展开——它是位于 `./cases/<name>/` 下的一个命名工作区（可用 `--case-root` 覆盖路径），其中包含：
+一切都围绕**案例（case）**展开——它是位于 `./cases/<name>/` 下的一个命名工作区（`case init/list/info` 用 `--dir` 覆盖路径，导入/查询命令用 `--case-root`），其中包含：
 
 ```
 cases/<name>/
   case.json                     # 已导入的主机列表、导入运行历史
-  staging/<host>/*.ndjson.gz       # 中间解析结果，已 gzip 压缩（EVTX，默认保留）
-  staging_aux/<host>/*.ndjson.gz   # 中间解析结果，已 gzip 压缩（非 EVTX 日志类型，默认保留）
-  logs/ingest_<batch_id>.log    # 每次导入的核对报告
+  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX 暂存分片，默认保留
+  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # 辅助来源暂存分片，默认保留
+  logs/ingest_<batch_id>.log      # EVTX 核对报告
+  jobs/<job_id>.json             # 后台状态快照
+  jobs/<job_id>.log              # 后台标准输出/错误及核对报告
   lake/
     events/host=<h>/channel=<c>/*.parquet                       # Windows 事件日志
     web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat 访问日志
@@ -85,11 +83,15 @@ cases/<name>/
 
 `lake/` 可以存放在 S3 兼容的对象存储上，而不局限于本地磁盘（`SECLOGX_STORAGE_BACKEND=s3`
 ——可选启用，见[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)）；`case.json`、`staging/`、
-`staging_aux/` 与 `logs/` 无论在哪种模式下都始终保留在本地/NFS。
+`staging_aux/`、`logs/` 与 `jobs/` 无论在哪种模式下都始终保留在本地/NFS。
 
 你只需创建一次案例（`seclogx case init`），之后可以对它执行任意多次 `ingest`（导入）——来自不同的来源路径、不同的主机，甚至相隔数周也没问题。每次导入都是增量追加，并记录在
 `case.json` 中。一次 `ingest` 会在来源路径下一次性发现并导入所有支持的格式——不需要对每种日志类型分别导入。案例只会暴露它实际拥有数据的表；可用
 `seclogx sources <case>` / `Case.table_counts()` 查看。
+
+当前没有跨批次去重或断点续跑。同一次扫描会对重叠来源路径去重，但重复运行同一次导入会追加重复行。各通路先完成本批暂存再转换；保留暂存不是可恢复检查点，转换后删除暂存也不能消除磁盘峰值。后台执行不保证在文件尚未写完时查询的一致性；应等导入结束、检查报告，再重新打开 Case 做分析。
+
+辅助暂存默认采用 `auto`：单个来源达到 16 MiB 时使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；EVTX 始终使用 NDJSON。CLI 参数为 `--staging-format auto|arrow|ndjson`，Python 对应 `IngestOptions(staging_format="auto")`。辅助来源的 Parquet 使用 ZSTD level 1。内存、线程预算和批次大小见[命令行参考](05_cli_reference.zh-CN.md)与[Notebook API](06_python_api.zh-CN.md)。
 
 ## 快速上手示例
 

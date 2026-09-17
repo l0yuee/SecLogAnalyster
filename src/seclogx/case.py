@@ -39,6 +39,7 @@ from .ingest.jobs import (
     write_job_status,
 )
 from .ingest.scan import scan_sources
+from .ingest.resources import IngestOptions
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .ingest.logsources.parsers.task_baseline import classify_against_baseline
 from .ingest.logsources.parsers.syslog import AUTH_EVENT_CANDIDATE_SQL, extract_auth_events
@@ -146,7 +147,20 @@ class Case:
         keep_raw: bool = False,
         keep_staging: bool = True,
         on_progress: Callable[[dict], None] | None = None,
+        *,
+        options: IngestOptions | None = None,
     ) -> IngestReport:
+        """Import evidence using a total local parsing budget of ``workers``.
+
+        ``workers=1`` also runs the two ingest pipelines sequentially.
+        ``options`` controls each DuckDB conversion instance and staging
+        chunk sizes; its memory limit is not a process RSS ceiling.
+        """
+        if workers is not None and (isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0):
+            raise ValueError("workers must be a positive integer")
+        options = options if options is not None else IngestOptions()
+        if not isinstance(options, IngestOptions):
+            raise TypeError("options must be an IngestOptions instance")
         specs = [parse_source_arg(s) if isinstance(s, str) else s for s in sources]
         progress = ProgressReporter(on_update=on_progress) if on_progress is not None else None
 
@@ -164,17 +178,16 @@ class Case:
             progress.set_discovered(len(scan.evtx_files), len(scan.aux_files))
             progress.set_phase(PHASE_STAGING)
 
-        # Split the worker budget between the two pipelines when both have
-        # work and the caller didn't pin an explicit --workers, so running
-        # them concurrently (below) doesn't silently double peak concurrent
-        # worker processes -- and therefore peak memory -- versus today's
-        # documented "one file's parse footprint x workers" bound.
-        evtx_workers = workers
-        aux_workers = workers
-        if workers is None and scan.evtx_files and scan.aux_files:
-            half = max(1, DEFAULT_LOCAL_INGEST_WORKERS // 2)
-            evtx_workers = half
-            aux_workers = half
+        # Explicit and default worker counts are both global local budgets.
+        # Unrecognized aux files only need cheap coordinator bookkeeping;
+        # their presence must not halve the budget for actual EVTX parsing.
+        worker_budget = workers if workers is not None else DEFAULT_LOCAL_INGEST_WORKERS
+        both_have_work = bool(scan.evtx_files) and any(cf.kind is not None for cf in scan.aux_files)
+        concurrent_pipelines = both_have_work and worker_budget > 1
+        evtx_workers = aux_workers = worker_budget
+        if concurrent_pipelines:
+            evtx_workers = worker_budget // 2
+            aux_workers = worker_budget - evtx_workers
 
         def _run_evtx() -> IngestReport:
             try:
@@ -188,6 +201,7 @@ class Case:
                     cluster_config=self.cluster_config,
                     discovered=scan.evtx_files,
                     progress=progress,
+                    options=options,
                 )
             except NoSourcesFoundError:
                 # No .evtx under these sources -- not fatal on its own, the aux
@@ -216,19 +230,18 @@ class Case:
                 cluster_config=self.cluster_config,
                 classified=scan.aux_files,
                 progress=progress,
+                options=options,
             )
 
-        # Both pipelines are independent (EVTX vs. everything else) and
-        # each already manages its own process pool / distributed queue
-        # underneath -- running them concurrently instead of back-to-back
-        # roughly halves wall time for a source tree that has both kinds
-        # of evidence, since neither pipeline's workers sit idle while the
-        # other one runs.
-        with ThreadPoolExecutor(max_workers=2) as coordinator_pool:
-            evtx_future = coordinator_pool.submit(_run_evtx)
-            aux_future = coordinator_pool.submit(_run_aux)
-            report = evtx_future.result()
-            report.aux = aux_future.result()
+        if concurrent_pipelines:
+            with ThreadPoolExecutor(max_workers=2) as coordinator_pool:
+                evtx_future = coordinator_pool.submit(_run_evtx)
+                aux_future = coordinator_pool.submit(_run_aux)
+                report = evtx_future.result()
+                report.aux = aux_future.result()
+        else:
+            report = _run_evtx()
+            report.aux = _run_aux()
 
         if report.files_discovered == 0 and report.aux.files_discovered == 0:
             if progress:
@@ -280,6 +293,8 @@ class Case:
         workers: int | None = None,
         keep_raw: bool = False,
         keep_staging: bool = True,
+        *,
+        options: IngestOptions | None = None,
     ) -> str:
         """The library equivalent of `seclogx ingest --background`: starts
         `ingest()` in a detached child process and returns its `job_id`
@@ -287,6 +302,10 @@ class Case:
         when a large import shouldn't hold up the calling process. Poll
         progress with `job_status(job_id)` (or `list_jobs()`), same as the
         CLI's `ingest-status`."""
+        if options is not None and not isinstance(options, IngestOptions):
+            raise TypeError("options must be an IngestOptions instance")
+        if workers is not None and (isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0):
+            raise ValueError("workers must be a positive integer")
         job_id = str(uuid.uuid4())
         jobs_dir(self.case_dir).mkdir(parents=True, exist_ok=True)
         log_path = job_log_path(self.case_dir, job_id)
@@ -296,6 +315,14 @@ class Case:
             args += ["--source", s]
         if workers is not None:
             args += ["--workers", str(workers)]
+        if options is not None:
+            args += [
+                "--memory-limit", options.memory_limit,
+                "--duckdb-threads", str(options.threads),
+                "--staging-chunk-bytes", str(options.staging_chunk_bytes),
+                "--flatten-batch-bytes", str(options.flatten_batch_bytes),
+                "--staging-format", options.staging_format,
+            ]
         if keep_raw:
             args += ["--keep-raw"]
         args += ["--keep-staging" if keep_staging else "--no-keep-staging"]
@@ -310,23 +337,26 @@ class Case:
             # exiting.
             popen_kwargs["start_new_session"] = True
 
-        with open(log_path, "wb") as log_file:
-            subprocess.Popen(
-                args, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **popen_kwargs
-            )
-
-        write_job_status(
-            self.case_dir,
-            job_id,
-            {
-                "job_id": job_id,
-                "case_name": self.name,
-                "sources": sources,
-                "phase": "scanning",
-                "started_at": now_iso(),
-                "updated_at": now_iso(),
-            },
-        )
+        initial_status = {
+            "job_id": job_id,
+            "case_name": self.name,
+            "sources": sources,
+            "phase": "scanning",
+            "started_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        # Publish before starting the child: it may finish before Popen
+        # returns, and the parent must never overwrite done with scanning.
+        write_job_status(self.case_dir, job_id, initial_status)
+        try:
+            with open(log_path, "wb") as log_file:
+                subprocess.Popen(
+                    args, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **popen_kwargs
+                )
+        except OSError as exc:
+            initial_status.update(phase="failed", error=f"could not start background ingest: {exc}", updated_at=now_iso())
+            write_job_status(self.case_dir, job_id, initial_status)
+            raise
         return job_id
 
     def job_status(self, job_id: str | None = None) -> dict | None:
@@ -436,10 +466,9 @@ class Case:
         a series of DataFrames instead of one, so an unfiltered or lightly
         filtered query against a table that's grown to real-world log
         volume (web access/error logs especially can reach terabyte scale)
-        doesn't require the whole result to fit in memory at once. See
-        query.py's module docstring for why this matters and what it costs
-        in practice (empirically: ~190MB bounded vs. multiple GB and
-        climbing for `fetchdf()` on the same 5M-row query)."""
+        doesn't require the whole result to fit in memory at once.
+        Consume and discard each chunk; row width and query execution
+        still affect memory use. See query.py's module docstring."""
         return self.db.sql_chunks(sql, chunksize=chunksize)
 
     def summary(self) -> pd.DataFrame:

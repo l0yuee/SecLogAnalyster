@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
-from ..sniff import _decode_lines
+from ....textdecode import iter_text_lines
+from ._stream import RowSink
 
 _FACILITIES = [
     "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news",
@@ -90,7 +92,9 @@ def _parse_5424_timestamp(raw: str) -> str | None:
         return None
 
 
-def parse_syslog_file(path: Path, host: str) -> tuple[list[dict], int, int]:
+def parse_syslog_file(
+    path: Path, host: str, *, emit: Callable[[dict], None] | None = None
+) -> tuple[list[dict], int, int]:
     """Returns (rows, ok_count, error_count). A line matching neither the
     RFC5424 nor the BSD envelope is counted as an error, not silently
     dropped -- consistent with every other line-oriented parser here.
@@ -102,10 +106,10 @@ def parse_syslog_file(path: Path, host: str) -> tuple[list[dict], int, int]:
     except OSError:
         year = datetime.now(timezone.utc).year
 
-    rows: list[dict] = []
+    rows = RowSink(emit)
     error_count = 0
 
-    for line in _decode_lines(path.read_bytes()):
+    for line in iter_text_lines(path):
         if not line.strip():
             continue
 
@@ -149,7 +153,7 @@ def parse_syslog_file(path: Path, host: str) -> tuple[list[dict], int, int]:
 
         error_count += 1
 
-    return rows, len(rows), error_count
+    return rows.rows, rows.count, error_count
 
 
 # -- derived heuristic: Case.auth_events() ------------------------------------

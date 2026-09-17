@@ -11,6 +11,18 @@ tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 for how to actually query each one, and `docs/architecture.md` for how
 they're ingested.
 
+The types below describe the normalized contract. Columns marked `JSON`
+contain serialized JSON text and are physically stored as `VARCHAR` in
+Parquet. Auxiliary NDJSON and Arrow staging both expose fixed string
+columns before canonical casts; missing fields and invalid typed values
+become `NULL`, while timestamp-shaped text keeps its original spelling.
+Staging format selection does not change the table schema.
+
+Auxiliary timestamp casts normalize explicit ISO offsets to UTC and store
+timezone-free `TIMESTAMP` values with microseconds. Values without an
+offset retain their source wall-clock time; no timezone is inferred.
+These casts apply to new imports and do not rewrite existing Parquet.
+
 ## `events` (Windows Event Log)
 
 Schema version: `1` (see `schema_version` column). Generated from `src/seclogx/schema.py` -- regenerate this file if that module changes.
@@ -39,7 +51,7 @@ Parquet partition columns: `host, channel`.
 | `activity_id` | `VARCHAR` | Correlation/@ActivityID, nullable |
 | `related_activity_id` | `VARCHAR` | Correlation/@RelatedActivityID, nullable |
 | `event_data` | `JSON` | Flattened EventData (or UserData fallback) Name->Value payload |
-| `raw_xml` | `VARCHAR` | Full raw record XML; only populated with --keep-raw |
+| `raw_xml` | `VARCHAR` | Raw record XML requested with `--keep-raw`; best-effort capture can leave NULL on corrupt input |
 | `source_path` | `VARCHAR` | Full acquisition path of the source .evtx file |
 | `source_file` | `VARCHAR` | Basename of the source .evtx file |
 | `file_sha256` | `VARCHAR` | SHA-256 of the source .evtx file (chain of custody) |
@@ -359,8 +371,13 @@ not aliased into a simulated `HKLM`/`HKCU` tree; see
 | `value_type` | `VARCHAR` | `REG_SZ`/`REG_BINARY`/`REG_DWORD`/`REG_MULTI_SZ`/`REG_EXPAND_SZ`/`REG_QWORD`/...; NULL for the key-only row |
 | `value_text` | `VARCHAR` | Decoded string (REG_SZ/REG_EXPAND_SZ direct; REG_MULTI_SZ newline-joined) |
 | `value_int` | `BIGINT` | REG_DWORD/REG_QWORD |
-| `value_data_hex` | `VARCHAR` | Hex of the raw bytes for REG_BINARY/REG_NONE/other binary types, capped at 8KB of hex for storage |
-| `value_size` | `INTEGER` | Full, **untruncated** byte length of the value's raw data |
+| `value_data_hex` | `VARCHAR` | Hex of at most the first 8 KiB of raw binary bytes (16,384 hex characters) |
+| `value_size` | `INTEGER` | Full binary byte length; decoded strings/multi-strings use computed UTF-16 lengths, not original cell length |
 | `entropy` | `DOUBLE` | Shannon entropy (0-8 bits/byte) of the full raw bytes; NULL for non-binary types |
-| `transaction_log_applied` | `BOOLEAN` | Whether sibling `.LOG1`/`.LOG2` recovery was applied before parsing this hive |
+| `transaction_log_applied` | `BOOLEAN` | Whether sibling `.LOG1`/`.LOG2` recovery was applied; false also covers missing logs or replay failure |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+For Registry recovery, `file_sha256` identifies the collected source hive,
+not a combined digest of the recovered hive and transaction logs. Corrupt
+branches can produce a partial source with recovered rows; a key-only row
+can also appear when a key's declared values could not be recovered.

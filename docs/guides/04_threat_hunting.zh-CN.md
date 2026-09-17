@@ -22,26 +22,34 @@
 ATT&CK 技术名称/战术信息来自一个内置的小型查询表（`data/attack/techniques.json`），仅覆盖内置规则集用到的技术编号——并非完整的 ATT&CK 框架。未收录的编号仍会以裸露的
 `TXXXX` 编号形式显示。
 
-内置规则集（37 条规则，位于 `data/sigma_rules/`）专门针对 **Sysmon** 事件字段（进程创建、网络连接、文件事件、注册表变更、镜像加载、DNS
-查询、命名管道、PowerShell 脚本块、进程访问）——只有当 Sysmon 确实在运行且其日志被导入时，这些规则才可能命中。它是一个精选的起点，而非详尽覆盖；如需添加更多规则，请参见下文“扩展检测能力”。
+内置规则集（37 条，位于 `data/sigma_rules/`）面向 **Sysmon** 遥测和 **PowerShell Operational** 事件。
+Sysmon 类别需要采集并导入对应 Sysmon 日志；`ps_script`/`ps_module` 分别使用 PowerShell 4104/4103，
+不依赖 Sysmon。导入 Security 4688 不会自动替代 Sysmon 的进程创建路由。内置规则是精选起点，并非详尽覆盖。
 
 `hunt` 同样支持 Sigma 的 `category: webserver` 规则（针对 `web_logs`，即**访问日志**运行），方便你自行提供
-IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。目前没有针对磁盘上计划任务定义、Web
-应用**错误日志**（`web_error_logs`）、Exchange 邮件跟踪日志、数据库日志（`db_logs`）或
-Windows 注册表（`registry`——Sigma 的注册表类别针对的是*实时*监控遥测数据，而不是离线的静态配置单元转储）的 Sigma 日志来源类别，因此这些数据不属于 Sigma
+IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。本项目当前没有为磁盘上计划任务定义、Web
+应用**错误日志**（`web_error_logs`）、Exchange 邮件跟踪日志、Linux 文本日志、数据库日志（`db_logs`）、
+腾讯客户端日志（`qcloud_logs`）或 Windows 注册表（`registry`——Sigma 的注册表类别针对的是*实时*监控遥测，
+而不是离线的静态配置单元转储）配置 Sigma 路由，因此这些数据不属于当前 Sigma
 狩猎的范围；请改用 `Case.suspicious_tasks()` / `seclogx tasks --suspicious`
 排查计划任务，`Case.suspicious_registry()` / `seclogx registry --suspicious`
 排查注册表，`web_error_logs`、Exchange 与 `db_logs` 数据则用原生 SQL 或 `search()`（见[《7. 常用查询》](07_recipes.zh-CN.md)）。
 
+狩猎结果并非分块交付：每条规则的匹配行会物化为 pandas DataFrame，保留后再合并。同一事件命中多条规则时可以重复出现。
+宽泛规则可能使内存随总匹配数增长；`IngestOptions` 和 `search()` 的结果大小检查不限制此路径。
+分布式狩猎也会把匹配结果返回协调进程。可按需要缩小规则目录并使用 `min_level`/`--min-level`。
+需要完整批次视图时，应在导入完成后狩猎；导入没有原子快照提交。
+
 ## 扩展检测能力：自定义规则与字段映射
 
-`--rules` / `rules_dir=` 可以指向任意包含标准 Sigma YAML 规则的目录——不必局限于内置规则集。在正式依赖一套新规则之前，先运行：
+`--rules` / `rules_dir=` 可以指向任意包含标准 Sigma YAML 规则的目录；指定目录会替代内置规则选择。在正式依赖一套新规则之前，先运行：
 
 ```bash
 seclogx rules validate --rules /path/to/your/rules
 ```
 
-它会逐条报告每条规则是否成功转换。规则无法直接转换成功的常见原因：
+它会逐条报告加载与转换结果，并不针对某个案例执行 SQL。未映射字段有时能转换成功，但在执行时才报错。
+规则需要适配的常见原因：
 
 - **使用了 seclogx 尚未映射的 Sigma 字段。** 在
   `src/seclogx/detect/pipeline.py` 的 `FIELD_MAPPING` 中添加对应条目（具体写法参见

@@ -17,12 +17,14 @@ Parquet lake live on S3-compatible object storage instead of local disk.
 
 Turning cluster mode on changes two things:
 
-1. **Ingest.** Both ingest pipelines (`.evtx`, and the non-EVTX families --
-   Scheduled Tasks/web logs/Exchange/syslog/auditd/journal) dispatch their
+1. **Ingest.** Both ingest paths (`.evtx`, and the non-EVTX families --
+   Scheduled Tasks/web logs/Exchange/syslog/auditd/journal/database/QCloud/registry) dispatch their
    per-file parsing tasks through a job queue instead of a local process
    pool. Locally, that queue is just today's `ProcessPoolExecutor`
    behavior. Once a broker is configured, the same tasks are enqueued for
-   any number of `seclogx worker` processes -- anywhere -- to pick up.
+   `seclogx worker` processes with access to the source and staging paths.
+   Workers parse and write staging shards; the coordinator reads their
+   manifests and performs the bounded DuckDB-to-Parquet conversions.
 2. **Sigma hunting.** `seclogx hunt` fans independent rules out across
    workers the same way, then merges the matches back. Every rule's query
    is already independent of every other rule's, so this is a pure
@@ -51,8 +53,13 @@ exactly the single-machine DuckDB path this project has always used.
 ## Installing it
 
 ```bash
-pip install -e ".[cluster]"
+conda activate python314
+python -m pip install -e ".[cluster]"
 ```
+
+Use this environment for local Python, CLI and Notebook work. The supplied
+Linux container image has its own interpreter and dependencies; run matching
+seclogx versions on the coordinator and workers.
 
 This installs `redis`, `rq` (the job queue), and `boto3` (S3 metadata
 operations) -- none of which are required, or imported, for ordinary
@@ -62,11 +69,9 @@ connection time), not a separate Python dependency.
 
 ## Turning it on: environment variables
 
-Activation is purely environment-variable driven -- there are no new CLI
-flags on any existing command. Every `seclogx` command (and every `Case`
-method, for library use) resolves its configuration from the environment
-each time it runs, so exporting these variables is the entire "how do I
-turn cluster mode on" story:
+Cluster activation uses environment variables. Set them before running the
+CLI or creating/opening a `Case`; a `Case` keeps its resolved configuration.
+Changing the environment does not reconfigure an already-open object.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -76,24 +81,33 @@ turn cluster mode on" story:
 | `SECLOGX_S3_ENDPOINT_URL` | unset | For MinIO or another S3-compatible endpoint instead of real AWS S3. |
 | `SECLOGX_S3_REGION` | unset | Passed through to both boto3 and DuckDB's `httpfs`. |
 
-S3 **credentials are never read by seclogx's own configuration** --
-they go through boto3's standard credential chain (`AWS_ACCESS_KEY_ID`
-/ `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` env vars, an instance
-profile, `~/.aws/credentials`, ...), exactly like any other boto3-based
-tool. Nothing secret is ever read, stored, or logged by seclogx itself.
+S3 credentials use boto3's standard credential chain (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, instance profiles, `~/.aws/credentials`, etc.).
+`ClusterConfig` does not store AWS credentials; the storage backend resolves
+them through boto3 and applies them to the DuckDB connection for S3 access.
 
 Storage and the job queue are independent switches -- you can point at S3
 without a broker (single-machine ingest, shared read access for multiple
-analysts), or use a broker with the default local lake (distributed
-ingest/hunt, single-machine query). Most real cluster deployments use
-both together, since that's what actually lets multiple worker machines
-write into the same lake concurrently.
+analysts), or use a broker with a filesystem lake that all hunt workers can
+read at the same path. S3 shares the Parquet lake; it does not transport
+source files or staging shards, and it does not distribute conversion work.
 
-`case.json` and `staging/` deliberately stay on whatever local/NFS-mounted
-directory the case's `--case-root` points at, in every mode. They're
-small, coordinator-only ingest bookkeeping -- not the thing that needs to
-scale, or that distributed workers need direct access to (see "How it
-actually works" below for why).
+`case.json`, `staging/` and `staging_aux/` remain under `--case-root` in
+every mode. **Source paths and writable staging paths must be shared at
+identical absolute paths between the coordinator and ingest workers.**
+Jobs carry file/path descriptions and options; they do not upload evidence
+or return file contents through Redis. Mounting a path only in the
+coordinator container is insufficient. Cross-platform path spellings also
+need to match, so a Linux container coordinator is usually simpler when
+the workers are Linux containers.
+
+Staging holds the parsed dataset and can be large. Each ingest path finishes
+staging before converting groups, with no disk-space backpressure. Auxiliary
+`auto` staging chooses Arrow IPC/ZSTD for source files at least 16 MiB and
+gzip NDJSON for smaller ones; EVTX retains NDJSON. Budget shared staging,
+Parquet and temporary space, even when `keep_staging=False`: deletion occurs
+after successful conversion. Distributed hunts also need the configured
+case path and custom rule files accessible at the paths sent in their jobs.
 
 ## `seclogx worker`
 
@@ -112,31 +126,51 @@ export AWS_SECRET_ACCESS_KEY=...
 seclogx worker
 ```
 
-It blocks, listening on the ingest and hunt queues, until killed (or use
+It blocks, listening on the ingest and hunt queues, until stopped (or use
 `--burst` to drain whatever's queued right now and exit -- useful for
 scripted/CI verification). Run as many of these as you want, on as many
-machines as you want, all pointed at the same broker and storage.
+machines as your memory, shared storage and broker can support. All must
+use the same broker/storage configuration and required filesystem mounts.
+Use the provided Linux container deployment for these RQ workers; local
+Windows multiprocessing support does not establish native Windows RQ support.
 
 ## The coordinator: `seclogx ingest` / `seclogx hunt` / `seclogx cluster status`
 
 There's no separate "coordinator" binary -- it's the same `seclogx` CLI
 you always run, from wherever an analyst normally works (a laptop, a jump
 host, a CI job), with the same environment variables exported as the
-workers. Once `SECLOGX_BROKER_URL` is set, `seclogx ingest`/`seclogx hunt`
-enqueue their work instead of running a local process pool, and wait for
-the results.
+workers, with the required shared paths mounted. Once `SECLOGX_BROKER_URL`
+is set, per-file parsing and hunt tasks use Redis/RQ. The ingest coordinator
+waits for staging and then converts it; it still needs CPU, memory and I/O.
 
 ```bash
-seclogx case init incident42 --case-root /shared/cases   # or an S3-backed lake, see above
-seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
-seclogx hunt incident42
+seclogx case init incident42 --case-root /shared/cases
+seclogx ingest incident42 --case-root /shared/cases \
+  --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01 \
+  --memory-limit 2GB --duckdb-threads 2 --staging-format auto
+seclogx hunt incident42 --case-root /shared/cases
 ```
+
+The source paths above must be readable by every ingest worker; the case
+path must provide shared writable staging. `--staging-chunk-bytes` controls
+worker shard targets, while `--flatten-batch-bytes`, `--memory-limit` and
+`--duckdb-threads` control conversion on the coordinator. `--workers` is a
+local process-pool budget, not a limit on Redis worker replicas. DuckDB's
+memory limit is not a process-tree cap. `CONVERSION_LOCK` serializes only
+conversions in one coordinator process.
+
+The RQ adapter currently enqueues without explicit per-job timeout or retry
+settings, relying on the installed RQ defaults. The seclogx CLI does not
+expose a distributed-job timeout override. Check this constraint before
+dispatching long-running files; failed jobs are reported, not automatically
+resumed. Local pending-task bounds do not apply to the Redis queue, which
+currently submits the whole task list.
 
 Two more commands are cluster-mode-specific:
 
 - **`seclogx cluster config`** -- prints the resolved configuration
-  (nothing secret in it, since credentials never pass through
-  `ClusterConfig` to begin with). Useful for confirming a machine actually
+  (AWS credentials are not part of `ClusterConfig`; a broker URL may itself
+  contain credentials). Useful for confirming a machine actually
   picked up the environment variables you meant it to.
 - **`seclogx cluster status`** -- with a broker configured, reports how
   many `seclogx worker` processes are currently online and how many jobs
@@ -145,31 +179,25 @@ Two more commands are cluster-mode-specific:
 
 ## Docker Compose and Kubernetes
 
-`deploy/docker-compose.yml` is a runnable single-machine cluster demo
+`deploy/docker-compose.yml` provides a single-machine cluster service demo
 (Redis + MinIO + a scalable `worker` service) -- see `deploy/README.md`
-for the walkthrough. `deploy/k8s/worker-deployment.yaml` is a Kubernetes
+for the required shared-mount setup before ingest. `deploy/k8s/worker-deployment.yaml` is a Kubernetes
 `Deployment` for the worker fleet (deliberately scoped to just the
 workers -- bring your own managed Redis and S3-compatible bucket, the
 same way most real deployments already have one). Both are described in
 full in `deploy/README.md`; this guide is the narrative companion, not a
 duplicate of that reference.
 
-## Locking: why S3-backed/multi-machine setups want a broker even for storage alone
+## Locking and concurrent writers
 
-`case.json`'s read-modify-write (ingest bookkeeping: hosts seen, run
-history) is always lock-protected now -- this closes a real, pre-existing
-gap (two `seclogx ingest` runs racing against the same case used to be
-able to silently lose one run's bookkeeping), not just a cluster-mode
-concern. On a single machine, or a case directory on ordinary local disk,
-this uses a plain, dependency-free file lock. Once a broker is
-configured, a Redis-based lock is used instead -- a POSIX file lock over
-a network filesystem is not a reliable way to coordinate genuinely
-separate machines, whereas the same Redis a distributed setup already
-needs for its job queue gives a proper cross-machine lock at no extra
-infrastructure cost. **If multiple machines will run `seclogx ingest`
-against the same case concurrently -- even if you only care about shared
-S3 storage, not distributed parsing -- configure `SECLOGX_BROKER_URL`
-too**, so this locking is actually cross-machine-safe.
+Updates to `case.json` use a local file lock, or a Redis lock when a broker
+is configured. This protects metadata read-modify-write, not the full
+ingest operation. It does not provide cross-run deduplication, rollback,
+atomic lake publication or consistent query snapshots. Coordinate one
+ingest writer per case and wait for completion before analysis. Separate
+coordinators and background jobs do not share `CONVERSION_LOCK`; adding a
+broker does not make their writes transactional. Redis lock identity also
+depends on the resolved case path, reinforcing the need for consistent mounts.
 
 ## How it actually works (for the curious, or when something needs debugging)
 
@@ -177,7 +205,7 @@ too**, so this locking is actually cross-machine-safe.
   the environment variables above.
 - `src/seclogx/distributed/storage.py` -- `StorageBackend`
   (`LocalStorageBackend`/`S3StorageBackend`), used by `CaseDB` and by the
-  flatten step of both ingest pipelines for every operation that touches
+  flatten step of both ingest paths for every operation that touches
   `lake/`.
 - `src/seclogx/distributed/queue.py` -- `JobQueue`
   (`LocalJobQueue`/`RQJobQueue`), used by both ingest orchestrators and by

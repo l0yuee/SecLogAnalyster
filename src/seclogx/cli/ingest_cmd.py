@@ -130,7 +130,7 @@ def ingest_command(
         False, "--keep-raw", help="Also capture raw EVTX record XML (adds parsing and storage work; .evtx sources only)"
     ),
     keep_staging: bool = typer.Option(
-        True, "--keep-staging/--no-keep-staging", help="Keep staged data after successful conversion"
+        False, "--keep-staging/--no-keep-staging", help="Retain temporary staged data after successful conversion (default: remove it)"
     ),
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
     background: bool = typer.Option(
@@ -145,8 +145,8 @@ def ingest_command(
     staging_chunk_mb: int = typer.Option(64, "--staging-chunk-mb", min=1, help="Uncompressed MiB per staging shard"),
     flatten_batch_mb: int = typer.Option(256, "--flatten-batch-mb", min=1, help="Uncompressed MiB per conversion batch"),
     staging_format: str = typer.Option("auto", "--staging-format", help="Auxiliary staging: auto (Arrow for sources >=16 MiB), ndjson or arrow; EVTX uses NDJSON"),
-    parser_backend: str = typer.Option("python", "--parser-backend", help="Auxiliary parser: python (default); auto opts into native parsing with compatibility fallback; native requires native support"),
-    direct_parquet: bool = typer.Option(False, "--direct-parquet", help="Stream supported local native web sources to Parquet; requires --no-keep-staging"),
+    parser_backend: str = typer.Option("auto", "--parser-backend", help="Advanced override: auto selects native parsing with compatibility fallback (default); python or native forces a backend"),
+    direct_parquet: bool | None = typer.Option(None, "--direct-parquet/--no-direct-parquet", help="Advanced override: automatically stream supported local sources to Parquet by default; force or disable direct output"),
     _staging_chunk_bytes: int | None = typer.Option(None, "--staging-chunk-bytes", hidden=True, min=1),
     _flatten_batch_bytes: int | None = typer.Option(None, "--flatten-batch-bytes", hidden=True, min=1),
     _job_id: str = typer.Option(None, "--_job-id", hidden=True),

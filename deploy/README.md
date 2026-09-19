@@ -155,8 +155,10 @@ variables alone are insufficient.
   `--workers` controls local multiprocessing, not RQ worker replica count.
   DuckDB's limit is not an overall RSS or pod-memory limit.
 - Source, shared staging, final Parquet and temporary files all need space.
-  Staging is kept by default; `--no-keep-staging` removes run shards only
-  after successful conversion, so it does not remove peak staging usage.
+  Staging is removed after successful conversion by default; `--keep-staging`
+  retains intermediates for diagnosis. Neither mode removes peak staging
+  usage. Source evidence is never deleted. Automatic direct output is local
+  only; distributed and object-storage configurations select staging.
 - The RQ adapter submits all task descriptions and does not set explicit
   job timeout/retry options. It relies on installed RQ defaults, and seclogx
   exposes no distributed timeout override. Check long-file suitability

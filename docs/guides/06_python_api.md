@@ -13,133 +13,94 @@ below, see [03. Querying & search](03_querying_and_search.md).
 
 ## Notebook environment
 
-Use the project's dedicated conda `python314` environment, isolated from `base`:
+Prepare the project once using the [installation guide](01_getting_started.md#install),
+including Rust/Cargo and the platform compiler for a source installation.
+The normal project install includes the native parser. Then start Jupyter in
+the dedicated environment:
 
 ```bash
 conda activate python314
-python -m pip install -e .
 python -m jupyterlab
 ```
 
-JupyterLab and `ipykernel` must be installed in that environment to use these
-commands. If the kernel is not listed, register it with
-`python -m ipykernel install --user --name python314 --display-name "Python (python314)"`.
-Choose this kernel and check `import sys; print(sys.executable)` in a cell.
-For noninteractive scripts use `conda run --no-capture-output -n python314 python ...`.
-Background imports spawn the current interpreter, so selecting the correct
-Notebook kernel also selects their Python environment.
+Select **Python (python314)** and check `sys.executable` in a cell. The guide
+includes JupyterLab/ipykernel installation and kernel registration. Restart
+existing kernels after rebuilding or upgrading the package. Background ingest
+uses the selected kernel's interpreter.
 
-## Resource controls for a large Notebook import
+## Import in a Notebook
 
 ```python
-from seclogx import Case, IngestOptions
+from seclogx import Case
 
-c = Case.create("large_case")  # use Case.open("large_case") in a later session
-options = IngestOptions(
-    memory_limit="2GB",
-    threads=2,
-    staging_chunk_bytes=64 * 1024 * 1024,
-    flatten_batch_bytes=256 * 1024 * 1024,
-    staging_format="auto",
-)
-report = c.ingest([r"E:\evidence:HOST01"], workers=2, options=options)
+c = Case.create("large_case")  # Case.open("large_case") in later sessions
+report = c.ingest([r"E:\evidence:HOST01"])
 print(report.summary_text())
 ```
 
-The `IngestOptions` values above are the library defaults; `workers=2`
-explicitly sets parsing parallelism. `workers` is the total local parsing budget
-across both pipelines; `workers=1` runs them serially in this process.
-`threads` and `memory_limit` apply to each DuckDB conversion, and conversions
-in one Notebook process are serialized; independent background jobs have separate
-budgets. These options configure ingest conversion, not later analyst queries.
-**2GB is not a hard RSS limit** for
-the kernel or its worker processes. The byte settings target uncompressed
-staging shards and conversion groups, with records/shards left indivisible.
+No performance options are required. Compatible local UTF-8 Common/Combined
+and IIS sources automatically use Rust parsing, bounded Arrow batches and
+direct Parquet output. Other formats and incompatible input use Python
+compatibility parsing. Source hashing, encoding checks and canonical SQL
+normalization are retained. Normal installation includes the native extension;
+if it cannot load at runtime, automatic mode falls back and records the reason.
 
-`staging_format="auto"` selects Arrow IPC with ZSTD level 1 for each supported
-auxiliary source of at least 16 MiB, and gzip NDJSON for smaller sources.
-Set `"arrow"` or `"ndjson"` to choose explicitly. EVTX staging remains NDJSON;
-auxiliary Parquet output uses ZSTD level 1 with either staging path. Both paths
-retain fixed text input columns and the same canonical SQL normalization.
+The defaults are `parser_backend="auto"`, `direct_parquet=None` (automatic)
+and `keep_staging=False`. Automatic direct conversion applies to local
+execution and local storage without a broker. Retaining staging or using
+distributed/object storage selects the staged path instead. Staging shards are
+removed after successful conversion by default; source evidence is never
+deleted. Pass `keep_staging=True` if intermediate files are needed for diagnosis.
+This is a change from the earlier staging-retention default.
 
-`parser_backend="python"` is the default compatibility path. Explicitly select
-`"auto"` to use the separately installed native component for compatible UTF-8
-Common/Combined and IIS logs staged as Arrow, falling back to Python for other
-inputs. `"native"` fails when any recognized
-auxiliary source cannot use the native parser. Set `staging_format="arrow"`
-when requiring native parsing for small files on the default staged path. See
-[native parser selection and fallback](08_performance_and_scale.md#optional-native-parsers).
-The same option is passed to background jobs and distributed file workers.
-Inspect actual selection with `report.aux.to_dataframe()` and its
-`parser_backend` / `backend_reason` columns when `report.aux` is present.
-
-Direct conversion is an opt-in local path for compatible native web access/IIS
-sources. For a new import, use this instead of the staged example above:
+Use this call **instead of** foreground ingest to keep the Notebook available:
 
 ```python
-web_case = Case.create("web_direct")
-report = web_case.ingest(
-    [r"E:\evidence\web:HOST01"],
-    keep_staging=False,
-    options=IngestOptions(parser_backend="auto", direct_parquet=True),
-)
+job_id = c.ingest_background([r"E:\evidence:HOST01"])
+c.job_status(job_id)
 ```
 
-`direct_parquet` defaults to `False`. Enabling it requires local storage, no
-broker, `keep_staging=False`, and `parser_backend="auto"` or `"native"`.
-Small files are eligible without forcing Arrow staging. In `auto` mode,
-incompatible components/encoding/syntax cause a whole-source Python replay
-using the same source preparation; `staging_format` controls that replay and
-other sources. The ordinary worker pool closes before direct sources run
-sequentially in the coordinator, sharing the DuckDB conversion lock with EVTX
-and staged flattening. Hash/encoding pre-reading still applies.
-The same options and `keep_staging=False` work with `ingest_background()`;
-CLI uses `--parser-backend auto --direct-parquet --no-keep-staging`.
+Wait for `done`, inspect the log and file report, then reopen the Case for fresh
+query views. `done` can include partial, failed or unknown sources. Captured
+exceptions mark the job `failed`; a killed process can leave a stale status.
+Logs and status snapshots are in `c.case_dir / "jobs"`; an unknown job returns
+`None`. Foreground/background calls are alternatives: repeating the same import
+can append duplicates. Neither mode provides automatic resume, early-query
+guarantees or atomic visibility of the whole import.
 
-In the auxiliary report, `output_format` and `parquet_paths` distinguish direct
-Parquet from staged output; `parser_backend` and `backend_reason` describe
-parser selection independently. A direct source's private Parquet is published
-after closure and source checks; ordinary parse errors can retain a `partial`
-prefix. This is not a whole-ingest transaction or automatic resume mechanism.
-See [direct conversion boundaries](08_performance_and_scale.md#optional-direct-parquet-conversion).
+When `report.aux` exists, `report.aux.to_dataframe()` includes
+`parser_backend` / `backend_reason` for the actual parser and
+`output_format` / `parquet_paths` for the output. Direct sources publish private
+Parquet after closure and source checks; ordinary parsing errors can retain a
+complete prefix with `partial` status. Other formats and compatibility replay
+still stage before conversion. See [performance and scale](08_performance_and_scale.md).
 
-If the workstation has enough spare memory and CPU capacity, an optional configuration is
-`IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")` with
-`workers=8`. This changes the budget, not the library defaults or a process RSS
-limit. Leave room for the Notebook, parsing workers and other programs.
+## Advanced resource and diagnostic controls
 
-For background execution, replace the foreground call with
-`job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`
-and inspect `c.job_status(job_id)`. Do not run both imports on the same
-evidence: cross-run deduplication/resume is not implemented. Staging remains
-enabled by default; `keep_staging=False` alone deletes it after successful
-conversion and does not bypass staging or remove its peak disk requirement. See
-[Performance & scale](08_performance_and_scale.md) for parser limits,
-encoding-validation I/O and resource limits.
+`IngestOptions` is intended for deployment budgets and troubleshooting, not a
+required analysis workflow. Defaults use at most eight local parsing workers,
+`memory_limit="2GB"`, `threads=2`, 64 MiB staging targets and 256 MiB conversion
+groups. **2GB is not a cap on Notebook or process-tree RSS.** Parser/Arrow/native
+allocations, other queries and independent background jobs need additional
+memory. `workers` is shared by EVTX and auxiliary parsers; `workers=1` runs
+serially in the caller. Conversion threads are a separate budget.
 
-Sources using staging finish it before their later conversion; explicitly
-enabled direct conversion bypasses shards only for compatible sources. Background execution does not
-provide an early-query guarantee or an atomic snapshot of the lake while it is
-being written. Wait for `done`, inspect the job log and per-file report, then
-reopen the Case before analysis. `done` can include partial, failed or unrecognized
-source files. Caught job exceptions set `failed`; forced termination or failed
-status writes can leave a stale snapshot, because there is no separate liveness
-supervisor or automatic resume. Status and stdout/stderr live under
-`c.case_dir / "jobs"`. `job_status()` returns `None` if the requested job is not
-found. Reopening avoids stale cached views in a `Case` object that existed before
-the background import.
+| Override | Purpose |
+| --- | --- |
+| `IngestOptions(parser_backend="python")` | Diagnose a parser difference through the Python compatibility path; automatic direct output is disabled. |
+| `IngestOptions(parser_backend="native")` | Require native support for each recognized auxiliary source; incompatible mixed inputs fail. |
+| `IngestOptions(direct_parquet=False)` | Force staging for diagnosis. |
+| `IngestOptions(direct_parquet=True)` | Require a compatible execution configuration; raises for retained staging, nonlocal storage, a broker, or Python-only parsing. Individual unsupported inputs still use compatibility replay in `auto`. |
+| `c.ingest(sources, keep_staging=True)` | Keep intermediate shards and automatically use the staging path. Source files are unaffected. |
 
-The corresponding CLI accepts `--staging-format auto` (or `arrow`/`ndjson`),
-including with `--background`. During auxiliary text ingest, SHA-256 and strict
-UTF-8 validation share a pass; alternate encodings retain strict fallback reads.
-Bounded partition metadata also avoids the usual extra Windows partition scan
-when complete; legacy, unsupported or oversized metadata falls back to scanning.
+`staging_format="auto"` applies only to staged sources: at least 16 MiB selects
+Arrow IPC/ZSTD, otherwise gzip NDJSON. `"arrow"` / `"ndjson"` force the format;
+EVTX remains NDJSON. Strict native parsing on the staged path requires Arrow,
+including for small files. Direct output has no small-file Arrow threshold.
 
-After importing, an unrestricted `c.query()` or `c.web_logs()` still builds one
-complete DataFrame and can exhaust the Jupyter kernel's memory. Filter in SQL or
-consume `c.query_chunks()` / `c.web_logs_chunks()`; ingest options do not limit
-the size of returned DataFrames. Chunks are bounded in rows, not bytes: choose
-`chunksize` for your record widths and release each chunk after processing it.
+After ingest, unfiltered `c.query()` and `c.web_logs()` still materialize whole
+DataFrames. Filter first or consume `query_chunks()` / `web_logs_chunks()` one
+batch at a time; ingest budgets do not bound analysis result size.
 
 ## General API examples
 
@@ -165,7 +126,7 @@ the size of returned DataFrames. Chunks are bounded in rows, not bytes: choose
 > ```
 
 ```python
-from seclogx import Case, IngestOptions
+from seclogx import Case
 
 # Create or open a case
 c = Case.create("incident42")          # first time
@@ -174,7 +135,6 @@ c = Case.create("incident42")          # first time
 # Ingest (same semantics as the CLI; PATH or "PATH:HOST" strings)
 report = c.ingest(
     ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
-    workers=8,
     on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
 )
 print(report.summary_text())
@@ -193,8 +153,6 @@ background call. Do not run both against the same evidence:
 ```python
 job_id = c.ingest_background(
     ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
-    workers=8,
-    options=IngestOptions(staging_format="auto"),
 )
 c.job_status(job_id)                   # dict snapshot, or None if absent
 c.job_status()                         # most recently started job
@@ -306,7 +264,7 @@ with Case.open("incident42") as c:
 |---|---|
 | Lifecycle | `Case.create(name, case_root=, cluster_config=)`, `Case.open(name, case_root=, cluster_config=)`, `Case.list_cases(case_root=)`, `c.info()` |
 | Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`; `c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`; `c.job_status(job_id=)` -> `dict \| None`; `c.list_jobs()` -> `list[dict]` |
-| Ingest resources | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="python", direct_parquet=False)` |
+| Ingest resources | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="auto", direct_parquet=None)` |
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |

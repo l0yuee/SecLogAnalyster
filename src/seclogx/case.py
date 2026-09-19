@@ -145,7 +145,7 @@ class Case:
         sources: list[str],
         workers: int | None = None,
         keep_raw: bool = False,
-        keep_staging: bool = True,
+        keep_staging: bool = False,
         on_progress: Callable[[dict], None] | None = None,
         *,
         options: IngestOptions | None = None,
@@ -155,13 +155,16 @@ class Case:
         ``workers=1`` also runs the two ingest pipelines sequentially.
         ``options`` controls each DuckDB conversion instance and staging
         chunk sizes; its memory limit is not a process RSS ceiling.
+        Supported local sources automatically use native batch parsing and
+        direct Parquet output. Temporary staging is removed after success;
+        original evidence is never removed.
         """
         if workers is not None and (isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0):
             raise ValueError("workers must be a positive integer")
         options = options if options is not None else IngestOptions()
         if not isinstance(options, IngestOptions):
             raise TypeError("options must be an IngestOptions instance")
-        options.validate_execution(keep_staging=keep_staging, cluster_config=self.cluster_config)
+        options = options.resolve_execution(keep_staging=keep_staging, cluster_config=self.cluster_config)
         specs = [parse_source_arg(s) if isinstance(s, str) else s for s in sources]
         progress = ProgressReporter(on_update=on_progress) if on_progress is not None else None
 
@@ -293,7 +296,7 @@ class Case:
         sources: list[str],
         workers: int | None = None,
         keep_raw: bool = False,
-        keep_staging: bool = True,
+        keep_staging: bool = False,
         *,
         options: IngestOptions | None = None,
     ) -> str:
@@ -329,12 +332,30 @@ class Case:
             ]
             if options.direct_parquet:
                 args += ["--direct-parquet"]
+            elif options.direct_parquet is False:
+                args += ["--no-direct-parquet"]
         if keep_raw:
             args += ["--keep-raw"]
         args += ["--keep-staging" if keep_staging else "--no-keep-staging"]
         args += ["--case-root", str(self.case_dir.parent), "--_job-id", job_id]
 
         popen_kwargs: dict = {}
+        # Carry the Case's resolved execution/storage configuration into the
+        # child while retaining the surrounding environment and credential
+        # chain. Keep potentially sensitive broker URLs out of CLI arguments.
+        child_env = os.environ.copy()
+        for name, value in {
+            "SECLOGX_STORAGE_BACKEND": self.cluster_config.storage_backend,
+            "SECLOGX_S3_BUCKET": self.cluster_config.s3_bucket,
+            "SECLOGX_S3_ENDPOINT_URL": self.cluster_config.s3_endpoint_url,
+            "SECLOGX_S3_REGION": self.cluster_config.s3_region,
+            "SECLOGX_BROKER_URL": self.cluster_config.broker_url,
+        }.items():
+            if value is None:
+                child_env.pop(name, None)
+            else:
+                child_env[name] = value
+        popen_kwargs["env"] = child_env
         if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         else:

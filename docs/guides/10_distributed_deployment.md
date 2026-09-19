@@ -52,6 +52,10 @@ exactly the single-machine DuckDB path this project has always used.
 
 ## Installing it
 
+Prepare the source-build tools from the [installation guide](01_getting_started.md#install)
+once on each machine that installs from this checkout. The main package includes
+the native extension; the cluster extra adds only distributed dependencies.
+
 ```bash
 conda activate python314
 python -m pip install -e ".[cluster]"
@@ -101,12 +105,14 @@ coordinator container is insufficient. Cross-platform path spellings also
 need to match, so a Linux container coordinator is usually simpler when
 the workers are Linux containers.
 
+Distributed and object-storage configurations automatically use staging.
 Staging holds the parsed dataset and can be large. Each ingest path finishes
 staging before converting groups, with no disk-space backpressure. Auxiliary
 `auto` staging chooses Arrow IPC/ZSTD for source files at least 16 MiB and
 gzip NDJSON for smaller ones; EVTX retains NDJSON. Budget shared staging,
-Parquet and temporary space, even when `keep_staging=False`: deletion occurs
-after successful conversion. Distributed hunts also need the configured
+Parquet and temporary space: the default `keep_staging=False` deletes shards
+only after successful conversion. Use `keep_staging=True` for diagnostic
+retention; source evidence is unaffected. Distributed hunts also need the configured
 case path and custom rule files accessible at the paths sent in their jobs.
 
 ## `seclogx worker`

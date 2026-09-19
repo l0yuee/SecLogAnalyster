@@ -15,3 +15,4 @@ license-files = ["LICENSE"]
 python-source = "python"
 module-name = "seclogx_native._native"
 features = ["pyo3/extension-module"]
+locked = true

@@ -16,6 +16,10 @@ dist/
 /native/python/**/*.so
 /native/python/**/*.dylib
 /native/python/**/*.dll
+/src/seclogx/*.so
+/src/seclogx/*.dylib
+/src/seclogx/*.dll
+/src/seclogx/_bundled_data/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

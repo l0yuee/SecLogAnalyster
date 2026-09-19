@@ -69,34 +69,118 @@ case concurrently -- see
 [10. Distributed deployment](10_distributed_deployment.md); it doesn't
 change anything described above unless you turn it on.
 
-## Installation
+## Install
 
-The package requires Python 3.10+. Work on this checkout uses the dedicated
-conda **`python314`** environment, isolated from `base`.
+The package includes its Rust parser: one normal installation provides the
+Python API and the native extension. Analysts do not install an accelerator
+separately or choose performance modes for each import. This repository
+currently documents a **source installation**, which requires the build tools
+below. It does not assume a published, ready-to-download seclogx wheel.
+
+### Prepare the machine once
+
+Use Git to obtain the repository and an installed conda distribution for the
+project environment. The Python package requires Python 3.10 or newer; this
+project uses GIL-enabled CPython 3.14 in **`python314`**, isolated from `base`.
+
+For a source installation, install **stable Rust including Cargo**, plus your
+platform's native compiler/linker:
+
+| Platform | Tools to install before `pip install` |
+| --- | --- |
+| Windows | Install Visual Studio Build Tools with **Desktop development with C++**, including the MSVC x64/x86 tools and a Windows SDK. Then run the Windows installer from [Rust installation](https://rust-lang.org/tools/install/) and use the stable MSVC toolchain. See the [official MSVC prerequisites](https://rust-lang.github.io/rustup/installation/windows-msvc.html). |
+| Ubuntu/Debian | Install the compiler tools with `sudo apt-get update` and `sudo apt-get install build-essential curl`. Install stable Rust with the [official rustup instructions](https://doc.rust-lang.org/book/ch01-01-installation.html). Other Linux distributions need their equivalent GCC or Clang and linker packages. |
+| macOS | Run `xcode-select --install` for Apple's command-line compiler tools, then install stable Rust with the [official rustup instructions](https://doc.rust-lang.org/book/ch01-01-installation.html). |
+
+On Linux/macOS, the official rustup installation command is:
 
 ```bash
-cd SecLogAnalyster
-conda activate python314
-python -m pip install -e .
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Run `seclogx` from inside this repo checkout (an editable install), since
-the bundled Sigma rule set lives in `data/sigma_rules/` relative to the
-repo root and is located at runtime from there.
+Cargo is included with Rust; no separate Cargo installation is needed. Open a
+new terminal after installation, then check `rustc --version` and
+`cargo --version`. A working Rust/linker toolchain is required for a successful
+source build. If Cargo is missing, the build backend may try to acquire a
+temporary Rust toolchain; preparing tools explicitly avoids depending on that
+network step. A failed native build does not silently produce a Python-only
+package.
 
-Use this environment for tests and scripts as well. Where activation is not
-available, run `conda run --no-capture-output -n python314 python ...`.
-With JupyterLab and `ipykernel` installed there, launch `python -m jupyterlab` and select
-the `python314` kernel; verify its interpreter with `sys.executable`.
-If needed, register the installed kernel with
-`python -m ipykernel install --user --name python314 --display-name "Python (python314)"`.
+Python dependencies, including DuckDB, PyArrow, pandas, EVTX and registry
+libraries, are installed by pip. With matching dependency wheels, **do not
+install a separate DuckDB server, Arrow C++ library, or EVTX executable**.
+[PyArrow wheels include Arrow/Parquet C++ libraries](https://arrow.apache.org/docs/python/install.html);
+[DuckDB runs inside Python](https://duckdb.org/docs/stable/clients/python/overview).
+If pip cannot find a dependency wheel for your Python/platform combination,
+building that dependency from source can require additional tools; use a
+supported wheel combination or follow that dependency's own build instructions.
+Local analysis needs no Redis, S3 service or container runtime.
 
-Verify the install:
+On Windows, a missing DLL when importing a dependency may require the
+[Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+This is a runtime library, separate from the compiler tools; the
+[PyArrow installation notes](https://arrow.apache.org/docs/python/install.html)
+describe this case.
+
+### Install the project and Notebook environment
+
+In a terminal, clone the repository if it is not already present:
 
 ```bash
+git clone https://github.com/l0yuee/SecLogAnalyster.git
+cd SecLogAnalyster
+```
+
+If `python314` does not exist yet, create it once with
+`conda create -n python314 python=3.14 pip`; reuse the existing environment
+otherwise. Then run from the repository root:
+
+```bash
+conda activate python314
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install jupyterlab ipykernel
+python -m ipykernel install --user --name python314 --display-name "Python (python314)"
 seclogx version
 seclogx --help
+python -m jupyterlab
 ```
+
+The project build backend is installed automatically by pip and compiles the
+extension with release optimizations; neither a separate maturin command nor
+`pip install ./native` is needed. The first source build downloads Rust crates
+and Python dependencies and can take time. `pip install .` also builds and
+installs the extension; editable installation is convenient when working from
+this checkout. Normal wheels include the bundled rules and reference data; an
+editable installation uses the checkout, which must remain available.
+
+Choose **Python (python314)** in Jupyter and check the interpreter in a cell:
+
+```python
+import sys
+print(sys.executable)
+```
+
+Starting JupyterLab in an environment does not switch an already-running
+kernel. Use `conda run --no-capture-output -n python314 python ...` for scripts
+when activation is unavailable. CLI-only use does not require JupyterLab or
+ipykernel.
+
+### Upgrade or deploy a built wheel
+
+After updating the checkout, run `python -m pip install -e .` again in
+`python314` to rebuild the extension, then **restart existing Jupyter kernels**.
+Editable installation reflects Python edits, but does not rebuild changed Rust
+code until this install/build step runs. Close active import jobs before an
+upgrade.
+
+A deployment maintainer can build a matching platform wheel with
+`python -m pip wheel --no-deps . --wheel-dir dist`. Installing that completed
+wheel does not compile this project's Rust code, so the analyst machine does
+not need Rust or a C/C++ compiler for seclogx itself. Dependency wheel
+availability and platform runtime libraries still apply. See the
+[native component build notes](../../native/README.md) for ABI and platform
+boundaries.
 
 ## The case workspace
 
@@ -107,8 +191,8 @@ Everything revolves around a **case** -- a named workspace under
 ```
 cases/<name>/
   case.json                         # hosts and ingest run history
-  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX staging shards (kept by default)
-  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # auxiliary staging shards (kept by default)
+  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX temporary shards (removed after successful conversion)
+  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # auxiliary temporary shards (direct sources skip these)
   logs/ingest_<batch_id>.log          # EVTX reconciliation report
   jobs/<job_id>.json                 # background status snapshot
   jobs/<job_id>.log                  # background stdout/stderr and reports
@@ -143,17 +227,19 @@ for; check with `seclogx sources <case>` / `Case.table_counts()`.
 
 Imports are additive, without cross-run deduplication or checkpoint/resume.
 Overlapping source paths are deduplicated within one scan, but running the same
-import twice appends duplicate rows. Each pipeline stages its batch before
-conversion; retained staging is not a resumable checkpoint, and deleting it
-after conversion does not eliminate peak disk use. Background ingest does not
+import twice appends duplicate rows. Compatible local Web/IIS sources use native
+direct output automatically; other sources stage before conversion. Temporary
+shards are removed after successful conversion by default. `keep_staging=True`
+retains them for diagnosis and selects the staged path, without affecting source
+evidence. Retained staging is not a resumable checkpoint, and cleanup does not
+eliminate peak staging disk use. Background ingest does not
 guarantee consistent queries while files are still being written. Wait for
 completion, review the report and reopen the Case before analysis.
 
-Auxiliary staging defaults to `auto`: sources of at least 16 MiB use Arrow IPC
+For sources that need staging, `auto` selects Arrow IPC for files of at least 16 MiB
 with ZSTD level 1, smaller files use gzip NDJSON. EVTX always uses NDJSON.
-The CLI accepts `--staging-format auto|arrow|ndjson`; Python uses
-`IngestOptions(staging_format="auto")`. Auxiliary Parquet uses ZSTD level 1.
-Memory/thread budgets and batch sizes are documented in the
+Auxiliary Parquet uses ZSTD level 1. Advanced diagnostic overrides,
+memory/thread budgets and batch sizes are documented in the
 [CLI reference](05_cli_reference.md) and [Notebook API](06_python_api.md).
 
 ## Quickstart

@@ -7,7 +7,7 @@ delegated to flatten.py, mirroring how the EVTX pipeline
 responsibilities.
 
 Workers write bounded NDJSON or Arrow shards rather than returning parsed
-rows in memory. Optional local direct conversion handles supported native
+rows in memory. Automatic local direct conversion handles supported native
 web sources sequentially after the ordinary staging queue has shut down;
 those published Parquet files bypass the later staged-file conversion.
 """
@@ -36,7 +36,7 @@ def run_aux_ingest(
     case_dir: Path,
     sources: list[SourceSpec],
     workers: int | None = None,
-    keep_staging: bool = True,
+    keep_staging: bool = False,
     cluster_config: ClusterConfig | None = None,
     classified: list[ClassifiedFile] | None = None,
     progress: ProgressReporter | None = None,
@@ -44,7 +44,7 @@ def run_aux_ingest(
 ) -> AuxIngestReport:
     options = options or IngestOptions()
     cluster_config = cluster_config or ClusterConfig.from_env()
-    options.validate_execution(keep_staging=keep_staging, cluster_config=cluster_config)
+    options = options.resolve_execution(keep_staging=keep_staging, cluster_config=cluster_config)
     batch_id = str(uuid.uuid4())
     if classified is None:
         # Not pre-scanned by Case.ingest() (e.g. called directly, as
@@ -82,10 +82,18 @@ def run_aux_ingest(
         if progress:
             progress.on_aux_result(f)
 
+    use_direct = options.direct_parquet and any(cf.kind in (KIND_WEB_ACCESS, KIND_IIS) for cf in classified)
+    if use_direct and options.parser_backend == "auto":
+        # If the extension is unavailable, retain the ordinary worker queue
+        # for all formats rather than replaying web files one at a time in
+        # the coordinator. Workers record the normal fallback reason.
+        from .native import load_native_component
+
+        use_direct = load_native_component().module is not None
     direct_classified = []
     known_classified = []
     for cf in classified:
-        if options.direct_parquet and cf.kind in (KIND_WEB_ACCESS, KIND_IIS):
+        if use_direct and cf.kind in (KIND_WEB_ACCESS, KIND_IIS):
             direct_classified.append(cf)
         elif cf.kind is not None:
             known_classified.append(cf)

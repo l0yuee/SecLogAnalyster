@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
@@ -25,15 +25,14 @@ class IngestOptions:
     conversions. Chunk sizes are byte targets, so a single large record
     can exceed ``staging_chunk_bytes``.
 
-    ``parser_backend`` defaults to ``python``. ``auto`` opts into native
-    auxiliary parsing with compatibility fallback; ``native`` requires native
-    support. Native parsing needs Arrow staging unless direct conversion is
-    enabled. EVTX uses its existing parser independently of this setting.
+    ``parser_backend`` defaults to ``auto``: supported auxiliary sources use
+    native batch parsing with Python compatibility fallback. ``python`` and
+    ``native`` are diagnostic overrides. EVTX uses its existing parser.
 
-    ``direct_parquet`` opts supported local native web sources into direct
-    conversion. It requires an explicit ``auto`` or ``native`` parser backend
-    and ``keep_staging=False``, and shares the coordinator's conversion budget;
-    the default continues to use staging.
+    ``direct_parquet=None`` automatically streams supported local web sources
+    into Parquet when staging is not retained. Explicit True requires local
+    execution/storage, a native-capable backend and ``keep_staging=False``;
+    False forces staging. Conversions share the coordinator's memory budget.
     """
 
     memory_limit: str = "2GB"
@@ -42,14 +41,14 @@ class IngestOptions:
     flatten_batch_bytes: int = 256 * 1024 * 1024
     # Auxiliary text/artifact staging only; EVTX keeps its raw JSON contract.
     staging_format: str = "auto"
-    # Optional native parsers preserve the same canonical table contract.
-    parser_backend: str = "python"
-    # Local native web sources can bypass IPC when staging is not retained.
-    direct_parquet: bool = False
+    # Native parsers preserve the same canonical table contract.
+    parser_backend: str = "auto"
+    # None selects the path from the execution context, without caller tuning.
+    direct_parquet: bool | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.direct_parquet, bool):
-            raise ValueError("direct_parquet must be a boolean")
+        if self.direct_parquet is not None and not isinstance(self.direct_parquet, bool):
+            raise ValueError("direct_parquet must be a boolean or None")
         if self.direct_parquet and self.parser_backend == "python":
             raise ValueError("direct_parquet requires parser_backend='auto' or 'native'")
         if self.parser_backend not in ("auto", "python", "native"):
@@ -80,3 +79,20 @@ class IngestOptions:
             raise ValueError("direct_parquet requires keep_staging=False")
         if cluster_config.is_distributed or cluster_config.storage_backend != "local":
             raise ValueError("direct_parquet requires local execution and local storage")
+
+    def resolve_execution(self, *, keep_staging: bool, cluster_config: Any) -> IngestOptions:
+        """Resolve the automatic output path once at an ingest boundary.
+
+        Explicit requests retain their validation errors. Automatic mode
+        adapts to retention, storage and execution requirements without
+        asking an analyst to configure a different parser pipeline.
+        """
+        self.validate_execution(keep_staging=keep_staging, cluster_config=cluster_config)
+        if self.direct_parquet is not None:
+            return self
+        return replace(self, direct_parquet=(
+            not keep_staging
+            and not cluster_config.is_distributed
+            and cluster_config.storage_backend == "local"
+            and self.parser_backend != "python"
+        ))

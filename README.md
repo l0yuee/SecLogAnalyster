@@ -93,25 +93,32 @@ edge cases.
 
 ## Install
 
+Normal installation now includes the Rust parser; no separate accelerator
+package or per-import performance switch is needed. **Installing this checkout
+from source requires stable Rust/Cargo and a native compiler/linker.** On Windows,
+install Visual Studio Build Tools with Desktop development with C++, MSVC tools
+and a Windows SDK, then the stable MSVC Rust toolchain. Linux needs GCC or Clang;
+macOS needs Xcode command-line tools. Complete commands and prerequisites:
+[English installation guide](docs/guides/01_getting_started.md#install) |
+[中文安装指南](docs/guides/01_getting_started.zh-CN.md#安装).
+
+After preparing the build tools, run from the repository root:
+
 ```bash
 conda activate python314
 python -m pip install -e .
+python -m pip install jupyterlab ipykernel
+python -m ipykernel install --user --name python314 --display-name "Python (python314)"
+python -m jupyterlab
 ```
 
-The package requires Python >= 3.10; this project's designated development and
-analysis environment is **conda `python314`**, isolated from `base`. Use it for
-installation, scripts, tests and Jupyter. In a noninteractive shell, use
-`conda run --no-capture-output -n python314 python ...`. Run from this checkout
-(editable install) so the bundled Sigma rules under `data/` are found.
-
-An optional Rust parser component can be built from this checkout with
-`python -m pip install ./native` in the same environment. It provides native
-parsing for UTF-8 Common/Combined and IIS access logs through Arrow staging or
-optional direct Parquet conversion while
-preserving the Python and Notebook APIs. A Rust toolchain and a platform C/C++
-linker are required for a source build; see [native component](native/README.md)
-and [parser selection](docs/guides/08_performance_and_scale.md#optional-native-parsers).
-The main package also works without this component.
+The project uses conda **`python314`**, isolated from `base`; the installation
+guide also covers creating it. Python >=3.10 is required. Pip installs the
+build backend and Python dependencies automatically. With matching dependency
+wheels, no separate DuckDB server or Arrow C++ installation is needed.
+Installing a maintainer-built platform wheel requires no Rust compiler for
+seclogx itself; this repository does not assume publicly available seclogx
+wheels. After upgrades, repeat the project install and restart Jupyter kernels.
 
 ## Quickstart
 
@@ -128,7 +135,7 @@ seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01
 
 # Alternative for a large import: start a separate case in the background.
 # Do not re-import the same evidence into one case; imports are additive.
-seclogx ingest large_case --source /evidence/full_kape_output --background --staging-format auto
+seclogx ingest large_case --source /evidence/full_kape_output --background
 seclogx ingest-status large_case --watch
 
 # See what's in it
@@ -163,41 +170,34 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 
 ## Python / notebook usage
 
-For large imports, see the [Notebook resource settings](docs/guides/06_python_api.md)
-and [performance/scale boundaries](docs/guides/08_performance_and_scale.md)
-([中文](docs/guides/08_performance_and_scale.zh-CN.md)). `IngestOptions`
-controls conversion memory, threads and staging batches; it does not set a
-total-process RSS cap. The default `staging_format="auto"` uses Arrow IPC with
-ZSTD level 1 for supported auxiliary sources of at least 16 MiB and gzip NDJSON
-for smaller sources. Explicit `"arrow"` and `"ndjson"` modes are also available;
-EVTX staging remains NDJSON. Auxiliary Parquet output uses ZSTD level 1.
+Normal imports automatically select native parsing, bounded Arrow batches and
+direct Parquet output for compatible local UTF-8 Common/Combined and IIS logs.
+Other formats and incompatible inputs use the Python compatibility path.
+Analysts keep the same API:
 
-`parser_backend="python"` is the default compatibility path. Explicitly select
-`"auto"` to use the optional native component where compatible and otherwise
-fall back to Python; `"native"`
-requires native support for each recognized auxiliary source and fails when
-unavailable. On the default staged path, use `staging_format="arrow"` with
-strict native selection, including for small files. EVTX retains its existing parser.
+```python
+from seclogx import Case
 
-For local web access/IIS imports, `IngestOptions(parser_backend="auto", direct_parquet=True)` together
-with `keep_staging=False` enables direct conversion without IPC shards; the
-default is `direct_parquet=False`. The CLI uses `--parser-backend auto --direct-parquet --no-keep-staging`.
-This requires local storage, no broker and backend `auto` or `native`. It works
-for small compatible sources too. Auto mode replays incompatible sources through
-Python staging; other formats still use staging. Hash/encoding preparation
-remains, and source-level publication is not a whole-ingest transaction or
-resume mechanism. See [direct conversion boundaries](docs/guides/08_performance_and_scale.md#optional-direct-parquet-conversion).
+c = Case.create("new_case")
+report = c.ingest([r"E:\evidence:HOST01"])
+print(report.summary_text())
+```
 
-If the workstation has enough spare memory and CPU capacity, an optional setting is
-`IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")` with
-`workers=8`; the library defaults remain 2GB and two conversion threads.
-The same options work with foreground and background imports. Full DataFrame
-queries can still exhaust Notebook memory; filter or use `_chunks()` accessors.
-Launch Jupyter from `python314` and select that kernel; check `sys.executable`
-inside the Notebook. Background ingest uses the caller's Python interpreter.
-It frees the Notebook to do other work, but does not implement resumable jobs,
-early-query guarantees or atomic visibility of a partially written lake. Wait
-for `done`, inspect the reconciliation report, then reopen the Case to query it.
+To keep the Notebook responsive, use `c.ingest_background(sources)` instead
+of the foreground call, then poll `c.job_status(job_id)`. Wait for completion,
+inspect the report and reopen the Case before analysis. Background execution
+does not provide automatic resume or reduce the work itself.
+
+Temporary staging is now removed after successful conversion by default;
+**source evidence is never deleted**. Use `keep_staging=True` only when you need
+the intermediate files for investigation; this selects the staging path.
+Local defaults use up to eight parsing workers, 2GB per DuckDB conversion and
+two conversion threads. These are work budgets, not a process-tree RSS cap.
+Advanced overrides and format/publication boundaries are documented in
+[Python API](docs/guides/06_python_api.md) and
+[performance and scale](docs/guides/08_performance_and_scale.md)
+([中文](docs/guides/08_performance_and_scale.zh-CN.md)).
+Large analysis results still need filtered queries or `_chunks()` accessors.
 
 ```python
 from seclogx import Case

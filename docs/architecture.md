@@ -290,7 +290,9 @@ split), orchestrated from `Case.ingest()`
 alongside the EVTX pipeline; see `docs/known_limitations.md` for what
 happens when a source has one but not the other.
 
-The default auxiliary path (`direct_parquet=False`) is:
+The default chooses direct native conversion for compatible local Web/IIS
+sources. Other formats, compatibility replays, retained staging and remote
+execution/storage use this staged auxiliary path:
 
 ```
  same --source PATH[:HOST] inputs
@@ -379,34 +381,38 @@ reader opens one shard at a time. A fixed 1 MiB output buffer coalesces IPC
 metadata and column writes; closing the sink must succeed before a shard
 is published. Mixed formats for one table are converted
 in separate groups. Auxiliary Parquet uses ZSTD level 1. EVTX staging is
-unchanged. This default path writes intermediate files before conversion.
+unchanged. This staged path writes intermediate files before conversion.
 
-An optional `seclogx-native` companion package parses compatible UTF-8 CLF/
-Combined and IIS access logs directly into bounded Arrow string buffers. Its
-Rust loop releases the GIL; Arrow C Data capsules exchange batches inside the
-file worker without recreating Python row dictionaries. Batch validation,
-staging, bounded partition metadata and canonical SQL remain in the main
-package. Only small manifests cross process boundaries.
-`IngestOptions.parser_backend` defaults to `python`, keeping the compatibility
-path. Explicit `auto` or strict `native` selects optional native parsing;
-on the staged path, auto requires Arrow staging and falls back when the component or input is
-unsupported. If a capability mismatch occurs after accepting batches, the
-worker aborts and deletes all of that source's shards before a complete Python
-replay. It does not retry source changes, I/O failures or malformed batches. Per-file reports
-record the actual backend and fallback reason. Native parsing retains the
-preparation/hash pass, and the staged path retains intermediate IPC storage.
+The main package includes a Rust extension for compatible UTF-8 CLF/Combined
+and IIS access logs. Ordinary installation builds it with the Python package;
+analysts keep the same `Case.ingest(sources)` API. Its Rust loop releases the GIL
+and builds bounded Arrow string buffers without recreating Python row
+dictionaries. Arrow C Data capsules stay within one process. Batch validation,
+partition metadata and canonical SQL remain in the Python package.
 
-`IngestOptions(parser_backend="auto", direct_parquet=True)` enables an alternative path in
-`ingest/logsources/direct.py` for compatible UTF-8 Common/Combined and IIS
-sources. It requires `keep_staging=False`, local execution/storage without a
-broker, and `parser_backend="auto"` or `"native"`. Small files are eligible;
-`staging_format` applies to other sources and compatibility replay, not this
-direct path. The coordinator removes eligible sources from its ordinary queue,
-finishes the remaining staging jobs and closes their pool, then converts direct
-sources sequentially. The ordinary worker budget is unchanged. Each direct
-conversion holds the same `CONVERSION_LOCK` as EVTX and staged flattening for
-its DuckDB lifetime, sharing one configured conversion memory/thread budget
-within that process; independent processes remain separate.
+`IngestOptions.parser_backend` defaults to `auto`. Compatible inputs use native
+parsing; unsupported inputs or an unavailable runtime component use Python.
+Advanced `python` and strict `native` overrides are retained for diagnosis.
+On the staged path, native parsing requires Arrow. A capability mismatch after
+accepted batches aborts and deletes all of that source's shards before complete
+Python replay; source changes, I/O failures and malformed batches are fatal.
+Per-file reports record the actual backend and fallback reason. Hash/encoding
+preparation remains, as does IPC storage when the staged path is selected.
+
+`direct_parquet=None` resolves automatically: `keep_staging=False` (the public
+default), local execution/storage, no broker and backend `auto` or `native`
+select the direct path in `ingest/logsources/direct.py`. Other configurations
+select staging. An explicit `True` retains strict configuration validation;
+`False` forces staging for diagnosis. Direct output covers compatible
+Common/Combined and IIS sources, including small files. `staging_format`
+applies to other sources and compatibility replay, not the direct path.
+
+The coordinator removes eligible sources from its ordinary queue, finishes
+the remaining staging jobs and closes their pool, then converts direct sources
+sequentially. Each direct conversion holds the same `CONVERSION_LOCK` as EVTX
+and staged flattening for its DuckDB lifetime. Within that process this shares
+one configured conversion memory/thread budget; independent processes remain
+separate.
 
 The native producer feeds bounded raw VARCHAR Arrow batches to DuckDB through
 an in-process reader. Existing canonical SQL writes ZSTD Parquet privately
@@ -545,17 +551,19 @@ of whether cluster mode is ever turned on:
   once a broker is configured (more reliable than a POSIX file lock over a
   network filesystem for coordinating genuinely separate machines).
 
-**Default ingest still separates staging from conversion.** Text/registry
+**Staged sources still separate staging from conversion.** Text/registry
 records are emitted to disk without retaining a whole file's rows, and only
-shard manifests cross the worker boundary. Optional direct conversion bypasses
-those shards for compatible web sources. Other formats and compatibility
+shard manifests cross the worker boundary. Automatic direct conversion bypasses
+those shards for compatible local web sources. Other formats and compatibility
 replays still complete staging before bounded flatten calls, so temporary disk
 usage can grow with their complete staged dataset. File discovery and manifests
 scale with file/shard count. The local queue bounds in-flight tasks; there is
 no general overlapped staging/flattening pipeline with disk-space backpressure.
 
-`keep_staging=False` alone deletes completed staging rather than enabling direct
-conversion. Resumable/idempotent ingest and atomic queryable snapshots are not
+`keep_staging=False` is the public default. Automatic direct output bypasses
+staging for eligible sources; other successful conversions delete their
+temporary shards. `keep_staging=True` retains those intermediates and selects
+the staged path. Source evidence is never deleted. Resumable/idempotent ingest and atomic queryable snapshots are not
 implemented. Resource targets do not guarantee a fixed
 throughput or RSS for arbitrary formats, record sizes or machines.
 Repeated ingestion can add duplicate rows, and a failure after some

@@ -568,37 +568,35 @@ analysts can distinguish supported behavior from remaining gaps.
   Notebook process, but not across independent processes or machines.
   Local `workers` is a total parsing budget across both pipelines;
   `workers=1` runs them serially in the calling process.
-- **Native auxiliary parsing is optional and format-specific.**
-  The separate `seclogx-native` component supports compatible UTF-8
-  Common/Combined and IIS access logs with Arrow staging or the opt-in local
-  direct path. The default `parser_backend="python"` retains the Python
-  compatibility path. Explicit `"auto"` selects native when compatible and
-  uses Python otherwise; `"native"` fails on unsupported recognized
-  auxiliary sources. A late capability fallback removes that source's
-  native output and reparses the whole file, which can add I/O. Per-file
-  `parser_backend` and `backend_reason` identify parser selection separately
-  from `output_format` and `parquet_paths`. Hashing, encoding preparation and
-  canonical DuckDB conversion remain; IPC staging remains on the staged path;
-  this does not make every format native or split one file across workers.
-  Install the component in each worker/kernel environment and restart
-  existing kernels after replacing the extension. See
-  [native parsers](guides/08_performance_and_scale.md#optional-native-parsers).
-- **Direct Parquet conversion is opt-in and local only.**
-  `direct_parquet=False` is the default. Enabling it requires
-  `keep_staging=False`, local storage, no configured broker and parser backend
-  `auto` or `native`. Only compatible web access/IIS sources use it; small files
-  are eligible without forcing Arrow staging. Other formats and auto-mode
-  whole-source Python replays still use the selected `staging_format`.
+- **Automatic native parsing remains format-specific.** The main installation
+  includes the Rust extension for compatible UTF-8 Common/Combined and IIS
+  access logs. Default `parser_backend="auto"` uses Python when a format,
+  encoding, syntax or runtime component is incompatible. Strict `native`
+  fails on unsupported recognized auxiliary sources; `python` is an advanced
+  diagnostic override. Capability fallback discards private output and
+  reparses the entire source, which can add I/O. Reports distinguish
+  `parser_backend` / `backend_reason` from `output_format` / `parquet_paths`.
+  Source hashing, encoding preparation and canonical SQL remain. This does
+  not make every format native or split a file across workers. Restart
+  existing kernels after rebuilding or upgrading the extension. See
+  [automatic parsing](guides/08_performance_and_scale.md#automatic-native-parsing).
+- **Automatic direct Parquet conversion requires a compatible local context.**
+  Default `direct_parquet=None` selects direct output with `keep_staging=False`,
+  local execution/storage, no broker and backend `auto` or `native`. Other
+  configurations automatically select staging. Explicit `True` rejects an
+  incompatible configuration; explicit `False` forces staging. Compatible
+  Web/IIS sources, including small files, use direct output. Other formats and
+  whole-source compatibility replay retain the selected `staging_format`.
   Ordinary auxiliary jobs finish and their pool closes before direct sources
-  run sequentially in the coordinator. Direct conversion shares the DuckDB
-  conversion lock and its per-instance memory/thread budget with EVTX and staged
-  flattening, without imposing a process RSS cap. Hash and strict encoding
-  pre-reading remain. Private output stays outside `lake/` until closure and
-  source checks complete. Ordinary parse errors can publish an accepted prefix
-  as `partial`; zero recovered rows produce `failed` with no published output.
-  Source changes, I/O, invalid native batches and conversion failures do not
-  become compatibility replay. A crash can leave `_ingest_private` files;
-  there is no automatic cleanup/recovery of crashed attempts.
+  run sequentially. The shared conversion lock keeps one DuckDB budget active
+  per coordinator, without imposing a process-tree RSS cap. Hash/encoding
+  pre-reading remains. Private output stays outside `lake/` until closure and
+  source checks complete. Ordinary parse errors can publish a complete prefix
+  as `partial`; zero recovered rows produce `failed` without output. Source
+  changes, I/O, invalid native batches and conversion errors do not become
+  compatibility replay. A crash can leave `_ingest_private` files without
+  automatic recovery.
+
 - **Direct publication depends on local filesystem operations.** Windows uses
   a rename that refuses to overwrite an existing destination. POSIX requires
   hard-link support and the private output and destination on the same
@@ -630,18 +628,12 @@ analysts can distinguish supported behavior from remaining gaps.
   No fixed throughput/RSS guarantee applies across arbitrary data sizes,
   formats or machines; EVTX native parsing and Registry recovery have
   additional format-specific resource requirements.
-- **Staging is compressed and kept by default: gzip level 1 for NDJSON,
-  ZSTD level 1 for Arrow IPC.** This trades ingest CPU time for a smaller on-disk
-  case relative to an uncompressed-and-kept staging directory. Without
-  compression, a case directory could land at several times the source
-  evidence's size -- rendered-as-JSON EVTX records alone run considerably
-  larger than the source binary `.evtx`, and staging is additive on top
-  of the already-compressed Parquet lake. This is a memory/disk/speed
-  three-way tradeoff, not a solved problem: `--no-keep-staging` alone cuts disk
-  after successful conversion (not the peak during ingestion), at the cost
-  of needing to re-ingest, not just re-flatten, to
-  recover from a bad flatten. Level 1 compression was chosen to bias toward
-  ingest speed over maximum compression ratio. See "Performance and scale
-  notes" in [08. Performance & scale](guides/08_performance_and_scale.md)
-  for the full tradeoff and the companion fix (unrecognized files, e.g.
-  PE/ELF binaries mixed into evidence, are never hashed or staged).
+- **Staging is compressed and removed after successful conversion by default.**
+  NDJSON uses gzip level 1 and Arrow IPC uses ZSTD level 1. Automatic direct
+  output bypasses these files only for eligible local sources; other sources
+  can still accumulate their complete staged dataset. `keep_staging=True`
+  retains intermediates and automatically selects staging; source evidence is
+  never deleted. Compression reduces disk requirements but still costs CPU,
+  and cleanup after conversion does not remove peak staging usage. Retained
+  shards help diagnosis but do not implement automatic resume. See
+  [performance and scale](guides/08_performance_and_scale.md).

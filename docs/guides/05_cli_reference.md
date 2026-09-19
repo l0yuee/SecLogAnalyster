@@ -51,14 +51,14 @@ core command.
 | `--source PATH[:HOST]` | required, repeatable | A file or directory to scan recursively. An optional `:HOST` sets the host label; otherwise the source root's name is used (including a filename for a direct-file source). Quote paths containing spaces. |
 | `--workers N` | up to 8 | Total local parsing-worker budget shared by EVTX and auxiliary pipelines. `1` stages in the caller process and runs both pipelines serially. Classification uses a separate bounded thread pool. |
 | `--keep-raw` | off | EVTX only: capture raw XML in the `raw_xml` column. Adds XML parsing and a disk-backed index; cost depends on the records. |
-| `--keep-staging` / `--no-keep-staging` | keep | Retain EVTX NDJSON and auxiliary NDJSON/Arrow shards after conversion. Removal happens after conversion, so it does not eliminate staging's peak disk requirement. Retained shards are not an automatic resume mechanism. |
+| `--keep-staging` / `--no-keep-staging` | remove | Remove temporary shards after successful conversion by default, without deleting source evidence. `--keep-staging` retains intermediates and selects staging automatically. Cleanup does not eliminate peak staging usage or provide resume. |
 | `--memory-limit SIZE` | `2GB` | Managed memory budget per DuckDB conversion connection, not a hard limit on process-tree RSS. |
 | `--duckdb-threads N` | `2` | Threads per DuckDB conversion. Independent of the parsing-worker budget. |
 | `--staging-chunk-mb N` | `64` | Target uncompressed MiB per staging shard; a record is never split. Despite the flag name, one unit is 1,048,576 bytes. |
 | `--flatten-batch-mb N` | `256` | Target uncompressed MiB per conversion group; an individual staging shard remains indivisible. |
 | `--staging-format FORMAT` | `auto` | Auxiliary staging: `auto` selects Arrow IPC / ZSTD level 1 for sources >=16 MiB, gzip NDJSON otherwise; `arrow` or `ndjson` forces a format. EVTX remains NDJSON. |
-| `--parser-backend BACKEND` | `python` | Python compatibility parsing by default. Explicit `auto` uses native where compatible and otherwise Python; `native` requires native support for each recognized auxiliary source. Native parsing uses Arrow staging unless direct conversion is enabled. EVTX keeps its existing parser. |
-| `--direct-parquet` | off | Convert compatible native web access/IIS sources directly to Parquet. Requires `--no-keep-staging`, local storage, no broker and backend `auto` or `native`. Small sources are eligible; staging format applies only to fallback and other sources. |
+| `--parser-backend BACKEND` | `auto` | Advanced diagnostic override: automatically use native where compatible, otherwise Python. `python` forces compatibility parsing; `native` requires native support for each recognized auxiliary source. EVTX keeps its existing parser. |
+| `--direct-parquet` / `--no-direct-parquet` | automatic | Normally omitted: use direct output for compatible local Web/IIS sources, otherwise staging. The positive override strictly requires no retained staging, local execution/storage, no broker and backend `auto` or `native`; the negative override forces staging. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
 | `--background` / `-b` | off | Detach the import into a background process and return immediately -- see below. |
 
@@ -74,7 +74,7 @@ DuckDB conversions within one coordinator process are serialized. Auxiliary
 Parquet uses ZSTD level 1 regardless of staging format. Byte targets bound work
 groups, not total parser, Arrow, DuckDB, or process-tree memory.
 
-With `--parser-backend auto --direct-parquet --no-keep-staging`, ordinary auxiliary sources finish
+With automatic local direct conversion, ordinary auxiliary sources finish
 worker-pool staging first, then direct sources run sequentially in the
 coordinator. Direct conversion shares the conversion lock with EVTX and staged
 flattening. It retains source hashing and strict encoding preparation. In
@@ -108,14 +108,14 @@ seclogx ingest incident42 \
   --source /mnt/kape_output/DC01:DC01 \
   --source /home/analyst/manual_copy/extra_logs:WKS01
 
-# Keep raw XML for a small, high-value evidence set; use more workers
-seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
+# Keep raw XML for a small, high-value evidence set
+seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw
 
-# Alternative local web import: native direct output with Python compatibility replay
-seclogx ingest web_direct --source /evidence/web:WEB01 --parser-backend auto --direct-parquet --no-keep-staging
+# Local Web/IIS imports automatically use the compatible native direct path
+seclogx ingest web_case --source /evidence/web:WEB01
 
-# Alternative large import in a new case; choose budgets for available resources
-seclogx ingest large_case --source /evidence/full_kape_output --background --workers 8 --memory-limit 4GB --duckdb-threads 8 --staging-format auto
+# Alternative large import in a new case, using automatic defaults
+seclogx ingest large_case --source /evidence/full_kape_output --background
 seclogx ingest-status large_case --watch
 ```
 

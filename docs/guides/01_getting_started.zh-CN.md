@@ -35,24 +35,95 @@ Sigma 规则集，或多名分析师需要共同使用同一个案例的场景�
 
 ## 安装
 
-包本身要求 Python 3.10 及以上版本。本项目的开发与分析统一使用独立于 `base` 的 conda **`python314`** 环境。
+主包已经包含 Rust 解析器：**一次正常安装就同时安装 Python API 和原生扩展**。
+分析员不需要额外安装加速包，也不必在每次导入时选择性能模式。仓库当前提供的流程是
+**从源码安装**，需要先准备下面的构建工具；这里不假定已有公开发布、可直接下载的 seclogx wheel。
+
+### 一次性准备机器环境
+
+获取仓库需要 Git，项目环境使用已安装的 conda。Python 包要求 3.10 及以上版本；本项目
+使用独立于 `base` 的 **`python314`** 环境，运行启用 GIL 的 CPython 3.14。
+
+从源码安装时，需要 **stable Rust（包含 Cargo）**，以及对应平台的原生编译器和链接器：
+
+| 平台 | 执行 `pip install` 前需要安装的工具 |
+| --- | --- |
+| Windows | 安装 Visual Studio Build Tools，选择 **“使用 C++ 的桌面开发 / Desktop development with C++”**，包含 MSVC x64/x86 工具和 Windows SDK。然后从 [Rust 官方安装页](https://rust-lang.org/tools/install/)运行 Windows 安装程序，使用 stable MSVC 工具链。详见[官方 MSVC 前置要求](https://rust-lang.github.io/rustup/installation/windows-msvc.html)。 |
+| Ubuntu/Debian | 执行 `sudo apt-get update` 和 `sudo apt-get install build-essential curl`，再按 [rustup 官方说明](https://doc.rust-lang.org/book/ch01-01-installation.html)安装 stable Rust。其他 Linux 发行版安装对应的 GCC 或 Clang 及链接器包。 |
+| macOS | 执行 `xcode-select --install` 安装 Apple 命令行编译工具，再按 [rustup 官方说明](https://doc.rust-lang.org/book/ch01-01-installation.html)安装 stable Rust。 |
+
+Linux/macOS 的官方 rustup 安装命令如下：
 
 ```bash
-cd SecLogAnalyster
-conda activate python314
-python -m pip install -e .
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-请在本仓库的检出目录内以可编辑模式（editable install）运行 `seclogx`，因为内置的 Sigma 规则集位于仓库根目录下的 `data/sigma_rules/`，程序在运行时会基于此相对路径查找。
+Cargo 随 Rust 安装，不需要单独安装。安装后重新打开终端，执行 `rustc --version`
+和 `cargo --version` 检查。成功的源码构建需要可用的 Rust 与链接器。找不到 Cargo 时，
+构建后端可能尝试获取临时 Rust 工具链；预先安装可避免依赖这一联网步骤。原生构建失败
+不会静默安装为纯 Python 版本。
 
-测试和脚本也使用该环境；不能激活环境的非交互式场合，使用 `conda run --no-capture-output -n python314 python ...`。在该环境安装 JupyterLab 与 `ipykernel` 后，通过 `python -m jupyterlab` 启动，选择 `python314` 内核，并在单元格内用 `sys.executable` 确认解释器。如果尚未注册内核，可执行 `python -m ipykernel install --user --name python314 --display-name "Python (python314)"`。
+DuckDB、PyArrow、pandas、EVTX 和注册表等 Python 依赖由 pip 自动安装。能取得匹配的
+依赖 wheel 时，**不需要单独安装 DuckDB 服务端、Arrow C++ 库或 EVTX 命令行工具**。
+[PyArrow wheel 包含 Arrow/Parquet C++ 库](https://arrow.apache.org/docs/python/install.html)，
+[DuckDB 在 Python 进程中运行](https://duckdb.org/docs/stable/clients/python/overview)。
+如果所选 Python/平台没有匹配的依赖 wheel，依赖的源码构建可能另需工具；应选择有 wheel
+支持的组合，或遵循相应依赖的源码构建说明。本地分析不需要 Redis、S3 服务或容器环境。
 
-验证安装：
+Windows 上导入依赖时若提示缺少 DLL，可能需要安装
+[Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)。
+它是运行库，与编译工具不同；[PyArrow 安装说明](https://arrow.apache.org/docs/python/install.html)
+包含这一情形。
+
+### 安装项目与 Notebook 环境
+
+尚无仓库时，在终端中执行：
 
 ```bash
+git clone https://github.com/l0yuee/SecLogAnalyster.git
+cd SecLogAnalyster
+```
+
+尚无 `python314` 环境时，只需创建一次：`conda create -n python314 python=3.14 pip`。
+已有该环境时直接复用。随后在仓库根目录执行：
+
+```bash
+conda activate python314
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install jupyterlab ipykernel
+python -m ipykernel install --user --name python314 --display-name "Python (python314)"
 seclogx version
 seclogx --help
+python -m jupyterlab
 ```
+
+pip 会自动准备构建后端，并以 release 优化编译原生扩展，无需额外执行 maturin，
+也无需执行 `pip install ./native`。首次源码构建会下载 Rust crate 和 Python 依赖，
+可能需要一定时间。`pip install .` 同样会构建并安装扩展；在本仓库工作时，可编辑安装便于
+使用最新源码。普通 wheel 已包含内置规则和参考数据；可编辑安装依赖仓库，应保留该目录。
+
+在 Jupyter 中选择 **Python (python314)**，并在单元格中检查解释器：
+
+```python
+import sys
+print(sys.executable)
+```
+
+从指定环境启动 JupyterLab，不会切换已运行内核。不能激活环境时，脚本使用
+`conda run --no-capture-output -n python314 python ...`。只使用 CLI 时不需要安装
+JupyterLab 或 ipykernel。
+
+### 升级与部署已构建的 wheel
+
+更新仓库后，在 `python314` 中重新执行 `python -m pip install -e .`，重建扩展，
+并**重启已有 Jupyter 内核**。可编辑安装会反映 Python 源码修改，但 Rust 源码变更必须经过
+这一步安装/构建才能生效。升级前先结束正在运行的导入任务。
+
+部署维护者可以执行 `python -m pip wheel --no-deps . --wheel-dir dist`，构建匹配平台的 wheel。
+安装这个已构建的 wheel 不会再次编译本项目的 Rust 代码，因此分析员机器不需要为 seclogx
+本身安装 Rust 或 C/C++ 编译器；依赖 wheel 的可用性及平台运行库要求仍适用。
+ABI 与平台边界见[原生组件构建说明](../../native/README.md)。
 
 ## 案例工作区（Case workspace）
 
@@ -61,8 +132,8 @@ seclogx --help
 ```
 cases/<name>/
   case.json                     # 已导入的主机列表、导入运行历史
-  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX 暂存分片，默认保留
-  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # 辅助来源暂存分片，默认保留
+  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX 临时分片，转换成功后默认删除
+  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # 辅助来源临时分片，直接输出的来源跳过此步骤
   logs/ingest_<batch_id>.log      # EVTX 核对报告
   jobs/<job_id>.json             # 后台状态快照
   jobs/<job_id>.log              # 后台标准输出/错误及核对报告
@@ -89,9 +160,9 @@ cases/<name>/
 `case.json` 中。一次 `ingest` 会在来源路径下一次性发现并导入所有支持的格式——不需要对每种日志类型分别导入。案例只会暴露它实际拥有数据的表；可用
 `seclogx sources <case>` / `Case.table_counts()` 查看。
 
-当前没有跨批次去重或断点续跑。同一次扫描会对重叠来源路径去重，但重复运行同一次导入会追加重复行。各通路先完成本批暂存再转换；保留暂存不是可恢复检查点，转换后删除暂存也不能消除磁盘峰值。后台执行不保证在文件尚未写完时查询的一致性；应等导入结束、检查报告，再重新打开 Case 做分析。
+当前没有跨批次去重或断点续跑。同一次扫描会对重叠来源路径去重，但重复运行同一次导入会追加重复行。兼容的本地 Web/IIS 来源自动采用原生直接输出，其他来源先暂存再转换。默认在转换成功后删除临时分片；`keep_staging=True` 会保留分片并选择暂存路径，不影响原始证据。保留暂存不是可恢复检查点，事后清理也不能消除暂存峰值。后台执行不保证在文件尚未写完时查询的一致性；应等导入结束、检查报告，再重新打开 Case 做分析。
 
-辅助暂存默认采用 `auto`：单个来源达到 16 MiB 时使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；EVTX 始终使用 NDJSON。CLI 参数为 `--staging-format auto|arrow|ndjson`，Python 对应 `IngestOptions(staging_format="auto")`。辅助来源的 Parquet 使用 ZSTD level 1。内存、线程预算和批次大小见[命令行参考](05_cli_reference.zh-CN.md)与[Notebook API](06_python_api.zh-CN.md)。
+对于需要暂存的辅助来源，`auto` 在文件达到 16 MiB 时选择 Arrow IPC / ZSTD level 1，较小时选择 gzip NDJSON；EVTX 始终使用 NDJSON。辅助来源的 Parquet 使用 ZSTD level 1。高级诊断覆盖项、内存/线程预算与批次大小见[命令行参考](05_cli_reference.zh-CN.md)与[Notebook API](06_python_api.zh-CN.md)。
 
 ## 快速上手示例
 

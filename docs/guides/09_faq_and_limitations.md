@@ -46,19 +46,20 @@ failure; calling internal flatten functions is not a supported resume protocol.
 **Jupyter stays busy, or the kernel uses the wrong Python environment**
 Activate `python314` before starting local Python or JupyterLab and verify the
 selected kernel's `sys.executable`. `c.ingest()` blocks until it completes;
-`c.ingest_background(..., options=IngestOptions(...))` starts a detached child
+`c.ingest_background(sources)` starts a detached child
 using that interpreter. Poll `c.job_status(job_id)` and inspect
 `<case>/jobs/<job_id>.log` on failure. After phase `done`, reopen the case for
 fresh query views. Background execution does not reduce memory requirements
 or implement recovery; avoid concurrent writes to the same case.
 
 **Why are there `.arrow` files, and why is staging still large?**
-Auxiliary sources use `staging_format="auto"`: Arrow IPC/ZSTD for source files
-at least 16 MiB and gzip NDJSON for smaller files. `"arrow"` and `"ndjson"`
-force either path; EVTX still uses NDJSON. Each ingest path stages its inputs
-before conversion, and staging is kept by default. `keep_staging=False`
-deletes that run's shards after successful conversion, not as a disk-space
-backpressure mechanism. Reserve source, staging, Parquet and temporary space.
+Compatible local Web/IIS sources automatically bypass staging. Other sources
+use `staging_format="auto"`: Arrow IPC/ZSTD at 16 MiB or more, gzip NDJSON below
+that; EVTX remains NDJSON. These sources still finish staging before conversion,
+so temporary disk usage can grow with the staged dataset. Successful conversion
+removes those shards by default. `keep_staging=True` retains intermediates and
+selects staging; it never deletes source evidence. Reserve source, staging,
+Parquet and temporary space even with automatic cleanup.
 
 **A file I expected to be ingested shows up under "files unrecognized"**
 Its content didn't match any supported format's detection (see the

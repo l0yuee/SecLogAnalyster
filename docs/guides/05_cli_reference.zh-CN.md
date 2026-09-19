@@ -40,14 +40,14 @@ seclogx case info incident42
 | `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。`:HOST` 可显式指定主机标签；省略时使用来源根路径的名称，直接传入文件时就是文件名。含空格路径请加引号。 |
 | `--workers N` | 最多 8 | EVTX 与辅助通路共享的本地解析工作进程总预算。`1` 表示在调用方进程中暂存，且两条通路串行运行；文件分类另有有界线程池。 |
 | `--keep-raw` | 关闭 | 仅 EVTX：将原始 XML 写入 `raw_xml` 列，会增加 XML 解析和磁盘索引开销，实际成本随记录而异。 |
-| `--keep-staging` / `--no-keep-staging` | 保留 | 转换后是否保留 EVTX NDJSON、辅助 NDJSON/Arrow 分片。删除发生在转换后，不能消除暂存磁盘峰值；保留分片不代表支持自动续跑。 |
+| `--keep-staging` / `--no-keep-staging` | 删除 | 默认在转换成功后删除临时分片，不删除原始证据。`--keep-staging` 保留中间文件并自动选择暂存路径。清理不能消除暂存峰值，也不提供续跑。 |
 | `--memory-limit SIZE` | `2GB` | 单个 DuckDB 转换连接的受管内存预算，不是进程树 RSS 硬上限。 |
 | `--duckdb-threads N` | `2` | 单个 DuckDB 转换使用的线程数，与解析工作进程预算独立。 |
 | `--staging-chunk-mb N` | `64` | 单个暂存分片未压缩大小的目标值，单位实际为 MiB（1,048,576 字节）；不会拆开完整记录。 |
 | `--flatten-batch-mb N` | `256` | 单组转换的未压缩大小目标，单位为 MiB；单个暂存分片不可再拆分。 |
 | `--staging-format FORMAT` | `auto` | 辅助暂存格式：`auto` 对 >=16 MiB 的来源使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；`arrow` 或 `ndjson` 可强制指定。EVTX 仍使用 NDJSON。 |
-| `--parser-backend BACKEND` | `python` | 默认使用 Python 兼容解析。显式选择 `auto` 时在兼容来源上使用原生，否则使用 Python；`native` 要求每个已识别辅助来源均支持原生解析。未启用直接转换时，原生解析使用 Arrow 暂存。EVTX 保持现有解析器。 |
-| `--direct-parquet` | 关闭 | 兼容的原生 Web 访问/IIS 来源直接转换为 Parquet。要求 `--no-keep-staging`、本地存储、未配置 broker，且后端为 `auto` 或 `native`。小文件同样可用；暂存格式只影响回退及其他来源。 |
+| `--parser-backend BACKEND` | `auto` | 高级诊断覆盖：默认兼容时自动使用原生，否则使用 Python。`python` 强制兼容解析；`native` 要求每个已识别辅助来源均支持原生。EVTX 保持现有解析器。 |
+| `--direct-parquet` / `--no-direct-parquet` | 自动 | 日常无需填写：兼容本地 Web/IIS 自动直接输出，其他情况暂存。正向覆盖严格要求不保留暂存、本地执行/存储、无 broker，后端为 `auto` 或 `native`；反向覆盖强制暂存。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
 | `--background` / `-b` | 关闭 | 将导入过程放到后台进程中执行并立即返回——见下文。 |
 
@@ -55,7 +55,7 @@ seclogx case info incident42
 
 来源目录树只遍历一次，辅助文件的内容前缀分类并行进行。当两条通路都有已识别的任务且 `workers > 1` 时，它们共享预算并发运行；`workers=1` 时串行运行。同一协调进程内的 DuckDB 转换会串行化。辅助 Parquet 在两种暂存格式下均采用 ZSTD level 1。字节目标限制工作分组，并非解析器、Arrow、DuckDB 或整个进程树的内存上限。
 
-启用 `--parser-backend auto --direct-parquet --no-keep-staging` 后，普通辅助来源先在工作池中完成暂存，随后
+默认自动选择本地直接转换时，普通辅助来源先在工作池中完成暂存，随后
 直接来源由协调器逐个转换，与 EVTX 和暂存转换共享转换锁。来源哈希和严格编码准备仍然
 保留。`auto` 遇到组件、编码或语法不兼容时，会复用同一准备对象，整源回退到 Python 暂存；
 严格 `native` 则失败。逐文件 `parser_backend` / `backend_reason` 记录解析选择，
@@ -77,14 +77,14 @@ seclogx ingest incident42 \
   --source /mnt/kape_output/DC01:DC01 \
   --source /home/analyst/manual_copy/extra_logs:WKS01
 
-# 对一小部分高价值证据保留原始 XML；使用更多工作进程
-seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
+# 对一小部分高价值证据保留原始 XML
+seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw
 
-# 另一种本地 Web 导入方式：原生直接输出，保留 Python 兼容回退
-seclogx ingest web_direct --source /evidence/web:WEB01 --parser-backend auto --direct-parquet --no-keep-staging
+# 本地 Web/IIS 自动使用兼容的原生直接输出路径
+seclogx ingest web_case --source /evidence/web:WEB01
 
-# 另一种选择：在新 Case 后台导入，按可用资源设置预算
-seclogx ingest large_case --source /evidence/full_kape_output --background --workers 8 --memory-limit 4GB --duckdb-threads 8 --staging-format auto
+# 另一种选择：在新 Case 后台导入，使用自动默认设置
+seclogx ingest large_case --source /evidence/full_kape_output --background
 seclogx ingest-status large_case --watch
 ```
 

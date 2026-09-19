@@ -37,16 +37,17 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
 
 **Jupyter 一直忙碌，或内核使用了错误的 Python 环境**
 启动本地 Python 或 JupyterLab 前激活 `python314`，并检查所选内核的 `sys.executable`。
-`c.ingest()` 会阻塞直到完成；`c.ingest_background(..., options=IngestOptions(...))`
+`c.ingest()` 会阻塞直到完成；`c.ingest_background(sources)`
 使用同一解释器启动独立后台进程。通过 `c.job_status(job_id)` 查看进度，失败时检查
 `<case>/jobs/<job_id>.log`。阶段为 `done` 后重新打开 Case，以建立最新查询视图。
 后台执行不会降低内存需求，也不提供自动恢复；避免同时向同一 Case 写入。
 
 **为什么出现 `.arrow` 文件，暂存为什么仍然很大？**
-辅助来源默认 `staging_format="auto"`：达到 16 MiB 的来源文件使用 Arrow IPC/ZSTD，
-较小来源使用 gzip NDJSON；`"arrow"` 或 `"ndjson"` 可以强制选择。EVTX 仍使用 NDJSON。
-每条导入通路先暂存输入，再转换，且默认保留暂存。`keep_staging=False` 在本轮转换成功后删除分片，
-不是磁盘背压机制。磁盘预算应同时覆盖来源、暂存、Parquet 与临时空间。
+兼容的本地 Web/IIS 来源自动跳过暂存。其他来源使用 `staging_format="auto"`：达到
+16 MiB 时采用 Arrow IPC/ZSTD，较小时采用 gzip NDJSON，EVTX 仍是 NDJSON。
+这些来源仍先完成暂存再转换，因此临时磁盘需求可随完整暂存数据增长。转换成功后默认
+删除分片；`keep_staging=True` 会保留中间文件并选择暂存路径，不会删除原始证据。
+即使自动清理，也应为来源、暂存、Parquet 与临时文件共同预留空间。
 
 **某个原本期望被导入的文件出现在“无法识别”列表中**
 说明它的内容没有匹配任何已支持格式的检测规则（详见下文的已知限制部分）。常见原因包括：nginx/Apache

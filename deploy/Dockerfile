@@ -4,21 +4,42 @@
 # in docker-compose.yml/the Kubernetes Deployment picks the role; nothing
 # in the image itself is role-specific.
 #
-# The whole repo is copied in (not just the built wheel) because the
-# bundled Sigma rule set is located at runtime relative to the package's
-# source checkout (see src/seclogx/config.py's REPO_ROOT/
-# BUNDLED_SIGMA_RULES_DIR) -- the same "run from an editable install
-# inside the checkout" requirement documented in
-# docs/guides/01_getting_started.md applies here too.
-FROM python:3.12-slim
+# The installed main package includes native parsing and bundled detection data.
+FROM rust:1-bookworm AS rust-toolchain
+
+FROM python:3.12-slim-bookworm AS build
+
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/opt/venv/bin:/usr/local/cargo/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /opt/venv
 
 WORKDIR /opt/seclogx
 
 COPY . .
 
-# --no-cache-dir keeps the image smaller; the project itself has very
-# few runtime dependencies (see pyproject.toml) so this stays quick.
-RUN pip install --no-cache-dir -e ".[cluster]"
+# Compile the bundled native extension during the image build. Runtime
+# containers only need the installed environment.
+RUN pip install --no-cache-dir ".[cluster]"
+
+FROM python:3.12-slim-bookworm
+
+ENV PATH=/opt/venv/bin:$PATH
+WORKDIR /opt/seclogx
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /opt/venv /opt/venv
+
+RUN python -c "from seclogx._native_backend import API_VERSION; from seclogx.config import BUNDLED_SIGMA_RULES_DIR; assert API_VERSION == 1; assert BUNDLED_SIGMA_RULES_DIR.is_dir()"
 
 # No default case-root/volume is declared here -- mount one at
 # `/opt/seclogx/cases` (or point --case-root elsewhere) if you want

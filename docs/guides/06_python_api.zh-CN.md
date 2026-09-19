@@ -11,72 +11,79 @@ Python API 为 Notebook 和脚本提供 DataFrame、分块迭代器、导入报�
 
 ## Notebook 环境
 
-使用本项目独立于 `base` 的 conda `python314` 环境：
+先按[安装指南](01_getting_started.zh-CN.md#安装)一次性准备环境；源码安装需要 Rust/Cargo
+和对应平台的编译工具。正常安装主包就已包含原生解析器。随后在专用环境启动 Jupyter：
 
 ```bash
 conda activate python314
-python -m pip install -e .
 python -m jupyterlab
 ```
 
-这些命令要求该环境中已安装 JupyterLab 和 `ipykernel`。若内核列表没有对应选项，可执行 `python -m ipykernel install --user --name python314 --display-name "Python (python314)"` 注册。选择该内核后，在单元格中运行 `import sys; print(sys.executable)` 确认解释器。非交互脚本使用 `conda run --no-capture-output -n python314 python ...`。后台导入启动当前解释器，因此 Notebook 内核环境也决定后台导入的 Python 环境。
+选择 **Python (python314)** 内核，并在单元格中检查 `sys.executable`。
+安装指南包含 JupyterLab/ipykernel 安装与内核注册。重建或升级包后应重启已有内核。
+后台导入沿用所选内核的解释器。
 
-## Notebook 大批量导入的资源设置
+## 在 Notebook 中导入
 
 ```python
-from seclogx import Case, IngestOptions
+from seclogx import Case
 
 c = Case.create("large_case")  # 后续会话用 Case.open("large_case")
-options = IngestOptions(
-    memory_limit="2GB",
-    threads=2,
-    staging_chunk_bytes=64 * 1024 * 1024,
-    flatten_batch_bytes=256 * 1024 * 1024,
-    staging_format="auto",
-)
-report = c.ingest([r"E:\evidence:HOST01"], workers=2, options=options)
+report = c.ingest([r"E:\evidence:HOST01"])
 print(report.summary_text())
 ```
 
-示例中的 `IngestOptions` 是库的默认值，`workers=2` 则显式设置解析并行度。`workers` 是两条通路共享的本地解析总预算；`workers=1` 在调用方进程中串行执行。`threads` 和 `memory_limit` 作用于单个 DuckDB 转换，同一个 Notebook 进程中的转换会串行运行，独立后台任务则各有预算。这些配置用于导入转换，不作用于之后的分析查询。**2GB 不是内核及工作进程总 RSS 的硬上限**。两个字节参数分别设置未压缩暂存分片和转换分组的目标大小，完整记录及分片不会被切断。
+无需填写性能参数。兼容的本地 UTF-8 Common/Combined 和 IIS 来源自动使用 Rust 解析、
+有界 Arrow 批次与直接 Parquet 输出；其他格式及不兼容输入自动使用 Python 兼容解析。
+来源哈希、编码检查和规范化 SQL 保持不变。正常安装包含原生扩展；运行时无法加载时，
+自动模式会回退并记录原因。
 
-默认 `staging_format="auto"` 按每个受支持的辅助来源文件大小选择：达到 16 MiB 时使用 Arrow IPC / ZSTD level 1，小于 16 MiB 时使用 gzip NDJSON。也可显式设为 `"arrow"` 或 `"ndjson"`。EVTX 暂存仍使用 NDJSON；辅助来源生成的 Parquet 在两种暂存路径下均使用 ZSTD level 1。两条路径都保留固定文本输入列和相同的 SQL 规范化规则。
+默认设置为 `parser_backend="auto"`、`direct_parquet=None`（自动选择）、
+`keep_staging=False`。本地执行、本地存储且无 broker 时，自动启用兼容来源的直接转换。
+要求保留暂存或使用分布式/对象存储时，自动改用暂存路径。默认在转换成功后删除暂存分片，
+**不会删除原始证据**。仅在诊断需要中间文件时传入 `keep_staging=True`；这是对旧版
+“默认保留暂存”行为的调整。
 
-`parser_backend="python"` 默认保留 Python 兼容路径。显式选择 `"auto"` 时，对兼容的 UTF-8 Common/Combined 和 IIS 日志，在暂存路径使用 Arrow 且已安装独立原生组件时选择原生解析，其他输入回退到 Python。`"native"` 要求每个已识别辅助来源都能使用原生解析，否则失败。暂存路径对小文件强制使用原生解析时还应设置 `staging_format="arrow"`。详见[原生解析选择与回退](08_performance_and_scale.zh-CN.md#可选原生解析器)。后台任务和分布式文件 worker 同样接收此选项；存在 `report.aux` 时，可通过 `report.aux.to_dataframe()` 的 `parser_backend` / `backend_reason` 列查看实际选择。
-
-兼容的原生 Web 访问/IIS 来源可选择本地直接转换。开始一次新导入时，可用以下调用替代上面的暂存示例：
+需要保持 Notebook 可操作时，用下面的调用**替代**前台导入：
 
 ```python
-web_case = Case.create("web_direct")
-report = web_case.ingest(
-    [r"E:\evidence\web:HOST01"],
-    keep_staging=False,
-    options=IngestOptions(parser_backend="auto", direct_parquet=True),
-)
+job_id = c.ingest_background([r"E:\evidence:HOST01"])
+c.job_status(job_id)
 ```
 
-`direct_parquet` 默认为 `False`。启用后要求本地存储、未配置 broker、`keep_staging=False`，
-且 `parser_backend` 为 `"auto"` 或 `"native"`。小文件也可直接转换，无需强制 Arrow 暂存。
-`auto` 模式遇到组件、编码或语法不兼容时，会复用同一来源准备对象，整源回退到 Python；
-`staging_format` 控制这些回退及其他来源。普通工作池关闭后，直接来源由协调器逐个处理，
-与 EVTX 和暂存转换共享 DuckDB 转换锁。来源哈希和编码预读仍保留。
-后台 `ingest_background()` 同样支持这些选项，并须传入 `keep_staging=False`；CLI 对应
-`--parser-backend auto --direct-parquet --no-keep-staging`。
+等状态为 `done`、检查日志与逐文件报告后，再重新打开 Case 建立最新查询视图。
+`done` 可能仍包含部分恢复、失败或未知来源。可捕获异常会标记为 `failed`，强制终止
+则可能留下过期状态。日志和状态快照位于 `c.case_dir / "jobs"`；不存在的任务返回 `None`。
+前台与后台是替代用法，不要对同一份证据依次导入，否则可能追加重复记录。
+两者均不提供自动续跑、提前查询保证或整次导入的原子可见性。
 
-辅助报告中的 `output_format` 和 `parquet_paths` 区分直接 Parquet 与暂存输出，
-`parser_backend` 和 `backend_reason` 则单独说明解析选择。直接来源的私有 Parquet 在关闭和
-来源核验后才发布；普通解析错误可以保留 `partial` 前缀。这不是整次导入事务，也不支持自动续跑。
-详见[直接转换边界](08_performance_and_scale.zh-CN.md#可选直接-parquet-转换)。
+存在 `report.aux` 时，`report.aux.to_dataframe()` 的 `parser_backend` /
+`backend_reason` 说明实际解析器，`output_format` / `parquet_paths` 说明输出形式。
+直接来源的私有 Parquet 在关闭及来源核验后发布；普通解析错误可以保留完整前缀并标记
+`partial`。其他格式与兼容回退仍先暂存再转换。详见[性能与规模](08_performance_and_scale.zh-CN.md)。
 
-若工作站有足够空闲内存和 CPU，可选用 `IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")`，并将导入的 `workers` 设为 `8`。库的通用默认值仍为 2GB 和两个转换线程，也不构成进程 RSS 上限；需要给 Notebook、解析进程和其他程序预留内存。
+## 高级资源与诊断控制
 
-需要后台执行时，将前台调用替换为 `job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`，然后用 `c.job_status(job_id)` 查看状态。不要对同一份证据先后执行两种导入：当前没有跨批次去重或续跑。默认仍保留暂存，单独设置 `keep_staging=False` 只在转换成功后删除，既不绕过暂存，也不能消除暂存磁盘峰值。解析限制和编码验证 I/O 见[性能与规模](08_performance_and_scale.zh-CN.md)。
+`IngestOptions` 用于部署预算和故障诊断，不是分析员的必填流程。默认最多使用八个本地
+解析 worker，`memory_limit="2GB"`、`threads=2`，暂存目标 64 MiB、转换分组目标
+256 MiB。**2GB 不是 Notebook 或进程树 RSS 的硬上限**；解析器、Arrow、原生分配、
+其他查询与独立后台任务都需要额外内存。`workers` 由 EVTX 与辅助解析共享；
+`workers=1` 在调用进程串行执行。转换线程数是另一项预算。
 
-走暂存路径的来源先完成暂存再转换；只有显式启用的直接路径会为兼容来源绕过分片。后台执行并不提供提前查询保证，也不保证正在写入的数据湖呈现原子快照。应等状态为 `done`、检查任务日志与逐文件报告后再重新打开 Case。`done` 也可能包含部分恢复、失败或无法识别的来源文件。可捕获异常会标记为 `failed`；强制终止或状态写入失败可能留下过期快照，当前没有独立的存活监督器或自动续跑。状态与标准输出/错误位于 `c.case_dir / "jobs"`；找不到任务时 `job_status()` 返回 `None`。重新打开 Case 可避免后台导入前已创建对象中的缓存视图过期。
+| 覆盖设置 | 用途 |
+| --- | --- |
+| `IngestOptions(parser_backend="python")` | 通过 Python 兼容路径排查解析差异，同时关闭自动直接输出。 |
+| `IngestOptions(parser_backend="native")` | 要求每个已识别辅助来源均支持原生；含不兼容来源的混合输入会失败。 |
+| `IngestOptions(direct_parquet=False)` | 为诊断强制走暂存路径。 |
+| `IngestOptions(direct_parquet=True)` | 严格要求执行配置兼容；保留暂存、非本地存储、配置 broker 或纯 Python 后端均报错。`auto` 下单个不兼容输入仍可回退。 |
+| `c.ingest(sources, keep_staging=True)` | 保留中间分片并自动走暂存路径，不影响原始来源。 |
 
-CLI 对应参数为 `--staging-format auto`，也接受 `arrow`、`ndjson`，配合 `--background` 同样有效。辅助文本导入会在一次读取中完成 SHA-256 和严格 UTF-8 验证，其他编码保留严格回退读取；有界分区清单完整时，也会省去 Windows 上通常需要的额外分区预扫，旧清单、不支持或超出上限的元数据仍走兼容扫描。
+`staging_format="auto"` 只影响需要暂存的来源：达到 16 MiB 时采用 Arrow IPC/ZSTD，
+较小时采用 gzip NDJSON；`"arrow"` / `"ndjson"` 可强制格式，EVTX 仍为 NDJSON。
+暂存路径严格使用原生解析时必须选择 Arrow，小文件也如此；直接输出没有这一小文件门槛。
 
-导入完成后，无范围限制的 `c.query()`、`c.web_logs()` 仍会构造完整 DataFrame，可能耗尽 Jupyter 内核内存。应先用 SQL 筛选，或逐批消费 `c.query_chunks()`、`c.web_logs_chunks()`；导入预算不会限制返回的 DataFrame 大小。分块按行数而非字节数限制，应按记录宽度设置 `chunksize`，并在处理后释放每块。
+导入后的无限制 `c.query()`、`c.web_logs()` 仍会构造完整 DataFrame。先过滤或逐批消费
+`query_chunks()` / `web_logs_chunks()`；导入预算不限制分析结果大小。
 
 ## 常规 API 示例
 
@@ -100,7 +107,7 @@ CLI 对应参数为 `--staging-format auto`，也接受 `arrow`、`ndjson`，配
 > ```
 
 ```python
-from seclogx import Case, IngestOptions
+from seclogx import Case
 
 # 创建或打开一个案例
 c = Case.create("incident42")          # 首次创建
@@ -109,7 +116,6 @@ c = Case.create("incident42")          # 首次创建
 # 导入（语义与命令行一致；接受 "PATH" 或 "PATH:HOST" 字符串）
 report = c.ingest(
     ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
-    workers=8,
     on_progress=lambda snapshot: print(snapshot["phase"], snapshot.get("files_scanned", 0)),
 )
 print(report.summary_text())
@@ -124,8 +130,6 @@ report.aux.to_dataframe()              # 已发现的辅助候选文件及其状
 ```python
 job_id = c.ingest_background(
     ["/mnt/kape_output/WKS01:WKS01", "/mnt/kape_output/DC01:DC01"],
-    workers=8,
-    options=IngestOptions(staging_format="auto"),
 )
 c.job_status(job_id)                   # dict 快照；任务不存在则返回 None
 c.job_status()                         # 最近一次启动的任务
@@ -229,7 +233,7 @@ with Case.open("incident42") as c:
 |---|---|
 | 生命周期 | `Case.create(name, case_root=, cluster_config=)`、`Case.open(name, case_root=, cluster_config=)`、`Case.list_cases(case_root=)`、`c.info()` |
 | 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`；`c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`；`c.job_status(job_id=)` -> `dict \| None`；`c.list_jobs()` -> `list[dict]` |
-| 导入资源 | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="python", direct_parquet=False)` |
+| 导入资源 | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="auto", direct_parquet=None)` |
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
 | 原生 SQL | `c.query(sql)`、`c.query_chunks(sql, chunksize=)`、`c.db.table(name)`、`c.db.table_chunks(name, chunksize=)` |

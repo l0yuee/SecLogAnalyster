@@ -1,7 +1,7 @@
-# Optional native parsing
+# Native parsing and build notes
 
-`seclogx-native` supplies bounded UTF-8 CLF/Combined and IIS W3C parsers to
-`seclogx`. It leaves the public Python, Jupyter, Case and query interfaces in
+The main `seclogx` installation includes bounded Rust UTF-8 CLF/Combined
+and IIS W3C parsers as `seclogx._native`. It leaves the public Python, Jupyter, Case and query interfaces in
 the main package. Other formats and encodings continue through the Python
 parsers. The adapter chooses the backend and owns source verification, staging,
 partition metadata and final publication.
@@ -12,16 +12,17 @@ detached from Python. `next_batch()` returns an object accepted by
 `pyarrow.array()` and describes the exact original compact JSON record sizes.
 No row dictionaries or row callbacks cross the Python boundary. Exported Arrow
 buffers are reference counted and outlive both the reader and batch wrappers.
-Capsules stay within one process: a file worker for the default staging path,
+Capsules stay within one process: a file worker for the staged path,
 or the direct conversion coordinator. They never carry buffers between
 processes.
 
-The main package also offers
-`IngestOptions(parser_backend="auto", direct_parquet=True)` together with
-`keep_staging=False` for eligible local sources. This optional path sends the
-same batches directly to DuckDB and writes private Parquet files, publishing
-each source only after conversion and source verification finish. Staging
-remains the default. The companion's parser and batch contract are unchanged.
+Normal `Case.ingest(sources)` and `ingest_background(sources)` calls automatically
+use native Arrow-to-DuckDB conversion for compatible local sources and publish
+private Parquet after conversion and source checks finish. Other inputs and
+execution contexts use the staged compatibility path. `parser_backend="auto"`,
+`direct_parquet=None` and `keep_staging=False` are defaults; advanced overrides
+remain for diagnostics. No accelerator installation or per-import switch is
+required. The parser and batch contract are the same on staged and direct paths.
 
 Normal batches contain at most 16,384 rows and an estimated 16 MiB of Arrow
 buffers. A single larger record can occupy a batch by itself, subject to the
@@ -45,37 +46,57 @@ restarting its Python parser. Disk and
 source-integrity errors must never trigger this fallback. A fatal parse error
 returns a pending valid prefix first, then raises on the next batch call.
 
-## Building
+## Installation and building
 
-The companion wheel builds independently of the main setuptools project. Use a
-Rust toolchain and the platform C linker (MSVC Build Tools on Windows). The
-build uses Python's stable ABI for GIL-enabled CPython 3.10 and newer; it does
-not claim support for the distinct free-threaded ABI. This is a build target,
-not a statement that every Python/PyArrow/platform combination has been tested.
-Build and verify a
-platform wheel before distribution; installing that wheel does not require
-Rust on the user's machine.
+Follow the complete installation instructions in the [English guide](../docs/guides/01_getting_started.md#install)
+or [中文指南](../docs/guides/01_getting_started.zh-CN.md#安装). Source installation
+needs stable Rust/Cargo and a platform C/C++ compiler/linker: Visual Studio
+Build Tools with MSVC and Windows SDK on Windows, GCC or Clang on Linux, and
+Xcode command-line tools on macOS. Pip installs the maturin build backend.
 
-Install directly from this repository when the Rust and C/C++ build toolchains
-are available:
+Run from the repository root:
 
 ```powershell
-conda run --no-capture-output -n python314 python -m pip install ./native
+conda run --no-capture-output -n python314 python -m pip install -e .
 ```
 
-This is an independent, optional local package. These instructions do not
-require or imply that a package has been published on PyPI. Restart existing
-Jupyter kernels after installing or replacing the native extension.
+This builds the release extension and installs it with the Python package.
+`pip install .` does the same for a regular installation. Rules and reference
+data are included in normal wheels. No separate `pip install ./native` is
+needed. The old standalone `seclogx-native` build remains a developer compatibility
+target; the main adapter prefers its bundled extension.
 
-From the repository root, in a build environment with maturin installed:
+The build targets Python's stable ABI for GIL-enabled CPython 3.10 and newer,
+not the distinct free-threaded ABI. This is a build target, not a claim that
+every Python/PyArrow/platform combination has been tested. Existing Jupyter
+kernels must restart after installing or replacing the extension.
+
+To build a deployable platform wheel from the repository root:
 
 ```powershell
-conda run --no-capture-output -n python314 python -m maturin build --release --locked --manifest-path native/Cargo.toml --interpreter python
+conda run --no-capture-output -n python314 python -m pip wheel --no-deps . --wheel-dir dist
 ```
 
-The interpreter resolves inside the selected environment. Do not build a debug wheel for performance
-measurements. `API_VERSION` identifies the small adapter contract; unsupported
-versions must be rejected before any records are staged.
+An analyst installing the completed matching wheel does not need Rust/C++
+build tools for seclogx itself. Dependency wheels and platform runtime libraries
+still need to be available. These instructions do not imply a public wheel has
+already been published. Without Cargo, maturin may acquire a temporary Rust
+toolchain during the build; setting `MATURIN_NO_INSTALL_RUST=1` disables that
+acquisition. An offline source build needs a prepared Rust/compiler toolchain,
+Python build/runtime dependencies and Cargo's cached crates. There is no runtime
+compiler or accelerator download, and native build failures do not silently
+install a Python-only package.
+
+For extension development with maturin already installed, the root build is:
+
+```powershell
+conda run --no-capture-output -n python314 python -m maturin build --release --locked --interpreter python
+```
+
+The interpreter resolves inside the selected environment. Rust source changes
+need a new build/install, including with editable installation. Do not use a
+debug wheel to assess release performance. `API_VERSION` identifies the adapter
+contract; unsupported versions must be rejected before records are staged.
 
 The release profile retains line tables for native stack diagnosis without
 changing its optimization level. On MSVC builds the matching PDB is a separate

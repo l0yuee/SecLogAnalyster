@@ -1,4 +1,4 @@
-"""Optional batch parser adapter; Python remains the compatibility path.
+"""Automatic batch parser adapter; Python remains the compatibility path.
 
 Native producers and Arrow consumers run in the same file worker or direct
 conversion coordinator. Only the source manifest crosses a process boundary,
@@ -37,6 +37,22 @@ class NativeSelection:
     reason: str | None = None
 
 
+def load_native_component() -> NativeSelection:
+    """Probe the extension API without reading or hashing a source file."""
+    try:
+        module = importlib.import_module("seclogx._native_backend")
+    except (ImportError, OSError) as exc:
+        return NativeSelection(None, f"native component unavailable: {exc}")
+    if getattr(module, "API_VERSION", None) != 1:
+        return NativeSelection(None, "unsupported native API version")
+    unsupported = getattr(module, "UnsupportedInputError", None)
+    if (not callable(getattr(module, "open_web_file", None))
+            or not isinstance(unsupported, type)
+            or not issubclass(unsupported, Exception)):
+        return NativeSelection(None, "incomplete native API")
+    return NativeSelection(module)
+
+
 def select_native_parser(
     cf: ClassifiedFile, prepared: PreparedText | None,
     options: IngestOptions, *, arrow_staging: bool,
@@ -56,18 +72,10 @@ def select_native_parser(
         return unavailable("native parser requires validated UTF-8")
     if not arrow_staging:
         return unavailable("native parser requires Arrow staging")
-    try:
-        module = importlib.import_module("seclogx_native")
-    except (ImportError, OSError) as exc:
-        return unavailable(f"optional seclogx_native component unavailable: {exc}")
-    if getattr(module, "API_VERSION", None) != 1:
-        return unavailable("unsupported seclogx_native API version")
-    unsupported = getattr(module, "UnsupportedInputError", None)
-    if (not callable(getattr(module, "open_web_file", None))
-            or not isinstance(unsupported, type)
-            or not issubclass(unsupported, Exception)):
-        return unavailable("incomplete seclogx_native API")
-    return NativeSelection(module)
+    selection = load_native_component()
+    if selection.module is None:
+        return unavailable(selection.reason)
+    return selection
 
 
 @contextmanager

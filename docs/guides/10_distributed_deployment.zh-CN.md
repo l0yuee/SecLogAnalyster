@@ -35,6 +35,9 @@ DuckDB 路径。
 
 ## 安装
 
+每台从本仓库源码安装的机器都应先按[安装指南](01_getting_started.zh-CN.md#安装)
+一次性准备构建工具。主包已包含原生扩展，cluster 额外依赖仅增加分布式组件。
+
 ```bash
 conda activate python314
 python -m pip install -e ".[cluster]"
@@ -73,10 +76,11 @@ S3 只共享 Parquet 数据湖，不负责传输来源或暂存分片，也不�
 不会通过 Redis 上传证据或返回文件内容。只在协调端容器挂载路径是不够的。跨平台路径表示也必须一致，
 因此 Linux 容器 worker 通常配合 Linux 容器协调端更容易配置。
 
-暂存保存解析后的数据集，体积可能很大。每条导入通路先完成暂存，再分组转换，没有磁盘背压。
+分布式与对象存储配置会自动选择暂存路径。暂存保存解析后的数据集，体积可能很大。每条导入通路先完成暂存，再分组转换，没有磁盘背压。
 辅助来源默认 `auto`：达到 16 MiB 的来源文件使用 Arrow IPC/ZSTD，较小来源用 gzip NDJSON；
-EVTX 保持 NDJSON。即使 `keep_staging=False`，也要为共享暂存、Parquet 和临时文件预留空间，
-因为删除发生在转换成功之后。分布式狩猎还要求 worker 能够访问任务中指定的案例和自定义规则路径。
+EVTX 保持 NDJSON。默认 `keep_staging=False` 也要为共享暂存、Parquet 和临时文件预留空间，
+因为删除发生在转换成功之后。`keep_staging=True` 用于诊断保留，不影响原始证据。
+分布式狩猎还要求 worker 能够访问任务中指定的案例和自定义规则路径。
 
 ## `seclogx worker`
 

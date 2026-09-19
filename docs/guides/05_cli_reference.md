@@ -57,6 +57,8 @@ core command.
 | `--staging-chunk-mb N` | `64` | Target uncompressed MiB per staging shard; a record is never split. Despite the flag name, one unit is 1,048,576 bytes. |
 | `--flatten-batch-mb N` | `256` | Target uncompressed MiB per conversion group; an individual staging shard remains indivisible. |
 | `--staging-format FORMAT` | `auto` | Auxiliary staging: `auto` selects Arrow IPC / ZSTD level 1 for sources >=16 MiB, gzip NDJSON otherwise; `arrow` or `ndjson` forces a format. EVTX remains NDJSON. |
+| `--parser-backend BACKEND` | `python` | Python compatibility parsing by default. Explicit `auto` uses native where compatible and otherwise Python; `native` requires native support for each recognized auxiliary source. Native parsing uses Arrow staging unless direct conversion is enabled. EVTX keeps its existing parser. |
+| `--direct-parquet` | off | Convert compatible native web access/IIS sources directly to Parquet. Requires `--no-keep-staging`, local storage, no broker and backend `auto` or `native`. Small sources are eligible; staging format applies only to fallback and other sources. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
 | `--background` / `-b` | off | Detach the import into a background process and return immediately -- see below. |
 
@@ -72,14 +74,26 @@ DuckDB conversions within one coordinator process are serialized. Auxiliary
 Parquet uses ZSTD level 1 regardless of staging format. Byte targets bound work
 groups, not total parser, Arrow, DuckDB, or process-tree memory.
 
+With `--parser-backend auto --direct-parquet --no-keep-staging`, ordinary auxiliary sources finish
+worker-pool staging first, then direct sources run sequentially in the
+coordinator. Direct conversion shares the conversion lock with EVTX and staged
+flattening. It retains source hashing and strict encoding preparation. In
+`auto` mode an incompatible component, encoding or syntax triggers a complete
+Python staging replay using the same preparation; strict `native` fails.
+Per-file `parser_backend` / `backend_reason` record that selection separately
+from `output_format` / `parquet_paths`.
+
 Foreground progress reports the phase, walked/classified/staged counts and rows
 written by table. These are file/batch progress counters, not byte-level progress
 or an ETA; a large file can take time without advancing them. See
 [08. Performance & scale](08_performance_and_scale.md).
 
 Every invocation appends a new batch. Cross-run deduplication and checkpoint/resume
-are not implemented. Each pipeline stages its batch before conversion; neither
-`--background` nor retained staging provides early-query or atomic-publication
+are not implemented. Staged sources finish staging before conversion. Direct
+sources publish a private Parquet file after closure and source checks, and
+may report an accepted prefix as `partial`; this is not an atomic whole-ingest
+commit. A crash can leave `_ingest_private` files without automatic recovery.
+Neither `--background` nor retained staging provides early-query or snapshot
 guarantees. Wait for completion and inspect the report before querying the Case.
 
 Examples:
@@ -96,6 +110,9 @@ seclogx ingest incident42 \
 
 # Keep raw XML for a small, high-value evidence set; use more workers
 seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
+
+# Alternative local web import: native direct output with Python compatibility replay
+seclogx ingest web_direct --source /evidence/web:WEB01 --parser-backend auto --direct-parquet --no-keep-staging
 
 # Alternative large import in a new case; choose budgets for available resources
 seclogx ingest large_case --source /evidence/full_kape_output --background --workers 8 --memory-limit 4GB --duckdb-threads 8 --staging-format auto

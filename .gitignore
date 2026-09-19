@@ -7,6 +7,15 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+*.pyd
+*.pdb
+/native/target/
+/native/wheels/
+/native/.venv/
+/native/tests/
+/native/python/**/*.so
+/native/python/**/*.dylib
+/native/python/**/*.dll
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -34,7 +43,7 @@ htmlcov/
 /scripts/scale_dataset.py
 /scripts/scale_validation.py
 /scripts/profile_ingest_stage.py
-/tests/unit/test_benchmark_ingest_compare.py
+/tests/unit/test_benchmark_*.py
 /tests/unit/test_scale_dataset.py
 /tests/unit/test_scale_validation.py
 

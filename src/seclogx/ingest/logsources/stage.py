@@ -20,10 +20,11 @@ from pathlib import Path
 from ..resources import IngestOptions
 from ..staging import StagingWriter
 from ..arrow_staging import ArrowStagingWriter
-from ...textdecode import prepare_text, use_prepared_text
+from ...textdecode import PreparedText, _verify_prepared, prepare_text, use_prepared_text
 
 from .discovery import ClassifiedFile, sha256_file
 from .manifest import AuxStagedFile, StageStatus, now_iso
+from .native import NativeBackendUnavailable, NativeBatchError, select_native_parser, stage_native_batches
 from .partitioning import PartitionCollector
 from .schema import TABLES
 from .parsers.auditd import parse_auditd_file
@@ -102,7 +103,10 @@ def _staging_path(cf: ClassifiedFile, staging_dir: Path, table: str) -> Path:
     return host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson.gz"
 
 
-def stage_aux_file(cf: ClassifiedFile, staging_dir: Path, options: IngestOptions | None = None) -> AuxStagedFile:
+def stage_aux_file(
+    cf: ClassifiedFile, staging_dir: Path, options: IngestOptions | None = None,
+    *, prepared: PreparedText | None = None,
+) -> AuxStagedFile:
     # Checked before hashing: an unrecognized file (PE/ELF binaries and
     # any other non-log content mixed into evidence, which sniff.py
     # already spent only a cheap 16KB peek on) is never staged, and its
@@ -126,12 +130,21 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path, options: IngestOptions
             error_count=0,
             error_message="content did not match any supported log format",
             staged_at=now_iso(),
+            parser_backend="none",
         )
 
-    prepared = None
+    if prepared is not None:
+        if (cf.kind in (KIND_REGISTRY_HIVE, KIND_SCHEDULED_TASK)
+                or prepared.path != cf.path.resolve()
+                or prepared.utf16_requires_bom != (cf.kind in _QCLOUD_STREAM_PARSERS)):
+            raise ValueError("prepared source does not match the parser's source and decoding policy")
+        # A direct-output fallback must reuse the original hash/encoding and
+        # reject source changes, never prepare and silently accept new bytes.
+        _verify_prepared(prepared)
     try:
         if cf.kind not in (KIND_REGISTRY_HIVE, KIND_SCHEDULED_TASK):
-            prepared = prepare_text(cf.path, utf16_requires_bom=cf.kind in _QCLOUD_STREAM_PARSERS)
+            if prepared is None:
+                prepared = prepare_text(cf.path, utf16_requires_bom=cf.kind in _QCLOUD_STREAM_PARSERS)
             file_sha256 = prepared.sha256
         else:
             file_sha256 = sha256_file(cf.path)
@@ -149,19 +162,28 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path, options: IngestOptions
             error_count=0,
             error_message=f"could not read file: {e}",
             staged_at=now_iso(),
+            parser_backend="none",
         )
 
     options = options or IngestOptions()
     table = _table_for_kind(cf.kind)
     staging_path = _staging_path(cf, staging_dir, table)
-    if options.staging_format == "arrow" or (
+    use_arrow = options.staging_format == "arrow" or (
         options.staging_format == "auto" and cf.size_bytes >= AUTO_ARROW_MIN_BYTES
-    ):
+    )
+    if use_arrow:
         staging_path = staging_path.with_name(staging_path.name.removesuffix(".ndjson.gz") + ".arrow")
-        writer = ArrowStagingWriter(staging_path, options.staging_chunk_bytes,
-                                    [col for col, _ in TABLES[table]["columns"]])
-    else:
-        writer = StagingWriter(staging_path, options.staging_chunk_bytes)
+
+    def make_writer():
+        if use_arrow:
+            return ArrowStagingWriter(staging_path, options.staging_chunk_bytes,
+                                      [col for col, _ in TABLES[table]["columns"]])
+        return StagingWriter(staging_path, options.staging_chunk_bytes)
+
+    selection = select_native_parser(cf, prepared, options, arrow_staging=use_arrow)
+    parser_backend = "native" if selection.module is not None else "python"
+    backend_reason = selection.reason
+    writer = make_writer()
     partitions = PartitionCollector(table)
     error_count = 0
     parse_error = None
@@ -178,10 +200,34 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path, options: IngestOptions
         with writer, (use_prepared_text(prepared) if prepared else nullcontext()):
             if cf.kind == KIND_SCHEDULED_TASK and cf.size_bytes > 8 * 1024 * 1024:
                 raise ValueError("Scheduled Task XML exceeds the 8 MiB document limit")
-            _, _, _, error_count = _parse(cf, emit=emit)
-    except OSError:
+            if selection.module is not None:
+                try:
+                    error_count = stage_native_batches(selection.module, cf, prepared, writer, partitions)
+                except selection.module.UnsupportedInputError as exc:
+                    if isinstance(exc, (OSError, NativeBatchError)):
+                        # A broken companion API may expose an overly broad
+                        # exception class. It cannot reclassify fatal errors.
+                        raise
+                    if options.parser_backend == "native":
+                        raise NativeBackendUnavailable(f"native parser cannot handle {cf.path}: {exc}") from exc
+                    # A capability mismatch may occur late in a file. Discard
+                    # every native shard before replaying the whole source;
+                    # an accepted prefix must never be emitted twice.
+                    writer.abort()
+                    parser_backend = "python"
+                    backend_reason = f"native compatibility fallback: {exc}"
+                    writer = make_writer()
+                    partitions = PartitionCollector(table)
+                    with writer:
+                        _, _, _, error_count = _parse(cf, emit=emit)
+            else:
+                _, _, _, error_count = _parse(cf, emit=emit)
+    except (OSError, NativeBackendUnavailable, NativeBatchError):
         # A full disk / write failure is not a recoverable parse error. Do
         # not present potentially damaged staging shards as successful input.
+        # __exit__ has closed the writer and discarded any incomplete shard.
+        # Keep its failed state, accepted counts and completed-shard metadata;
+        # abort() resets those only when deliberately replaying a whole source.
         for chunk in writer.chunks:
             Path(chunk.path).unlink(missing_ok=True)
         raise
@@ -215,6 +261,8 @@ def stage_aux_file(cf: ClassifiedFile, staging_dir: Path, options: IngestOptions
         staged_at=now_iso(),
         chunks=writer.chunks,
         partition_rows=partitions.rows,
+        parser_backend=parser_backend,
+        backend_reason=backend_reason,
     )
 
 

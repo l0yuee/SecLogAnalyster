@@ -104,6 +104,15 @@ installation, scripts, tests and Jupyter. In a noninteractive shell, use
 `conda run --no-capture-output -n python314 python ...`. Run from this checkout
 (editable install) so the bundled Sigma rules under `data/` are found.
 
+An optional Rust parser component can be built from this checkout with
+`python -m pip install ./native` in the same environment. It provides native
+parsing for UTF-8 Common/Combined and IIS access logs through Arrow staging or
+optional direct Parquet conversion while
+preserving the Python and Notebook APIs. A Rust toolchain and a platform C/C++
+linker are required for a source build; see [native component](native/README.md)
+and [parser selection](docs/guides/08_performance_and_scale.md#optional-native-parsers).
+The main package also works without this component.
+
 ## Quickstart
 
 ```bash
@@ -162,6 +171,22 @@ total-process RSS cap. The default `staging_format="auto"` uses Arrow IPC with
 ZSTD level 1 for supported auxiliary sources of at least 16 MiB and gzip NDJSON
 for smaller sources. Explicit `"arrow"` and `"ndjson"` modes are also available;
 EVTX staging remains NDJSON. Auxiliary Parquet output uses ZSTD level 1.
+
+`parser_backend="python"` is the default compatibility path. Explicitly select
+`"auto"` to use the optional native component where compatible and otherwise
+fall back to Python; `"native"`
+requires native support for each recognized auxiliary source and fails when
+unavailable. On the default staged path, use `staging_format="arrow"` with
+strict native selection, including for small files. EVTX retains its existing parser.
+
+For local web access/IIS imports, `IngestOptions(parser_backend="auto", direct_parquet=True)` together
+with `keep_staging=False` enables direct conversion without IPC shards; the
+default is `direct_parquet=False`. The CLI uses `--parser-backend auto --direct-parquet --no-keep-staging`.
+This requires local storage, no broker and backend `auto` or `native`. It works
+for small compatible sources too. Auto mode replays incompatible sources through
+Python staging; other formats still use staging. Hash/encoding preparation
+remains, and source-level publication is not a whole-ingest transaction or
+resume mechanism. See [direct conversion boundaries](docs/guides/08_performance_and_scale.md#optional-direct-parquet-conversion).
 
 If the workstation has enough spare memory and CPU capacity, an optional setting is
 `IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")` with

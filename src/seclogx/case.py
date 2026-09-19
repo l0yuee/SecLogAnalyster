@@ -161,6 +161,7 @@ class Case:
         options = options if options is not None else IngestOptions()
         if not isinstance(options, IngestOptions):
             raise TypeError("options must be an IngestOptions instance")
+        options.validate_execution(keep_staging=keep_staging, cluster_config=self.cluster_config)
         specs = [parse_source_arg(s) if isinstance(s, str) else s for s in sources]
         progress = ProgressReporter(on_update=on_progress) if on_progress is not None else None
 
@@ -304,6 +305,8 @@ class Case:
         CLI's `ingest-status`."""
         if options is not None and not isinstance(options, IngestOptions):
             raise TypeError("options must be an IngestOptions instance")
+        if options is not None:
+            options.validate_execution(keep_staging=keep_staging, cluster_config=self.cluster_config)
         if workers is not None and (isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0):
             raise ValueError("workers must be a positive integer")
         job_id = str(uuid.uuid4())
@@ -322,7 +325,10 @@ class Case:
                 "--staging-chunk-bytes", str(options.staging_chunk_bytes),
                 "--flatten-batch-bytes", str(options.flatten_batch_bytes),
                 "--staging-format", options.staging_format,
+                "--parser-backend", options.parser_backend,
             ]
+            if options.direct_parquet:
+                args += ["--direct-parquet"]
         if keep_raw:
             args += ["--keep-raw"]
         args += ["--keep-staging" if keep_staging else "--no-keep-staging"]

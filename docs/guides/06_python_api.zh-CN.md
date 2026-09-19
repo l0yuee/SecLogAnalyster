@@ -42,11 +42,37 @@ print(report.summary_text())
 
 默认 `staging_format="auto"` 按每个受支持的辅助来源文件大小选择：达到 16 MiB 时使用 Arrow IPC / ZSTD level 1，小于 16 MiB 时使用 gzip NDJSON。也可显式设为 `"arrow"` 或 `"ndjson"`。EVTX 暂存仍使用 NDJSON；辅助来源生成的 Parquet 在两种暂存路径下均使用 ZSTD level 1。两条路径都保留固定文本输入列和相同的 SQL 规范化规则。
 
+`parser_backend="python"` 默认保留 Python 兼容路径。显式选择 `"auto"` 时，对兼容的 UTF-8 Common/Combined 和 IIS 日志，在暂存路径使用 Arrow 且已安装独立原生组件时选择原生解析，其他输入回退到 Python。`"native"` 要求每个已识别辅助来源都能使用原生解析，否则失败。暂存路径对小文件强制使用原生解析时还应设置 `staging_format="arrow"`。详见[原生解析选择与回退](08_performance_and_scale.zh-CN.md#可选原生解析器)。后台任务和分布式文件 worker 同样接收此选项；存在 `report.aux` 时，可通过 `report.aux.to_dataframe()` 的 `parser_backend` / `backend_reason` 列查看实际选择。
+
+兼容的原生 Web 访问/IIS 来源可选择本地直接转换。开始一次新导入时，可用以下调用替代上面的暂存示例：
+
+```python
+web_case = Case.create("web_direct")
+report = web_case.ingest(
+    [r"E:\evidence\web:HOST01"],
+    keep_staging=False,
+    options=IngestOptions(parser_backend="auto", direct_parquet=True),
+)
+```
+
+`direct_parquet` 默认为 `False`。启用后要求本地存储、未配置 broker、`keep_staging=False`，
+且 `parser_backend` 为 `"auto"` 或 `"native"`。小文件也可直接转换，无需强制 Arrow 暂存。
+`auto` 模式遇到组件、编码或语法不兼容时，会复用同一来源准备对象，整源回退到 Python；
+`staging_format` 控制这些回退及其他来源。普通工作池关闭后，直接来源由协调器逐个处理，
+与 EVTX 和暂存转换共享 DuckDB 转换锁。来源哈希和编码预读仍保留。
+后台 `ingest_background()` 同样支持这些选项，并须传入 `keep_staging=False`；CLI 对应
+`--parser-backend auto --direct-parquet --no-keep-staging`。
+
+辅助报告中的 `output_format` 和 `parquet_paths` 区分直接 Parquet 与暂存输出，
+`parser_backend` 和 `backend_reason` 则单独说明解析选择。直接来源的私有 Parquet 在关闭和
+来源核验后才发布；普通解析错误可以保留 `partial` 前缀。这不是整次导入事务，也不支持自动续跑。
+详见[直接转换边界](08_performance_and_scale.zh-CN.md#可选直接-parquet-转换)。
+
 若工作站有足够空闲内存和 CPU，可选用 `IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")`，并将导入的 `workers` 设为 `8`。库的通用默认值仍为 2GB 和两个转换线程，也不构成进程 RSS 上限；需要给 Notebook、解析进程和其他程序预留内存。
 
-需要后台执行时，将前台调用替换为 `job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`，然后用 `c.job_status(job_id)` 查看状态。不要对同一份证据先后执行两种导入：当前没有跨批次去重或续跑。默认仍保留暂存，`keep_staging=False` 在转换成功后才删除，不能消除暂存磁盘峰值。解析限制和编码验证 I/O 见[性能与规模](08_performance_and_scale.zh-CN.md)。
+需要后台执行时，将前台调用替换为 `job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`，然后用 `c.job_status(job_id)` 查看状态。不要对同一份证据先后执行两种导入：当前没有跨批次去重或续跑。默认仍保留暂存，单独设置 `keep_staging=False` 只在转换成功后删除，既不绕过暂存，也不能消除暂存磁盘峰值。解析限制和编码验证 I/O 见[性能与规模](08_performance_and_scale.zh-CN.md)。
 
-各通路先完成本批暂存再转换，后台执行并不提供提前查询保证，也不保证正在写入的数据湖呈现原子快照。应等状态为 `done`、检查任务日志与逐文件报告后再重新打开 Case。`done` 也可能包含部分恢复、失败或无法识别的来源文件。可捕获异常会标记为 `failed`；强制终止或状态写入失败可能留下过期快照，当前没有独立的存活监督器或自动续跑。状态与标准输出/错误位于 `c.case_dir / "jobs"`；找不到任务时 `job_status()` 返回 `None`。重新打开 Case 可避免后台导入前已创建对象中的缓存视图过期。
+走暂存路径的来源先完成暂存再转换；只有显式启用的直接路径会为兼容来源绕过分片。后台执行并不提供提前查询保证，也不保证正在写入的数据湖呈现原子快照。应等状态为 `done`、检查任务日志与逐文件报告后再重新打开 Case。`done` 也可能包含部分恢复、失败或无法识别的来源文件。可捕获异常会标记为 `failed`；强制终止或状态写入失败可能留下过期快照，当前没有独立的存活监督器或自动续跑。状态与标准输出/错误位于 `c.case_dir / "jobs"`；找不到任务时 `job_status()` 返回 `None`。重新打开 Case 可避免后台导入前已创建对象中的缓存视图过期。
 
 CLI 对应参数为 `--staging-format auto`，也接受 `arrow`、`ndjson`，配合 `--background` 同样有效。辅助文本导入会在一次读取中完成 SHA-256 和严格 UTF-8 验证，其他编码保留严格回退读取；有界分区清单完整时，也会省去 Windows 上通常需要的额外分区预扫，旧清单、不支持或超出上限的元数据仍走兼容扫描。
 
@@ -203,7 +229,7 @@ with Case.open("incident42") as c:
 |---|---|
 | 生命周期 | `Case.create(name, case_root=, cluster_config=)`、`Case.open(name, case_root=, cluster_config=)`、`Case.list_cases(case_root=)`、`c.info()` |
 | 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`；`c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`；`c.job_status(job_id=)` -> `dict \| None`；`c.list_jobs()` -> `list[dict]` |
-| 导入资源 | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto")` |
+| 导入资源 | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="python", direct_parquet=False)` |
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
 | 原生 SQL | `c.query(sql)`、`c.query_chunks(sql, chunksize=)`、`c.db.table(name)`、`c.db.table_chunks(name, chunksize=)` |

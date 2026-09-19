@@ -49,6 +49,98 @@ The `IngestOptions` values above are the library defaults; `workers=2` explicitl
 
 EVTX staging remains NDJSON for all three settings. Auxiliary Parquet output uses ZSTD level 1 under either staging path. The CLI exposes the same selection as `--staging-format auto`, `--staging-format arrow` or `--staging-format ndjson`, including with `--background`.
 
+## Optional native parsers
+
+The separately installed [native component](../../native/README.md) implements
+bounded Rust parsers for UTF-8 Common/Combined web access and IIS W3C access logs.
+Install it in the same environment as the Notebook kernel and any ingest
+workers. Existing `Case` methods and result schemas remain the same.
+
+| `IngestOptions.parser_backend` | Behavior for recognized auxiliary sources |
+|---|---|
+| `"python"` (default) | Keep the Python compatibility path regardless of whether the component is installed |
+| `"auto"` | Explicitly enable native parsing when the component, encoding, format and selected output path are compatible; otherwise use Python |
+| `"native"` | Require native support; fail if unavailable or incompatible |
+
+The CLI option is `--parser-backend auto|python|native`, including for background
+ingest; the default is `python`. EVTX keeps its existing parser. When native parsing
+is explicitly enabled on the staged path, with `staging_format="auto"`, small files
+still select NDJSON and use Python; choose `staging_format="arrow"` to use native
+parsing for them. Strict native mode is intended for compatible inputs, not a
+mixed collection containing other recognized log families.
+
+The native parser builds Arrow string buffers directly and releases the GIL
+while reading and parsing. On the staged path, batches are consumed inside the same file worker;
+the coordinator receives only a manifest. This avoids per-record Python dicts
+on the native path. Canonical conversions still use the same DuckDB SQL.
+Hashing and complete encoding validation still precede parsing. The default
+path writes Arrow IPC staging before conversion; native parsing alone does not
+remove that I/O or split a single source across workers.
+
+If native parsing encounters an unsupported compatible syntax in `auto` mode,
+ingest discards that file's native shards and replays the entire source through
+Python. Such a fallback can require an extra read. Read/write errors and detected
+source changes, and malformed native batches remain fatal. Ordinary parse errors retain the existing accepted
+prefix behavior. Each `report.aux.staged_files` entry exposes `parser_backend`
+and `backend_reason`, so availability is distinguishable from actual use.
+
+## Optional direct Parquet conversion
+
+`direct_parquet=False` is the default. For local compatible web access/IIS
+sources, explicitly enable direct conversion and disable retained staging:
+
+```python
+from seclogx import Case, IngestOptions
+
+web_case = Case.create("web_direct")
+report = web_case.ingest(
+    [r"E:\evidence\web:HOST01"],
+    keep_staging=False,
+    options=IngestOptions(parser_backend="auto", direct_parquet=True),
+)
+```
+
+The CLI equivalent is `--parser-backend auto --direct-parquet --no-keep-staging`. Foreground and
+background ingest accept these settings. Direct conversion requires local
+storage, no configured broker, and `parser_backend="auto"` or `"native"`.
+It consumes bounded native Arrow batches directly in DuckDB, using the same
+fixed VARCHAR inputs, canonical SQL and ZSTD Parquet output. Small sources can
+use it too: `staging_format` controls only compatibility replay and other
+sources, and need not be `"arrow"` for direct conversion.
+
+Ordinary auxiliary sources finish their worker-pool staging first. The pool
+then closes, and eligible direct sources run one at a time in the coordinator.
+This preserves the ordinary worker budget; it does not parallelize direct
+sources. Each direct conversion shares `CONVERSION_LOCK` with EVTX and staged
+flattening, so only one ingest DuckDB conversion uses its configured memory
+and thread budget at a time within that process. The budget is still not an
+RSS cap, and independent processes do not share the lock.
+
+Hashing and strict encoding preparation remain a separate pre-read. In `auto`
+mode, missing/incompatible components, encodings or syntax cause a complete
+Python staging replay after private native output is removed. Replay reuses
+the same prepared source identity and encoding. Strict `native` mode fails
+instead. Source changes, I/O, malformed batches and conversion failures are
+fatal; ordinary parse errors can publish the accepted prefix as `partial`.
+
+Each source is written privately under `<case>/_ingest_private/`, outside
+`lake/`, then published only after conversion, closure and source checks.
+Zero recovered rows are reported as `failed` without publication. This is a
+source-level boundary, not an atomic whole-ingest transaction: earlier
+published files can remain after a later failure. A crash can leave private
+files; automatic recovery, resume and duplicate prevention are not provided.
+Manifest `parser_backend` / `backend_reason` describe parsing separately from
+`output_format` (`staged` or `parquet`) / `parquet_paths`.
+
+Publication uses a rename that refuses to overwrite an existing file on
+Windows. On POSIX, the private output and destination must be on the same
+filesystem and support hard links. If that publication step is unsupported or
+fails, ingest reports an error; it does not switch to copying or Python replay.
+These platform-specific rules do not mean every platform and dependency
+combination has been validated.
+
+## Worker budgets and background ingest
+
 `workers` is the **total local parsing budget** across EVTX and auxiliary pipelines, including explicit values. Mixed inputs split it; `workers=1` runs both pipelines serially in the calling process. The default is at most eight workers, and the local queue bounds pending tasks. Distributed workers are managed separately; this does not set a cluster-wide memory ceiling.
 
 `CONVERSION_LOCK` serializes ingest conversions within one coordinator or Notebook process. Parsing may continue concurrently. Separate processes, background jobs and notebooks do not share the lock.
@@ -75,8 +167,8 @@ Do not run both examples against the same evidence to switch modes: repeated ing
 - During auxiliary text ingest, SHA-256 and strict UTF-8 validation share one bounded full-file pass, followed by the parsing pass. Non-UTF-8 sources retain the strict UTF-16/GB18030/Latin-1 fallback sequence and may require more reads; QCloud requires a UTF-16 BOM. Validation completes before any record is emitted. File identity, size and timestamps are checked when reusing this preparation; this is not an immutable evidence snapshot. Direct parser calls outside ingest still validate their input independently.
 - Physical text lines have an 8 Mi-character limit. Logical-record and format limits also apply, including QCloud's 4 Mi characters/100,000 lines, database limits and CSV field size. Oversized records produce explicit errors; see [known limitations](../known_limitations.md).
 - `staging_chunk_bytes` targets **uncompressed bytes**: encoded NDJSON bytes for gzip, or Arrow batch buffer bytes for IPC. Gzip shards rotate between records with a bounded 256 KiB write buffer. Arrow uses record batches bounded by 16,384 rows and a 16 MiB size estimate, rotating shards between batches, plus a 1 MiB output buffer per active writer. One record can exceed a batch/shard target; encoded records above 32 MiB are rejected.
-- Scratch paths include batch IDs: `staging/<batch_id>/<host>/` and `staging_aux/<batch_id>/<host>/`. Each pipeline still completes staging before flattening bounded shard groups. `flatten_batch_bytes` is a target, and an indivisible shard can exceed it. File/shard metadata grows with its count, and the full staged dataset can accumulate before conversion.
-- Both gzip and Arrow staging are **kept by default**. `keep_staging=False` removes that run's shards after successful conversion, so it does not eliminate peak staging disk usage. Budget for source evidence, staging, Parquet and temporary working files together. Compression ratios depend on the source content.
+- Scratch paths include batch IDs: `staging/<batch_id>/<host>/` and `staging_aux/<batch_id>/<host>/`. Sources on the staged paths complete staging before flattening bounded shard groups. `flatten_batch_bytes` is a target, and an indivisible shard can exceed it. File/shard metadata grows with its count, and the full staged dataset can accumulate before conversion, including other formats and compatibility replays when direct conversion is enabled.
+- Both gzip and Arrow staging are **kept by default**. `keep_staging=False` alone removes that run's shards after successful conversion; it does not bypass staging or eliminate peak staging disk usage. Only explicitly enabled direct conversion skips these shards for compatible sources. Budget for source evidence, staging, Parquet and temporary working files together. Compression ratios depend on the source content.
 - EVTX `keep_raw=True` uses temporary SQLite indexing instead of a whole-file XML dictionary. It still adds an XML parse, index I/O, larger output and temporary disk space; no fixed speed or memory multiplier is promised.
 - The 2 GiB non-EVTX source-file exclusion has been removed. Supported large files reach their parser; record/document limits remain. A shared scan classifies both pipelines using bounded content peeks. Unknown files are reported without full hashing or parsing tasks.
 

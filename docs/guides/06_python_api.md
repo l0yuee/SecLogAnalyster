@@ -62,6 +62,47 @@ Set `"arrow"` or `"ndjson"` to choose explicitly. EVTX staging remains NDJSON;
 auxiliary Parquet output uses ZSTD level 1 with either staging path. Both paths
 retain fixed text input columns and the same canonical SQL normalization.
 
+`parser_backend="python"` is the default compatibility path. Explicitly select
+`"auto"` to use the separately installed native component for compatible UTF-8
+Common/Combined and IIS logs staged as Arrow, falling back to Python for other
+inputs. `"native"` fails when any recognized
+auxiliary source cannot use the native parser. Set `staging_format="arrow"`
+when requiring native parsing for small files on the default staged path. See
+[native parser selection and fallback](08_performance_and_scale.md#optional-native-parsers).
+The same option is passed to background jobs and distributed file workers.
+Inspect actual selection with `report.aux.to_dataframe()` and its
+`parser_backend` / `backend_reason` columns when `report.aux` is present.
+
+Direct conversion is an opt-in local path for compatible native web access/IIS
+sources. For a new import, use this instead of the staged example above:
+
+```python
+web_case = Case.create("web_direct")
+report = web_case.ingest(
+    [r"E:\evidence\web:HOST01"],
+    keep_staging=False,
+    options=IngestOptions(parser_backend="auto", direct_parquet=True),
+)
+```
+
+`direct_parquet` defaults to `False`. Enabling it requires local storage, no
+broker, `keep_staging=False`, and `parser_backend="auto"` or `"native"`.
+Small files are eligible without forcing Arrow staging. In `auto` mode,
+incompatible components/encoding/syntax cause a whole-source Python replay
+using the same source preparation; `staging_format` controls that replay and
+other sources. The ordinary worker pool closes before direct sources run
+sequentially in the coordinator, sharing the DuckDB conversion lock with EVTX
+and staged flattening. Hash/encoding pre-reading still applies.
+The same options and `keep_staging=False` work with `ingest_background()`;
+CLI uses `--parser-backend auto --direct-parquet --no-keep-staging`.
+
+In the auxiliary report, `output_format` and `parquet_paths` distinguish direct
+Parquet from staged output; `parser_backend` and `backend_reason` describe
+parser selection independently. A direct source's private Parquet is published
+after closure and source checks; ordinary parse errors can retain a `partial`
+prefix. This is not a whole-ingest transaction or automatic resume mechanism.
+See [direct conversion boundaries](08_performance_and_scale.md#optional-direct-parquet-conversion).
+
 If the workstation has enough spare memory and CPU capacity, an optional configuration is
 `IngestOptions(memory_limit="4GB", threads=8, staging_format="auto")` with
 `workers=8`. This changes the budget, not the library defaults or a process RSS
@@ -71,12 +112,13 @@ For background execution, replace the foreground call with
 `job_id = c.ingest_background([r"E:\evidence:HOST01"], workers=2, options=options)`
 and inspect `c.job_status(job_id)`. Do not run both imports on the same
 evidence: cross-run deduplication/resume is not implemented. Staging remains
-enabled by default; `keep_staging=False` deletes it after successful
-conversion but does not remove its peak disk requirement. See
+enabled by default; `keep_staging=False` alone deletes it after successful
+conversion and does not bypass staging or remove its peak disk requirement. See
 [Performance & scale](08_performance_and_scale.md) for parser limits,
 encoding-validation I/O and resource limits.
 
-Each pipeline stages its batch before conversion. Background execution does not
+Sources using staging finish it before their later conversion; explicitly
+enabled direct conversion bypasses shards only for compatible sources. Background execution does not
 provide an early-query guarantee or an atomic snapshot of the lake while it is
 being written. Wait for `done`, inspect the job log and per-file report, then
 reopen the Case before analysis. `done` can include partial, failed or unrecognized
@@ -264,7 +306,7 @@ with Case.open("incident42") as c:
 |---|---|
 | Lifecycle | `Case.create(name, case_root=, cluster_config=)`, `Case.open(name, case_root=, cluster_config=)`, `Case.list_cases(case_root=)`, `c.info()` |
 | Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`; `c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`; `c.job_status(job_id=)` -> `dict \| None`; `c.list_jobs()` -> `list[dict]` |
-| Ingest resources | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto")` |
+| Ingest resources | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="python", direct_parquet=False)` |
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
 | Raw SQL | `c.query(sql)`, `c.query_chunks(sql, chunksize=)`, `c.db.table(name)`, `c.db.table_chunks(name, chunksize=)` |

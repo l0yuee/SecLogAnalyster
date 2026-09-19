@@ -24,6 +24,16 @@ class IngestOptions:
     it is not a hard limit on process RSS, parser memory, or concurrent
     conversions. Chunk sizes are byte targets, so a single large record
     can exceed ``staging_chunk_bytes``.
+
+    ``parser_backend`` defaults to ``python``. ``auto`` opts into native
+    auxiliary parsing with compatibility fallback; ``native`` requires native
+    support. Native parsing needs Arrow staging unless direct conversion is
+    enabled. EVTX uses its existing parser independently of this setting.
+
+    ``direct_parquet`` opts supported local native web sources into direct
+    conversion. It requires an explicit ``auto`` or ``native`` parser backend
+    and ``keep_staging=False``, and shares the coordinator's conversion budget;
+    the default continues to use staging.
     """
 
     memory_limit: str = "2GB"
@@ -32,8 +42,18 @@ class IngestOptions:
     flatten_batch_bytes: int = 256 * 1024 * 1024
     # Auxiliary text/artifact staging only; EVTX keeps its raw JSON contract.
     staging_format: str = "auto"
+    # Optional native parsers preserve the same canonical table contract.
+    parser_backend: str = "python"
+    # Local native web sources can bypass IPC when staging is not retained.
+    direct_parquet: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.direct_parquet, bool):
+            raise ValueError("direct_parquet must be a boolean")
+        if self.direct_parquet and self.parser_backend == "python":
+            raise ValueError("direct_parquet requires parser_backend='auto' or 'native'")
+        if self.parser_backend not in ("auto", "python", "native"):
+            raise ValueError("parser_backend must be 'auto', 'python' or 'native'")
         if self.staging_format not in ("auto", "ndjson", "arrow"):
             raise ValueError("staging_format must be 'auto', 'ndjson' or 'arrow'")
         match = _MEMORY_LIMIT.fullmatch(self.memory_limit.strip()) if isinstance(self.memory_limit, str) else None
@@ -51,3 +71,12 @@ class IngestOptions:
         con.execute(f"SET memory_limit = '{self.memory_limit}'")
         con.execute(f"SET threads = {self.threads}")
         con.execute("SET preserve_insertion_order = false")
+
+    def validate_execution(self, *, keep_staging: bool, cluster_config: Any) -> None:
+        """Reject incompatible direct-output settings before starting work."""
+        if not self.direct_parquet:
+            return
+        if keep_staging:
+            raise ValueError("direct_parquet requires keep_staging=False")
+        if cluster_config.is_distributed or cluster_config.storage_backend != "local":
+            raise ValueError("direct_parquet requires local execution and local storage")

@@ -8,6 +8,15 @@ venv
 **/*.egg-info
 build
 dist
+**/*.pyd
+**/*.pdb
+native/target
+native/wheels
+native/.venv
+native/tests
+native/python/**/*.so
+native/python/**/*.dylib
+native/python/**/*.dll
 .pytest_cache
 .mypy_cache
 .ruff_cache

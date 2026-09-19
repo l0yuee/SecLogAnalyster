@@ -145,6 +145,8 @@ def ingest_command(
     staging_chunk_mb: int = typer.Option(64, "--staging-chunk-mb", min=1, help="Uncompressed MiB per staging shard"),
     flatten_batch_mb: int = typer.Option(256, "--flatten-batch-mb", min=1, help="Uncompressed MiB per conversion batch"),
     staging_format: str = typer.Option("auto", "--staging-format", help="Auxiliary staging: auto (Arrow for sources >=16 MiB), ndjson or arrow; EVTX uses NDJSON"),
+    parser_backend: str = typer.Option("python", "--parser-backend", help="Auxiliary parser: python (default); auto opts into native parsing with compatibility fallback; native requires native support"),
+    direct_parquet: bool = typer.Option(False, "--direct-parquet", help="Stream supported local native web sources to Parquet; requires --no-keep-staging"),
     _staging_chunk_bytes: int | None = typer.Option(None, "--staging-chunk-bytes", hidden=True, min=1),
     _flatten_batch_bytes: int | None = typer.Option(None, "--flatten-batch-bytes", hidden=True, min=1),
     _job_id: str = typer.Option(None, "--_job-id", hidden=True),
@@ -155,7 +157,11 @@ def ingest_command(
             staging_chunk_bytes=_staging_chunk_bytes or staging_chunk_mb * 1024 * 1024,
             flatten_batch_bytes=_flatten_batch_bytes or flatten_batch_mb * 1024 * 1024,
             staging_format=staging_format,
+            parser_backend=parser_backend,
+            direct_parquet=direct_parquet,
         )
+        if direct_parquet and keep_staging:
+            raise ValueError("--direct-parquet requires --no-keep-staging")
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if background and _job_id is None:

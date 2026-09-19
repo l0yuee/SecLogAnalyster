@@ -6,20 +6,16 @@ delegated to flatten.py, mirroring how the EVTX pipeline
 (`ingest/evtx/orchestrator.py` + `ingest/evtx/flatten.py`) splits the two
 responsibilities.
 
-Each worker stages its parsed rows to a per-file NDJSON file on disk (same
-pattern as the EVTX pipeline) instead of returning them in-memory --
-flatten.py then reads every table's staged files via DuckDB, out-of-core,
-rather than the coordinator accumulating every row of a batch in Python
-first. This matters in practice: these formats were originally assumed
-low per-file record volume, but web access/error logs in particular can
-reach far larger scale in real evidence sets (see
-docs/known_limitations.md), so unbounded in-memory accumulation across a
-whole ingest batch was a real cost, not just a theoretical one.
+Workers write bounded NDJSON or Arrow shards rather than returning parsed
+rows in memory. Optional local direct conversion handles supported native
+web sources sequentially after the ordinary staging queue has shut down;
+those published Parquet files bypass the later staged-file conversion.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +28,7 @@ from ..staging import staged_batches, remove_staged
 from .discovery import ClassifiedFile, discover_and_classify
 from .flatten import flatten_table
 from .manifest import AuxIngestReport, AuxStagedFile
+from .sniff import KIND_IIS, KIND_WEB_ACCESS
 from .stage import stage_aux_file
 
 
@@ -47,6 +44,7 @@ def run_aux_ingest(
 ) -> AuxIngestReport:
     options = options or IngestOptions()
     cluster_config = cluster_config or ClusterConfig.from_env()
+    options.validate_execution(keep_staging=keep_staging, cluster_config=cluster_config)
     batch_id = str(uuid.uuid4())
     if classified is None:
         # Not pre-scanned by Case.ingest() (e.g. called directly, as
@@ -84,7 +82,13 @@ def run_aux_ingest(
         if progress:
             progress.on_aux_result(f)
 
-    known_classified = [cf for cf in classified if cf.kind is not None]
+    direct_classified = []
+    known_classified = []
+    for cf in classified:
+        if options.direct_parquet and cf.kind in (KIND_WEB_ACCESS, KIND_IIS):
+            direct_classified.append(cf)
+        elif cf.kind is not None:
+            known_classified.append(cf)
     if known_classified:
         # Distributed mode: staging_dir must be reachable by every `seclogx
         # worker` process (a shared/NFS mount), same requirement as the EVTX
@@ -94,6 +98,39 @@ def run_aux_ingest(
         staged.extend(
             queue.submit_all(stage_aux_file, [(cf, staging_dir, options) for cf in known_classified], on_result=on_result)
         )
+
+    # submit_all returns only after the local staging pool has closed. Direct
+    # conversion therefore uses one lane without reducing the ordinary worker
+    # budget or overlapping it with another auxiliary conversion connection.
+    # The helper shares CONVERSION_LOCK with the EVTX/staged conversion paths.
+    ingested_at = datetime.now(timezone.utc)
+    rows_written: dict[str, int] = {}
+    if direct_classified:
+        from .direct import direct_web_file
+
+        if progress:
+            progress.set_phase(PHASE_FLATTENING)
+        fallback_options = replace(options, parser_backend="python", direct_parquet=False)
+        for cf in direct_classified:
+            direct = direct_web_file(cf, case_dir, batch_id, ingested_at, options)
+            f = direct.staged_file
+            if f is None:
+                # A compatibility replay must use the same verified source
+                # identity and encoding, and must not attempt native parsing
+                # again after the direct reader has rejected this source.
+                if direct.prepared is None:
+                    from .native import NativeBatchError
+
+                    raise NativeBatchError(f"direct fallback lacks prepared source identity: {cf.path}")
+                f = stage_aux_file(cf, staging_dir, fallback_options, prepared=direct.prepared)
+                f.backend_reason = direct.fallback_reason
+            elif direct.parquet_path is not None and f.table:
+                rows_written[f.table] = rows_written.get(f.table, 0) + direct.rows_written
+                if progress:
+                    progress.on_table_flattened(f.table, direct.rows_written)
+            staged.append(f)
+            if progress:
+                progress.on_aux_result(f)
     staged.sort(key=lambda f: f.source_path)
 
     files_ok = sum(1 for f in staged if f.status == StageStatus.OK)
@@ -108,15 +145,13 @@ def run_aux_ingest(
 
     by_table: dict[tuple[str, bool], list[AuxStagedFile]] = {}
     for f in staged:
-        if f.table and f.ndjson_path:
+        if f.output_format == "staged" and f.table and f.ndjson_path:
             # Auto mode can select different staging formats for files in
             # the same table. Each conversion stream must be homogeneous.
             by_table.setdefault((f.table, Path(f.ndjson_path).suffix == ".arrow"), []).append(f)
 
     if progress:
         progress.set_phase(PHASE_FLATTENING)
-    ingested_at = datetime.now(timezone.utc)
-    rows_written: dict[str, int] = {}
     for (table, _), files in by_table.items():
         rows_written.setdefault(table, 0)
         for batch in staged_batches(files, options.flatten_batch_bytes):
@@ -138,7 +173,8 @@ def run_aux_ingest(
 
     if not keep_staging:
         for f in staged:
-            remove_staged(f)
+            if f.output_format == "staged":
+                remove_staged(f)
 
     return AuxIngestReport(
         batch_id=batch_id,

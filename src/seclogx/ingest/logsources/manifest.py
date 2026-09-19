@@ -32,6 +32,10 @@ class AuxStagedFile:
     chunks: list[StagedChunk] = field(default_factory=list)
     # None means legacy/unknown or collection exceeded its bounded budget.
     partition_rows: list[tuple[str | None, ...]] | None = None
+    parser_backend: str = "python"
+    backend_reason: str | None = None
+    output_format: str = "staged"
+    parquet_paths: list[str] = field(default_factory=list)
 
 
 @dataclass

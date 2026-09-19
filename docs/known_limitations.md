@@ -568,6 +568,43 @@ analysts can distinguish supported behavior from remaining gaps.
   Notebook process, but not across independent processes or machines.
   Local `workers` is a total parsing budget across both pipelines;
   `workers=1` runs them serially in the calling process.
+- **Native auxiliary parsing is optional and format-specific.**
+  The separate `seclogx-native` component supports compatible UTF-8
+  Common/Combined and IIS access logs with Arrow staging or the opt-in local
+  direct path. The default `parser_backend="python"` retains the Python
+  compatibility path. Explicit `"auto"` selects native when compatible and
+  uses Python otherwise; `"native"` fails on unsupported recognized
+  auxiliary sources. A late capability fallback removes that source's
+  native output and reparses the whole file, which can add I/O. Per-file
+  `parser_backend` and `backend_reason` identify parser selection separately
+  from `output_format` and `parquet_paths`. Hashing, encoding preparation and
+  canonical DuckDB conversion remain; IPC staging remains on the staged path;
+  this does not make every format native or split one file across workers.
+  Install the component in each worker/kernel environment and restart
+  existing kernels after replacing the extension. See
+  [native parsers](guides/08_performance_and_scale.md#optional-native-parsers).
+- **Direct Parquet conversion is opt-in and local only.**
+  `direct_parquet=False` is the default. Enabling it requires
+  `keep_staging=False`, local storage, no configured broker and parser backend
+  `auto` or `native`. Only compatible web access/IIS sources use it; small files
+  are eligible without forcing Arrow staging. Other formats and auto-mode
+  whole-source Python replays still use the selected `staging_format`.
+  Ordinary auxiliary jobs finish and their pool closes before direct sources
+  run sequentially in the coordinator. Direct conversion shares the DuckDB
+  conversion lock and its per-instance memory/thread budget with EVTX and staged
+  flattening, without imposing a process RSS cap. Hash and strict encoding
+  pre-reading remain. Private output stays outside `lake/` until closure and
+  source checks complete. Ordinary parse errors can publish an accepted prefix
+  as `partial`; zero recovered rows produce `failed` with no published output.
+  Source changes, I/O, invalid native batches and conversion failures do not
+  become compatibility replay. A crash can leave `_ingest_private` files;
+  there is no automatic cleanup/recovery of crashed attempts.
+- **Direct publication depends on local filesystem operations.** Windows uses
+  a rename that refuses to overwrite an existing destination. POSIX requires
+  hard-link support and the private output and destination on the same
+  filesystem. Unsupported or failed publication raises an error instead of
+  copying or replaying through Python. These implementation paths do not imply
+  validation of every platform and dependency combination.
 - **Windows partition metadata is an optimization, not another schema.**
   Auxiliary staging collects canonical partition text before path escaping,
   limited to 4,096 distinct tuples / 1 MiB of encoded values per source.
@@ -575,19 +612,21 @@ analysts can distinguish supported behavior from remaining gaps.
   fall back to DuckDB's `SELECT DISTINCT` scan before directory creation.
   That fallback's result depends on partition cardinality; EVTX retains
   its own partition scan.
-- **Staging still finishes before flattening within each pipeline.**
+- **Staged sources still finish staging before flattening.**
   Batch-isolated temporary directories prevent unrelated runs from
   overwriting staging files, and flatten handles bounded groups of
   shards. The local file-task queue has a pending-task bound, but there
   is no immediate flatten/disk-space backpressure pipeline. Staging disk
   usage can grow with the complete input, and discovery/manifest memory
-  grows with file and shard count.
+  grows with file and shard count. Direct conversion bypasses shards only for
+  eligible sources; it does not add backpressure to the remaining staged work.
 - **Resume, cross-run idempotency and query snapshots are not provided.**
   Re-importing evidence can append duplicates; a failure after earlier
   flatten groups were written can leave partial data in the lake. Unique
   output filenames, metadata locking and isolated scratch space do not
-  constitute an atomic dataset commit. Arrow IPC staging is supported,
-  but still produces intermediate files before the final Parquet conversion.
+  constitute an atomic dataset commit. Source-level publication on the direct
+  path does not roll back earlier published sources if a later one fails.
+  Arrow IPC staging still produces intermediate files before its conversion.
   No fixed throughput/RSS guarantee applies across arbitrary data sizes,
   formats or machines; EVTX native parsing and Registry recovery have
   additional format-specific resource requirements.
@@ -598,7 +637,7 @@ analysts can distinguish supported behavior from remaining gaps.
   evidence's size -- rendered-as-JSON EVTX records alone run considerably
   larger than the source binary `.evtx`, and staging is additive on top
   of the already-compressed Parquet lake. This is a memory/disk/speed
-  three-way tradeoff, not a solved problem: `--no-keep-staging` cuts disk
+  three-way tradeoff, not a solved problem: `--no-keep-staging` alone cuts disk
   after successful conversion (not the peak during ingestion), at the cost
   of needing to re-ingest, not just re-flatten, to
   recover from a bad flatten. Level 1 compression was chosen to bias toward

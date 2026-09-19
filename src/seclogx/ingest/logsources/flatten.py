@@ -25,6 +25,21 @@ from .partitioning import PartitionRow
 from .schema import TABLES, cast_sql_for
 
 
+def build_select_query(table: str, batch_id: str, ingested_at: datetime, from_sql: str) -> str:
+    """Apply the same canonical casts and run metadata to staged or live Arrow."""
+    overrides = {
+        "ingest_batch_id": "'" + batch_id.replace("'", "''") + "'",
+        "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
+        "schema_version": "1",
+    }
+    casts = cast_sql_for(table)
+    expressions = [
+        f"{overrides[col] if col in overrides else casts[col]} AS {col}"
+        for col, _ in TABLES[table]["columns"]
+    ]
+    return "SELECT " + ",\n  ".join(expressions) + " " + from_sql
+
+
 def flatten_table(
     case_dir: Path,
     table: str,
@@ -73,21 +88,9 @@ def flatten_table(
             bind_arrow()
             from_sql = "FROM staged_arrow AS raw"
 
-        cast_sql = cast_sql_for(table)
-        overrides = {
-            "ingest_batch_id": f"'{batch_id}'",
-            "ingested_at": f"TIMESTAMP '{ingested_at.strftime('%Y-%m-%d %H:%M:%S.%f')}'",
-            "schema_version": "1",
-        }
-        select_exprs = []
-        for col, _ in table_def["columns"]:
-            expr = overrides[col] if col in overrides else cast_sql[col]
-            select_exprs.append(f"{expr} AS {col}")
-        select_sql = ",\n  ".join(select_exprs)
-
         partition_columns = table_def["partition_by"]
         partition_by = ", ".join(partition_columns)
-        select_query = f"SELECT {select_sql} {from_sql}"
+        select_query = build_select_query(table, batch_id, ingested_at, from_sql)
 
         # DuckDB creates Hive partition directories as part of COPY. Two
         # concurrent writers targeting the same new partition can race on

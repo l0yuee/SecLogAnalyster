@@ -93,7 +93,7 @@ helper both pipelines' manifests share.)
 
 ## Stage 2: DuckDB bulk flatten
 
-After staging completes for a pipeline, its orchestrator groups shards
+On a staged path, after staging completes, its orchestrator groups shards
 by their recorded uncompressed size (256 MiB per conversion by default).
 `ingest/evtx/flatten.py` reads each group in a
 DuckDB `read_ndjson(..., filename=true)` call, joins it against an
@@ -290,6 +290,8 @@ split), orchestrated from `Case.ingest()`
 alongside the EVTX pipeline; see `docs/known_limitations.md` for what
 happens when a source has one but not the other.
 
+The default auxiliary path (`direct_parquet=False`) is:
+
 ```
  same --source PATH[:HOST] inputs
         |
@@ -377,8 +379,58 @@ reader opens one shard at a time. A fixed 1 MiB output buffer coalesces IPC
 metadata and column writes; closing the sink must succeed before a shard
 is published. Mixed formats for one table are converted
 in separate groups. Auxiliary Parquet uses ZSTD level 1. EVTX staging is
-unchanged. This still writes intermediate files and is not direct
-parser-to-Parquet streaming.
+unchanged. This default path writes intermediate files before conversion.
+
+An optional `seclogx-native` companion package parses compatible UTF-8 CLF/
+Combined and IIS access logs directly into bounded Arrow string buffers. Its
+Rust loop releases the GIL; Arrow C Data capsules exchange batches inside the
+file worker without recreating Python row dictionaries. Batch validation,
+staging, bounded partition metadata and canonical SQL remain in the main
+package. Only small manifests cross process boundaries.
+`IngestOptions.parser_backend` defaults to `python`, keeping the compatibility
+path. Explicit `auto` or strict `native` selects optional native parsing;
+on the staged path, auto requires Arrow staging and falls back when the component or input is
+unsupported. If a capability mismatch occurs after accepting batches, the
+worker aborts and deletes all of that source's shards before a complete Python
+replay. It does not retry source changes, I/O failures or malformed batches. Per-file reports
+record the actual backend and fallback reason. Native parsing retains the
+preparation/hash pass, and the staged path retains intermediate IPC storage.
+
+`IngestOptions(parser_backend="auto", direct_parquet=True)` enables an alternative path in
+`ingest/logsources/direct.py` for compatible UTF-8 Common/Combined and IIS
+sources. It requires `keep_staging=False`, local execution/storage without a
+broker, and `parser_backend="auto"` or `"native"`. Small files are eligible;
+`staging_format` applies to other sources and compatibility replay, not this
+direct path. The coordinator removes eligible sources from its ordinary queue,
+finishes the remaining staging jobs and closes their pool, then converts direct
+sources sequentially. The ordinary worker budget is unchanged. Each direct
+conversion holds the same `CONVERSION_LOCK` as EVTX and staged flattening for
+its DuckDB lifetime, sharing one configured conversion memory/thread budget
+within that process; independent processes remain separate.
+
+The native producer feeds bounded raw VARCHAR Arrow batches to DuckDB through
+an in-process reader. Existing canonical SQL writes ZSTD Parquet privately
+under `<case>/_ingest_private/`, outside the queryable `lake/` tree. After
+conversion, reader/writer closure and source identity checks, the source's
+completed output is published under its normal `web_logs` Hive partition.
+Ordinary parse errors can publish an accepted prefix as `partial`; zero valid
+rows produce a failed manifest without a Parquet file. I/O, source changes,
+invalid batch contracts and conversion failures are fatal and remove that
+source's private output. Earlier published sources are not rolled back.
+
+In auto mode, unavailable/incompatible native components, encodings or syntax
+fall back to whole-source Python staging after private output cleanup. The
+same `PreparedText` identity/encoding is passed to staging, with native and
+direct parsing disabled; a change cannot be hidden by preparing a new source.
+Strict native mode fails instead. Hash and encoding preparation remain a
+pre-read. Direct and later staged conversions share one batch timestamp.
+Manifests distinguish parser selection (`parser_backend`, `backend_reason`)
+from output (`output_format`, `parquet_paths`); direct results are counted once
+and skipped by staged flattening and shard cleanup.
+
+This source-level publication is not an atomic ingest transaction, a query
+snapshot or an idempotent commit. A crash may leave `_ingest_private` files;
+there is no automatic private-file recovery or resume protocol.
 
 Text preparation computes SHA-256 and strict UTF-8 validation in one pass.
 Fallback encodings retain their complete validation and priority order.
@@ -408,6 +460,7 @@ cases/<case_name>/
   case.json                     # hosts, source paths, ingest run history
   staging/<batch_id>/<host>/*.ndjson.gz      # one or more gzip shards per source EVTX
   staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # bounded auxiliary shards
+  _ingest_private/               # unpublished direct Parquet / DuckDB scratch
   logs/ingest_<batch_id>.log    # reconciliation summary per ingest run
   lake/
     events/host=<h>/channel=<c>/*.parquet
@@ -492,18 +545,18 @@ of whether cluster mode is ever turned on:
   once a broker is configured (more reliable than a POSIX file lock over a
   network filesystem for coordinating genuinely separate machines).
 
-**Resource bounds are staged, not a fully overlapped producer/consumer
-pipeline.** Text/registry records are emitted to disk without retaining a
-whole file's rows, and only shard manifests cross the worker boundary.
-File discovery and manifests still scale with file/shard count. Each
-pipeline completes staging before its bounded flatten calls begin, so
-temporary disk usage can grow with the full staged dataset. The local
-job queue bounds in-flight tasks, but there is no immediate flattening
-with disk-space backpressure.
+**Default ingest still separates staging from conversion.** Text/registry
+records are emitted to disk without retaining a whole file's rows, and only
+shard manifests cross the worker boundary. Optional direct conversion bypasses
+those shards for compatible web sources. Other formats and compatibility
+replays still complete staging before bounded flatten calls, so temporary disk
+usage can grow with their complete staged dataset. File discovery and manifests
+scale with file/shard count. The local queue bounds in-flight tasks; there is
+no general overlapped staging/flattening pipeline with disk-space backpressure.
 
-Arrow IPC staging is supported; a direct parser-to-Parquet path without
-intermediate files, resumable/idempotent ingest and atomic queryable
-snapshots are not implemented. Resource targets do not guarantee a fixed
+`keep_staging=False` alone deletes completed staging rather than enabling direct
+conversion. Resumable/idempotent ingest and atomic queryable snapshots are not
+implemented. Resource targets do not guarantee a fixed
 throughput or RSS for arbitrary formats, record sizes or machines.
 Repeated ingestion can add duplicate rows, and a failure after some
 flatten batches were written can leave partial output. Batch-isolated

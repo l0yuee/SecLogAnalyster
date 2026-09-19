@@ -46,6 +46,8 @@ seclogx case info incident42
 | `--staging-chunk-mb N` | `64` | 单个暂存分片未压缩大小的目标值，单位实际为 MiB（1,048,576 字节）；不会拆开完整记录。 |
 | `--flatten-batch-mb N` | `256` | 单组转换的未压缩大小目标，单位为 MiB；单个暂存分片不可再拆分。 |
 | `--staging-format FORMAT` | `auto` | 辅助暂存格式：`auto` 对 >=16 MiB 的来源使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；`arrow` 或 `ndjson` 可强制指定。EVTX 仍使用 NDJSON。 |
+| `--parser-backend BACKEND` | `python` | 默认使用 Python 兼容解析。显式选择 `auto` 时在兼容来源上使用原生，否则使用 Python；`native` 要求每个已识别辅助来源均支持原生解析。未启用直接转换时，原生解析使用 Arrow 暂存。EVTX 保持现有解析器。 |
+| `--direct-parquet` | 关闭 | 兼容的原生 Web 访问/IIS 来源直接转换为 Parquet。要求 `--no-keep-staging`、本地存储、未配置 broker，且后端为 `auto` 或 `native`。小文件同样可用；暂存格式只影响回退及其他来源。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
 | `--background` / `-b` | 关闭 | 将导入过程放到后台进程中执行并立即返回——见下文。 |
 
@@ -53,9 +55,15 @@ seclogx case info incident42
 
 来源目录树只遍历一次，辅助文件的内容前缀分类并行进行。当两条通路都有已识别的任务且 `workers > 1` 时，它们共享预算并发运行；`workers=1` 时串行运行。同一协调进程内的 DuckDB 转换会串行化。辅助 Parquet 在两种暂存格式下均采用 ZSTD level 1。字节目标限制工作分组，并非解析器、Arrow、DuckDB 或整个进程树的内存上限。
 
+启用 `--parser-backend auto --direct-parquet --no-keep-staging` 后，普通辅助来源先在工作池中完成暂存，随后
+直接来源由协调器逐个转换，与 EVTX 和暂存转换共享转换锁。来源哈希和严格编码准备仍然
+保留。`auto` 遇到组件、编码或语法不兼容时，会复用同一准备对象，整源回退到 Python 暂存；
+严格 `native` 则失败。逐文件 `parser_backend` / `backend_reason` 记录解析选择，
+`output_format` / `parquet_paths` 单独表示输出形式。
+
 前台进度展示阶段、遍历/分类/暂存计数及各表写入行数。这些是文件/批次级进度，不是逐字节进度或剩余时间估计；处理大文件时计数可能较久不变。详见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
 
-每次调用都会追加新批次，目前不支持跨批次去重或断点续跑。各通路先完成本批暂存再转换；`--background` 和保留暂存均不保证提前查询或数据湖的原子发布。应等导入完成并检查报告后再查询 Case。
+每次调用都会追加新批次，目前不支持跨批次去重或断点续跑。暂存来源先完成暂存再转换；直接来源的私有 Parquet 在关闭和来源核验后才发布，也可能将完整前缀报告为 `partial`，这不等于整次导入原子提交。崩溃可能留下 `_ingest_private` 文件，当前不支持自动恢复。`--background` 和保留暂存均不保证提前查询或原子快照。应等导入完成并检查报告后再查询 Case。
 
 示例：
 
@@ -71,6 +79,9 @@ seclogx ingest incident42 \
 
 # 对一小部分高价值证据保留原始 XML；使用更多工作进程
 seclogx ingest incident42 --source /evidence/dc01:DC01 --keep-raw --workers 16
+
+# 另一种本地 Web 导入方式：原生直接输出，保留 Python 兼容回退
+seclogx ingest web_direct --source /evidence/web:WEB01 --parser-backend auto --direct-parquet --no-keep-staging
 
 # 另一种选择：在新 Case 后台导入，按可用资源设置预算
 seclogx ingest large_case --source /evidence/full_kape_output --background --workers 8 --memory-limit 4GB --duckdb-threads 8 --staging-format auto

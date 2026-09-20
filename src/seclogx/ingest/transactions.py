@@ -37,20 +37,27 @@ def _legacy_key(path: str, host: str) -> str:
 
 
 def adopt_legacy(case_dir: Path, config) -> None:
-    """Index provenance from an older lake once, without rewriting its rows."""
+    """Index old provenance, including legacy data compacted before adoption."""
     import duckdb
+    from .snapshots import capture_snapshot, release_snapshot
 
     case_dir = Path(case_dir).resolve()
     meta = read_metadata(case_dir)
-    if "catalog" in meta:
+    if "catalog" in meta and not meta.get("legacy_provenance_pending"):
         return
     backend = get_storage_backend(config)
-    files = catalog_files(case_dir, backend, meta)
-    if not files:
-        return
+    if not meta.get("legacy_provenance_pending") and not catalog_files(case_dir, backend, meta):
+        return  # keep the fresh-Case path free of an adoption connection/lease
     ledger = {}
     con = duckdb.connect()
+    lease = None
     try:
+        # A pending legacy catalog can point to managed compacted files.
+        # Keep those exact files leased until the ledger is published so
+        # concurrent maintenance cannot reclaim them while they are scanned.
+        files, lease = capture_snapshot(case_dir, config, backend)
+        if not files and not meta.get("legacy_provenance_pending"):
+            return
         backend.configure_duckdb(con)
         con.execute("SET memory_limit='512MB'")
         con.execute("SET threads=2")
@@ -68,18 +75,24 @@ def adopt_legacy(case_dir: Path, config) -> None:
                 ledger.setdefault(_legacy_key(path, host), []).append(
                     {"sha256": digest, "record_count": count, "status": "legacy_unknown",
                      "transaction_id": None, "source_path": path, "host": host})
+        with get_case_lock(case_dir, config) as lock:
+            latest = read_metadata(case_dir)
+            if "catalog" in latest and not latest.get("legacy_provenance_pending"):
+                return
+            if latest != meta or catalog_files(case_dir, backend, latest) != files:
+                raise RuntimeError("legacy case changed during adoption; retry after the other import finishes")
+            latest.update(catalog_version=1, catalog=encode_catalog(case_dir, files), legacy_ledger=ledger,
+                          catalog_storage=catalog_storage_identity(backend))
+            latest.pop("legacy_provenance_pending", None)
+            lock.assert_owned()
+            # Ledger publication and removal of the pending flag are one
+            # atomic metadata update. Any failure leaves ingestion blocked.
+            atomic_json(case_dir / "case.json", latest)
     finally:
-        con.close()
-    with get_case_lock(case_dir, config) as lock:
-        latest = read_metadata(case_dir)
-        if "catalog" in latest:
-            return
-        if latest != meta or catalog_files(case_dir, backend, latest) != files:
-            raise RuntimeError("legacy case changed during adoption; retry after the other import finishes")
-        latest.update(catalog_version=1, catalog=encode_catalog(case_dir, files), legacy_ledger=ledger,
-                      catalog_storage=catalog_storage_identity(backend))
-        lock.assert_owned()
-        atomic_json(case_dir / "case.json", latest)
+        if lease is None:
+            con.close()
+        else:
+            release_snapshot(con, lease)
 
 INGEST_CONTRACT_VERSION = 2
 WORKSPACE_DIR = ".ingest"

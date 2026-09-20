@@ -21,7 +21,9 @@ from .common import now_iso
 from .persistence import atomic_json
 from .resources import CONVERSION_LOCK, IngestOptions
 from .scan import ScanResult
-from .transactions import IngestTransaction, catalog_files, encode_catalog, read_metadata, validate_outputs
+from .transactions import (
+    IngestTransaction, catalog_files, catalog_storage_identity, encode_catalog, read_metadata, validate_outputs,
+)
 
 _SMALL_FILE_BYTES = 8 * 1024 * 1024
 _GROUP_BYTES = 256 * 1024 * 1024
@@ -183,6 +185,12 @@ def compact_case(case_dir: Path, cluster_config: ClusterConfig | None = None, *,
                     updated.setdefault(table, []).extend(paths)
                 finished = now_iso()
                 report.elapsed_seconds = perf_counter() - started
+                if "catalog" not in meta:
+                    # Compaction may be an analyst's first action on an old
+                    # Case. Publishing a catalog must not bypass the source
+                    # ledger adoption required before a subsequent ingest.
+                    meta["legacy_provenance_pending"] = True
+                    meta["catalog_storage"] = catalog_storage_identity(backend)
                 meta.update(catalog_version=1, catalog=encode_catalog(case_dir, updated))
                 meta.setdefault("maintenance_runs", []).append({**asdict(report), "kind": "compaction",
                     "automatic": automatic, "started_at": tx.state["started_at"], "finished_at": finished})

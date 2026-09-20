@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from seclogx import Case
@@ -87,5 +88,5 @@ def test_cli_rejects_retained_direct_output_before_creating_case(tmp_path):
     result = CliRunner().invoke(app, ["ingest", "invalid", "--source", str(tmp_path),
                                     "--case-root", str(tmp_path / "cases"), "--parser-backend", "auto", "--direct-parquet", "--keep-staging"])
     assert result.exit_code == 2
-    assert "--no-keep-staging" in result.output
+    assert "--no-keep-staging" in unstyle(result.output)
     assert not (tmp_path / "cases").exists()

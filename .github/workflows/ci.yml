@@ -59,6 +59,16 @@ jobs:
           manylinux: "2_28"
           rust-toolchain: "1.96.0"
           maturin-version: "1.15.0"
+      - name: Build the macOS Intel test-only cryptography dependency
+        if: matrix.platform == 'macos-x64'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install openssl@3 pkg-config
+          rustup default 1.96.0
+          OPENSSL_DIR="$(brew --prefix openssl@3)" OPENSSL_STATIC=1 \
+            python -m pip install --no-binary=cryptography -c constraints/python314.txt cryptography==50.0.1
       - name: Install and validate the wheel with Rust hidden
         run: python scripts/check_wheel.py dist --install --constraints constraints/python314.txt
       - name: Run the shared product suite against the installed wheel

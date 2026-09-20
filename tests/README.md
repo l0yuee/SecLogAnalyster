@@ -36,3 +36,12 @@ CI additionally uses `--install --constraints constraints/python314.txt` to
 install the wheel and test dependencies. Validated wheels and the source
 distribution are retained as workflow artifacts. Building an artifact does not
 publish it to a package index or a GitHub Release.
+
+On macOS Intel, CI first builds the pinned `cryptography` dependency required by
+the Moto test helper, using Rust and Homebrew OpenSSL. Upstream no longer ships
+Intel macOS wheels for its current versions. This test-only prerequisite keeps
+the same dependency version across platforms; ordinary analyst installation
+does not require Moto or `cryptography`. The subsequent seclogx wheel installation
+and native ingest probe still run with Rust hidden. See the upstream
+[platform change](https://cryptography.io/en/latest/changelog/#v49-0-0) and
+[macOS build instructions](https://cryptography.io/en/latest/installation/#building-cryptography-on-macos).

@@ -28,10 +28,11 @@ dist/
 .coverage
 .coverage.*
 htmlcov/
+/test-results/
 .ipynb_checkpoints/
 
 # Local evidence, generated Cases, scale data, snapshots and benchmark scratch.
-# Keep product sources and public user guides in Git.
+# Keep product sources, shared tests, compact fixtures and user guides in Git.
 /.benchmarks/
 /cases/*
 !/cases/.gitkeep

@@ -11,7 +11,7 @@
 `seclogx hunt` runs every Sigma rule it can load and convert, and reports
 three things:
 
-- **Matches** (`results.matches`): the actual matched event rows, each
+- **Matches** (`results.matches` for small hunts): the actual matched event rows, each
   tagged with `sigma_rule_id`, `sigma_rule_title`, `sigma_level`, and
   `sigma_attack_ids` (a comma-separated list of MITRE ATT&CK technique
   IDs, e.g. `T1003.001, T1003.002`).
@@ -53,14 +53,61 @@ for tasks, `Case.suspicious_registry()` / `seclogx registry --suspicious`
 for the registry, and plain SQL/search (see [07. Recipes](07_recipes.md))
 for `web_error_logs`, Exchange, and `db_logs`.
 
-Hunting is not a chunked result API: it loads each rule's matches into
-pandas, retains the matching frames and concatenates them. One event can
-appear for several matching rules. Broad rules can therefore use memory
-proportional to all matches; `IngestOptions` and the `search()` result-size
-check do not limit this path. Distributed hunting still returns matches
-to the coordinator. Use a focused rule directory and `min_level`/
-`--min-level` where appropriate, and run against completed imports when
-complete-batch visibility matters; ingest does not publish atomic snapshots.
+## Working with large results in Jupyter
+
+`c.hunt()` automatically saves complete matches as Parquet under the case's
+`hunts/` directory. Small results remain available as a complete DataFrame
+through `results.matches` or `results.to_dataframe()`. If the combined
+results exceed the automatic memory or row budget, those accessors raise
+an explanatory `MemoryError`. Import and hunt settings do not need to be
+tuned to activate this behavior.
+
+```python
+results = c.hunt()
+print(results.summary_text())
+print(results.total_matches)       # exact count across evaluated rules
+display(results.preview(100))      # a preview, not the complete result
+
+results.save("all-matches.csv")    # streams every match, even for large hunts
+for chunk in results.iter_chunks():
+    # Analyze or aggregate this chunk, then discard it.
+    print(chunk["sigma_rule_title"].value_counts())
+```
+
+`preview()` returns at most the requested rows within its preview byte
+budget. Its DataFrame `attrs` contains `total_matches`, `preview_rows` and
+`complete`; the default preview requests 100 rows. `is_spilled` indicates
+that the full result is too large for automatic DataFrame loading.
+`iter_chunks()` reads all saved rows with bounded batch sizes. Keep only
+the aggregates you need instead of collecting every chunk in a list.
+Arrow batch sizes adapt to Parquet metadata, with wide batches split before
+pandas conversion. A single exceptionally wide record or Parquet dictionary
+decoding can still require more memory than a batch's byte target.
+
+Saved runs survive closing the Case or restarting Jupyter:
+
+```python
+from seclogx.detect import HuntResults
+
+saved_directory = results.result_dir  # retain this path for a later session
+reopened = HuntResults.open(saved_directory)
+display(reopened.preview())
+```
+
+One event can appear once for each matching rule, so the total count is a
+count of rule matches, not unique events. Full results can require substantial
+disk space. Failed rules remain visible in `failures`; their partial output
+is not included. Each local hunt reads one committed case snapshot. Distributed
+workers capture their own committed snapshots, so run after imports finish
+when all workers must evaluate the same dataset. Distributed workers return
+artifact paths and counts and need shared access to the case directory.
+
+External rule fields are validated and quoted; only the project's field
+mapping may introduce SQL expressions. Generated queries are restricted to
+the expected case table and supported predicates on a dedicated connection.
+Additional SQL statements, arbitrary functions and unrelated file access
+are rejected. These controls do not judge whether a detection is useful or
+inexpensive; review its match counts and failures.
 
 ## Extending detection: custom rules and fields
 

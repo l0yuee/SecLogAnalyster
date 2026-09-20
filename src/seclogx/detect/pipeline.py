@@ -10,18 +10,16 @@ field set (`Image`, `CommandLine`, `ParentImage`, ...) which mostly doesn't
 exist on native Security events (4688 lacks CommandLine unless a
 non-default GPO is enabled). See docs/known_limitations.md.
 
-Field names not present in FIELD_MAPPING are left unmapped by
-`FieldMappingTransformation` (pySigma leaves them as the original Sigma
-field name), which will fail at DuckDB execution time with a clear
-"column not found"-style error -- caught and reported per-rule by
-detect/hunt.py, never silently ignored.
+The pipeline adds routing conditions only. The backend resolves fields
+against FIELD_MAPPING itself, so an external field can never impersonate
+a trusted SQL expression produced by a mapping transformation.
 """
 
 from __future__ import annotations
 
 from sigma.processing.conditions import LogsourceCondition
 from sigma.processing.pipeline import ProcessingItem, ProcessingPipeline
-from sigma.processing.transformations import AddConditionTransformation, FieldMappingTransformation
+from sigma.processing.transformations import AddConditionTransformation
 
 # category -> (channel, event_id or [event_ids])
 LOGSOURCE_ROUTES: dict[str, dict[str, object]] = {
@@ -134,5 +132,4 @@ def seclogx_pipeline() -> ProcessingPipeline:
         )
         for category, conditions in LOGSOURCE_ROUTES.items()
     ]
-    items.append(ProcessingItem(transformation=FieldMappingTransformation(FIELD_MAPPING)))
     return ProcessingPipeline(items=items, name="seclogx")

@@ -13,7 +13,7 @@ def test_unknown_files_do_not_enter_worker_queue(tmp_path: Path, monkeypatch):
 
     staged_locally: list[Path] = []
 
-    def fake_stage(cf, _staging_dir):
+    def fake_stage(cf, _staging_dir, options=None):
         staged_locally.append(cf.path)
         status = StageStatus.UNKNOWN if cf.kind is None else StageStatus.OK
         return AuxStagedFile(

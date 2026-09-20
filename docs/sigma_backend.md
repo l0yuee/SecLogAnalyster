@@ -6,12 +6,13 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
 
 ## How a Sigma rule becomes a DuckDB query
 
-1. **Field mapping** (`detect/pipeline.py` `FIELD_MAPPING`): Sigma's
-   standard field taxonomy (`Image`, `CommandLine`, `ParentImage`, ...) is
-   mapped to a full, parenthesized SQL expression against the `events`
-   table, e.g. `Image` -> `(event_data ->> 'Image')`. The backend's
-   `field_quote`/`field_escape` are left unset, so this mapped string is
-   substituted as-is wherever a template needs `{field}`.
+1. **Field mapping** (`detect/pipeline.py` `FIELD_MAPPING`): the backend
+   resolves original Sigma field names itself. Exact entries such as
+   `Image` become trusted expressions such as `(event_data ->> 'Image')`.
+   Unknown names must be simple identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and
+   are always double-quoted. External fields containing SQL syntax are
+   rejected, including strings that resemble a trusted mapping expression.
+   The processing pipeline never replaces untrusted fields with SQL strings.
 
    **Always parenthesize new field mappings.** DuckDB's
    `->`/`->>` operators don't bind as tightly as expected against
@@ -33,7 +34,7 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
    `LOGSOURCE_ROUTES` entry, since there's no channel/EventID concept to
    add a condition for.
 
-3. **Conversion** (`detect/backend.py` `DuckDBBackend`): the mapped,
+3. **Conversion** (`detect/backend.py` `DuckDBBackend`): the
    routed rule is converted to a bare boolean WHERE-clause fragment (not
    a full `SELECT`, deliberately -- stays decoupled from any particular
    view name). `detect/hunt.py` looks up the rule's target table via
@@ -42,12 +43,41 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
    that table yet, the rule is reported as a failure ("case has no
    '<table>' table ingested"), not silently skipped.
 
-4. **Result collection**: each rule query materializes a pandas DataFrame;
-   matching frames are retained and concatenated into `HuntResults.matches`.
-   The same event can appear once per matching rule. This path does not use
-   chunked query delivery or the `search()` size guard. Distributed workers
-   also return match frames to the coordinator. Ingest's `memory_limit`
-   does not govern hunt connections or pandas allocations.
+4. **Execution boundary** (`detect/security.py`): DuckDB parses the generated
+   statement without executing it. The validator admits one plain SELECT
+   over the expected case table, with only the supported predicate
+   expressions/functions. Extra statements, subqueries, unions, relation
+   changes and arbitrary functions are rejected. SQL string and regex
+   literals escape apostrophes; regex backslashes retain their meaning.
+   A dedicated connection permits declared input files and this hunt's
+   private output directory, disables other external access and extension
+   autoload/install, and locks configuration. Storage setup occurs before
+   locking, including the configured S3 extension/credentials when needed.
+   This is a restricted Sigma execution path, not a sandbox for arbitrary
+   analyst SQL or a guarantee against a rule that is computationally expensive.
+
+5. **Result collection** (`detect/hunt.py`, `detect/results.py`): a trusted
+   COPY wrapper streams each validated query to Parquet using DuckDB's
+   out-of-core execution. Python does not fetch each rule's complete rows.
+   Each hunt connection uses a 512 MB managed-memory limit and two threads;
+   these limits do not bound process RSS or the combined cost of multiple
+   distributed workers. Workers return paths and counts rather than DataFrames,
+   and require shared access to the case directory.
+
+   All matches remain under `<case>/hunts/<run-id>/`, with `results.json`
+   recording paths, exact counts, rule summaries and failures. The same
+   event appears once per matching rule. Small results retain the complete
+   `matches`/`to_dataframe()` interface, subject to aggregate limits of
+   100,000 rows and 64 MiB of pandas data across all rules. Large results
+   raise an explanatory `MemoryError` when either accessor is used; no
+   rows are silently dropped. Use `preview()`, `iter_chunks()`, or `save()`.
+   Preview metadata records total and preview counts and completeness.
+   CSV export runs in DuckDB and replaces its destination only on success.
+   `HuntResults.open(result_dir)` reopens a saved run after a Notebook restart.
+   Parquet metadata guides Arrow batch sizes, and unusually wide batches
+   are divided before pandas conversion. Row-group/dictionary decoding,
+   a single indivisible record and conversion overhead can exceed a batch's
+   byte target; this target is not a hard process-memory ceiling.
 
 ## Adding support for a new field or category
 
@@ -77,7 +107,9 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
   SQL/`search()`, or via the lightweight `Case.suspicious_tasks()` /
   `Case.auth_events()` / `Case.suspicious_registry()` heuristics instead.
 - Unknown fields can still convert to SQL as unmapped identifiers and fail
-  only when the query executes. `rules validate` checks loading/conversion,
+  only when the query executes, provided their names pass validation.
+  They are quoted identifiers and cannot supply SQL expressions.
+  `rules validate` checks loading/conversion,
   not a case's columns or the semantic correctness of a detection.
 - After changing either, run `seclogx rules validate --rules <dir>`
   against the rules you care about to confirm they convert, then run
@@ -88,6 +120,10 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
   `tests/conftest.py`, for the pattern: hand-craft one synthetic NDJSON
   record shaped like a real match, flatten it into a throwaway case, and
   confirm exactly the expected rule fires).
+- When adding SQL functions or expression forms, update the explicit
+  predicate allow-list in `detect/security.py` and add positive and
+  adversarial tests. Do not bypass validation or restore unrestricted
+  execution to support a new mapping.
 
 ## Adding more bundled rules
 

@@ -107,7 +107,7 @@ def _peek(path: Path) -> bytes:
 
 
 def _decode_lines(raw: bytes) -> list[str]:
-    return _decode_text(raw).splitlines()
+    return _decode_text(raw, partial=True).splitlines()
 
 
 def _looks_like_qcloud_log(path: Path, raw: bytes) -> bool:
@@ -145,9 +145,14 @@ def classify_file(path: Path) -> str | None:
     if raw[:4] == b"regf":
         return KIND_REGISTRY_HIVE
 
-    stripped = raw.lstrip()
+    # Decode a bounded prefix incrementally: its last byte can be half of a
+    # GB18030/UTF-8/UTF-16 character. UTF-16 text must be decoded before NUL
+    # density checks or XML/header matching.
+    text = _decode_text(raw, partial=True)
+    decoded = text.encode("utf-8")
+    stripped = decoded.lstrip()
     if stripped.startswith(b"<?xml") or stripped.startswith(b"<Task"):
-        if _TASK_XMLNS_RE.search(raw):
+        if _TASK_XMLNS_RE.search(decoded):
             return KIND_SCHEDULED_TASK
         return None
 
@@ -161,10 +166,10 @@ def classify_file(path: Path) -> str | None:
             return KIND_JOURNAL_EXPORT
 
     # Binary-ish content (lots of NUL bytes) isn't one of our line-oriented formats.
-    if raw.count(b"\x00") > len(raw) // 8:
+    if text.count("\x00") > len(text) // 8:
         return None
 
-    lines = _decode_lines(raw)
+    lines = text.splitlines()
     fields_line: str | None = None
     software_line: str | None = None
     first_data_line: str | None = None

@@ -193,10 +193,28 @@ shows a bounded preview and tells you the estimated row/size count, and
 `--out` streams matching rows to CSV. Query execution, disk and I/O
 errors can still occur.
 
-The lake has no atomic ingest snapshot: queries during an import can see
-only some completed groups, and a failed import can leave earlier output.
-Query after a successful ingest when complete-batch visibility matters;
-re-importing the same source can append duplicates.
+Each query connection captures a committed catalog snapshot. An ingest publishes
+all of its accepted output in one atomic update; failed batches remain invisible.
+An existing connection continues reading its previous snapshot while another
+process imports or compacts data. After a background job commits, reopen the Case
+to see that new catalog. `with Case.open(...) as c:` closes its reader lease when
+the analysis ends. Do not remove data files manually: open readers may still need
+files that maintenance has replaced.
+
+Unchanged sources already committed with identical provenance and decoding
+settings are skipped on retry. Changed content or a different source identity
+forms another import, so this is not row-level deduplication.
+
+Small local Parquet files are compacted automatically when a partition accumulates
+enough of them. `c.compact()` requests maintenance sooner; `c.cleanup_ingest()`
+can reclaim retired files after their readers close. Both preserve committed
+evidence and active reader snapshots. See the [CLI maintenance commands](05_cli_reference.md).
+
+Sigma hunts use a separate automatic result budget: complete matches are saved,
+small hunts retain `.matches` DataFrame compatibility, and large hunts use
+`preview()`, `iter_chunks()` or `save()` without silently truncating the result.
+The total is `h.total_matches`; preview metadata is in the returned DataFrame's
+`attrs`. See [threat hunting](04_threat_hunting.md).
 
 How the estimate itself works, and its caveats (sampling variance,
 best-effort available-memory detection), are covered in

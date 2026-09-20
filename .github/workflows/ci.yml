@@ -1,0 +1,110 @@
+name: Product tests and wheels
+
+on:
+  push:
+    branches: [main, "codex/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  product:
+    name: Python 3.14 / ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            interpreter: python
+          - platform: linux-x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            interpreter: python3.14
+          - platform: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            interpreter: python
+          - platform: macos-x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            interpreter: python
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: "1"
+      MATURIN_NO_INSTALL_RUST: "1"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.2"
+          cache: pip
+          cache-dependency-path: constraints/python314.txt
+      - name: Build the bundled native wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --locked --out dist --interpreter ${{ matrix.interpreter }}
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          rust-toolchain: "1.96.0"
+          maturin-version: "1.15.0"
+      - name: Install and validate the wheel with Rust hidden
+        run: python scripts/check_wheel.py dist --install --constraints constraints/python314.txt
+      - name: Run the shared product suite against the installed wheel
+        run: python -m pytest -q --junitxml=test-results/product.xml
+      - name: Preserve test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.platform }}
+          path: test-results/product.xml
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Preserve validated wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+  sdist:
+    name: Source distribution rebuild
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.2"
+      - name: Build source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          maturin-version: "1.15.0"
+      - name: Rebuild a wheel from the source distribution
+        shell: bash
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          python -m pip wheel --no-deps --wheel-dir rebuilt dist/*.tar.gz
+      - name: Verify rebuilt resources and native component
+        run: python scripts/check_wheel.py rebuilt --install --constraints constraints/python314.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-distribution
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30

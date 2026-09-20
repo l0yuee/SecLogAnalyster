@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import socket
 import subprocess
 import sys
 import uuid
@@ -27,7 +29,7 @@ from .distributed.storage import get_storage_backend
 from .errors import CaseAlreadyExistsError, CaseNotFoundError, NoSourcesFoundError
 from .detect import HuntResults, run_hunt
 from .ingest import run_ingest, run_aux_ingest
-from .ingest.common import now_iso, parse_source_arg
+from .ingest.common import SourceSpec, now_iso, parse_source_arg
 from .ingest.evtx.manifest import IngestReport
 from .ingest.jobs import (
     PHASE_STAGING,
@@ -39,6 +41,8 @@ from .ingest.jobs import (
     write_job_status,
 )
 from .ingest.scan import scan_sources
+from .ingest.persistence import atomic_json
+from .ingest.transactions import IngestTransaction, filter_committed, cleanup_uncommitted, adopt_legacy
 from .ingest.resources import IngestOptions
 from .ingest.logsources.parsers.scheduled_tasks import SUSPICIOUS_ACTION_PATH_HINTS, SUSPICIOUS_COMMAND_HINTS
 from .ingest.logsources.parsers.task_baseline import classify_against_baseline
@@ -134,7 +138,7 @@ class Case:
         return json.loads((self.case_dir / "case.json").read_text(encoding="utf-8"))
 
     def _save_meta(self, meta: dict) -> None:
-        (self.case_dir / "case.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        atomic_json(self.case_dir / "case.json", meta)
 
     def info(self) -> dict:
         return self._load_meta()
@@ -142,7 +146,7 @@ class Case:
     # -- ingest ---------------------------------------------------------------
     def ingest(
         self,
-        sources: list[str],
+        sources: list[str | SourceSpec],
         workers: int | None = None,
         keep_raw: bool = False,
         keep_staging: bool = False,
@@ -168,11 +172,7 @@ class Case:
         specs = [parse_source_arg(s) if isinstance(s, str) else s for s in sources]
         progress = ProgressReporter(on_update=on_progress) if on_progress is not None else None
 
-        # One shared filesystem walk for both pipelines instead of two
-        # (ingest.scan.scan_sources) -- a real evidence tree scanned twice,
-        # single-threaded, before either pipeline's parallel workers get
-        # anything to do, was the actual "stuck for hours" bottleneck this
-        # feature addresses, not per-file parse throughput.
+        # Share one discovery walk between both pipelines.
         scan = scan_sources(
             specs,
             on_scanned=progress.on_scanned if progress else None,
@@ -182,118 +182,122 @@ class Case:
             progress.set_discovered(len(scan.evtx_files), len(scan.aux_files))
             progress.set_phase(PHASE_STAGING)
 
-        # Explicit and default worker counts are both global local budgets.
-        # Unrecognized aux files only need cheap coordinator bookkeeping;
-        # their presence must not halve the budget for actual EVTX parsing.
-        worker_budget = workers if workers is not None else DEFAULT_LOCAL_INGEST_WORKERS
-        both_have_work = bool(scan.evtx_files) and any(cf.kind is not None for cf in scan.aux_files)
-        concurrent_pipelines = both_have_work and worker_budget > 1
-        evtx_workers = aux_workers = worker_budget
-        if concurrent_pipelines:
-            evtx_workers = worker_budget // 2
-            aux_workers = worker_budget - evtx_workers
+        cleanup_uncommitted(self.case_dir, self.cluster_config)
+        adopt_legacy(self.case_dir, self.cluster_config)
+        scan, skipped = filter_committed(scan, self._load_meta(), keep_raw)
+        with IngestTransaction(self.case_dir, self.cluster_config, scan, keep_raw) as transaction:
+            transaction.state["job_id"] = getattr(self, "_background_job_id", None)
+            atomic_json(transaction.workspace / "state.json", transaction.state)
+            # Explicit and default worker counts are both global local budgets.
+            # Unrecognized aux files only need cheap coordinator bookkeeping;
+            # their presence must not halve the budget for actual EVTX parsing.
+            worker_budget = workers if workers is not None else DEFAULT_LOCAL_INGEST_WORKERS
+            both_have_work = bool(scan.evtx_files) and any(cf.kind is not None for cf in scan.aux_files)
+            concurrent_pipelines = both_have_work and worker_budget > 1
+            evtx_workers = aux_workers = worker_budget
+            if concurrent_pipelines:
+                evtx_workers = worker_budget // 2
+                aux_workers = worker_budget - evtx_workers
 
-        def _run_evtx() -> IngestReport:
-            try:
-                return run_ingest(
-                    case_dir=self.case_dir,
-                    case_name=self.name,
-                    sources=specs,
-                    workers=evtx_workers,
-                    keep_raw=keep_raw,
+            def _run_evtx() -> IngestReport:
+                try:
+                    return run_ingest(
+                        case_dir=transaction.workspace,
+                        case_name=self.name,
+                        sources=specs,
+                        workers=evtx_workers,
+                        keep_raw=keep_raw,
+                        keep_staging=keep_staging,
+                        cluster_config=self.cluster_config,
+                        discovered=scan.evtx_files,
+                        progress=progress,
+                        options=options,
+                    )
+                except NoSourcesFoundError:
+                    # No .evtx under these sources -- not fatal on its own, the aux
+                    # pipeline (tasks / web / Linux / database / cloud-agent artifacts) below
+                    # may still find something. Only an error if *both* find nothing.
+                    now = datetime.now(timezone.utc).isoformat()
+                    return IngestReport(
+                        batch_id=str(uuid.uuid4()),
+                        case_name=self.name,
+                        started_at=now,
+                        finished_at=now,
+                        files_discovered=0,
+                        files_ok=0,
+                        files_partial=0,
+                        files_failed=0,
+                        records_staged=0,
+                        records_flattened=0,
+                    )
+
+            def _run_aux():
+                return run_aux_ingest(
+                    transaction.workspace,
+                    specs,
+                    workers=aux_workers,
                     keep_staging=keep_staging,
                     cluster_config=self.cluster_config,
-                    discovered=scan.evtx_files,
+                    classified=scan.aux_files,
                     progress=progress,
                     options=options,
                 )
-            except NoSourcesFoundError:
-                # No .evtx under these sources -- not fatal on its own, the aux
-                # pipeline (tasks / web / Linux / database / cloud-agent artifacts) below
-                # may still find something. Only an error if *both* find nothing.
-                now = datetime.now(timezone.utc).isoformat()
-                return IngestReport(
-                    batch_id=str(uuid.uuid4()),
-                    case_name=self.name,
-                    started_at=now,
-                    finished_at=now,
-                    files_discovered=0,
-                    files_ok=0,
-                    files_partial=0,
-                    files_failed=0,
-                    records_staged=0,
-                    records_flattened=0,
+
+            if concurrent_pipelines:
+                with ThreadPoolExecutor(max_workers=2) as coordinator_pool:
+                    evtx_future = coordinator_pool.submit(_run_evtx)
+                    aux_future = coordinator_pool.submit(_run_aux)
+                    report = evtx_future.result()
+                    report.aux = aux_future.result()
+            else:
+                report = _run_evtx()
+                report.aux = _run_aux()
+
+            report.already_imported = skipped
+            if report.files_discovered == 0 and report.aux.files_discovered == 0 and not skipped:
+                if progress:
+                    progress.finish(error="no supported log files found")
+                raise NoSourcesFoundError(
+                    "no supported log files (.evtx, Scheduled Tasks, IIS/web/Exchange logs, Linux system logs, "
+                    "database logs, Tencent Cloud Host Security logs, or Windows Registry hives) "
+                    "found under the given source path(s)"
                 )
 
-        def _run_aux():
-            return run_aux_ingest(
-                self.case_dir,
-                specs,
-                workers=aux_workers,
-                keep_staging=keep_staging,
-                cluster_config=self.cluster_config,
-                classified=scan.aux_files,
-                progress=progress,
-                options=options,
-            )
+            transaction.commit(report, {
+                "job_id": getattr(self, "_background_job_id", None),
+                "batch_id": report.batch_id,
+                "started_at": report.started_at,
+                "finished_at": report.finished_at,
+                "files_discovered": report.files_discovered,
+                "files_ok": report.files_ok,
+                "files_partial": report.files_partial,
+                "files_failed": report.files_failed,
+                "records_flattened": report.records_flattened,
+                "aux_files_discovered": report.aux.files_discovered,
+                "aux_rows_written": report.aux.rows_written,
+                "files_already_imported": len(skipped),
+            })
 
-        if concurrent_pipelines:
-            with ThreadPoolExecutor(max_workers=2) as coordinator_pool:
-                evtx_future = coordinator_pool.submit(_run_evtx)
-                aux_future = coordinator_pool.submit(_run_aux)
-                report = evtx_future.result()
-                report.aux = aux_future.result()
-        else:
-            report = _run_evtx()
-            report.aux = _run_aux()
+            # Reset cached DB handle so a fresh view picks up newly written data.
+            if self._db is not None:
+                self._db.close()
+                self._db = None
 
-        if report.files_discovered == 0 and report.aux.files_discovered == 0:
+            # Maintenance failure cannot undo a batch already in the catalog.
+            try:
+                from .ingest.compaction import compact_case
+                compact_case(self.case_dir, self.cluster_config, automatic=True)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Ingest committed; automatic file compaction deferred: %s", exc)
+
             if progress:
-                progress.finish(error="no supported log files found")
-            raise NoSourcesFoundError(
-                "no supported log files (.evtx, Scheduled Tasks, IIS/web/Exchange logs, Linux system logs, "
-                "database logs, Tencent Cloud Host Security logs, or Windows Registry hives) "
-                "found under the given source path(s)"
-            )
+                progress.finish()
 
-        # Locked so two concurrent `ingest()` runs against the same case
-        # (two analysts, or two distributed coordinators) can't clobber
-        # each other's ingest_runs/hosts bookkeeping -- see distributed/locking.py.
-        with get_case_lock(self.case_dir, self.cluster_config):
-            meta = self._load_meta()
-            meta.setdefault("ingest_runs", []).append(
-                {
-                    "batch_id": report.batch_id,
-                    "started_at": report.started_at,
-                    "finished_at": report.finished_at,
-                    "files_discovered": report.files_discovered,
-                    "files_ok": report.files_ok,
-                    "files_partial": report.files_partial,
-                    "files_failed": report.files_failed,
-                    "records_flattened": report.records_flattened,
-                    "aux_files_discovered": report.aux.files_discovered,
-                    "aux_rows_written": report.aux.rows_written,
-                }
-            )
-            hosts = set(meta.get("hosts", []))
-            hosts.update(f.host for f in report.staged_files)
-            hosts.update(_hosts_from_lake(self.case_dir, self.cluster_config))
-            meta["hosts"] = sorted(hosts)
-            self._save_meta(meta)
-
-        # Reset cached DB handle so a fresh view picks up newly written data.
-        if self._db is not None:
-            self._db.close()
-            self._db = None
-
-        if progress:
-            progress.finish()
-
-        return report
+            return report
 
     def ingest_background(
         self,
-        sources: list[str],
+        sources: list[str | SourceSpec],
         workers: int | None = None,
         keep_raw: bool = False,
         keep_staging: bool = False,
@@ -312,12 +316,17 @@ class Case:
             options.validate_execution(keep_staging=keep_staging, cluster_config=self.cluster_config)
         if workers is not None and (isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0):
             raise ValueError("workers must be a positive integer")
+        if any(not isinstance(source, (str, SourceSpec)) for source in sources):
+            raise TypeError("sources must contain strings or SourceSpec instances")
+        source_args = [source if isinstance(source, str) else
+                       f"{source.path}:{source.host}" if source.host else str(source.path)
+                       for source in sources]
         job_id = str(uuid.uuid4())
         jobs_dir(self.case_dir).mkdir(parents=True, exist_ok=True)
         log_path = job_log_path(self.case_dir, job_id)
 
         args = [sys.executable, "-m", "seclogx.cli.main", "ingest", self.name]
-        for s in sources:
+        for s in source_args:
             args += ["--source", s]
         if workers is not None:
             args += ["--workers", str(workers)]
@@ -344,6 +353,13 @@ class Case:
         # child while retaining the surrounding environment and credential
         # chain. Keep potentially sensitive broker URLs out of CLI arguments.
         child_env = os.environ.copy()
+        # Source metadata is separate from tuning options and retains each
+        # EVTX source's ANSI interpretation across the process boundary.
+        source_specs = [parse_source_arg(source) if isinstance(source, str) else source for source in sources]
+        child_env["SECLOGX_SOURCE_SPECS"] = json.dumps([
+            {"path": str(spec.path.resolve()), "host": spec.host, "ansi_codec": spec.ansi_codec}
+            for spec in source_specs
+        ])
         for name, value in {
             "SECLOGX_STORAGE_BACKEND": self.cluster_config.storage_backend,
             "SECLOGX_S3_BUCKET": self.cluster_config.s3_bucket,
@@ -367,8 +383,9 @@ class Case:
         initial_status = {
             "job_id": job_id,
             "case_name": self.name,
-            "sources": sources,
+            "sources": source_args,
             "phase": "scanning",
+            "hostname": socket.gethostname(),
             "started_at": now_iso(),
             "updated_at": now_iso(),
         }
@@ -377,13 +394,21 @@ class Case:
         write_job_status(self.case_dir, job_id, initial_status)
         try:
             with open(log_path, "wb") as log_file:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     args, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **popen_kwargs
                 )
         except OSError as exc:
             initial_status.update(phase="failed", error=f"could not start background ingest: {exc}", updated_at=now_iso())
             write_job_status(self.case_dir, job_id, initial_status)
             raise
+        if isinstance(getattr(process, "pid", None), int):
+            from .ingest.job_control import register_spawned_process
+            try:
+                register_spawned_process(self.case_dir, job_id, process.pid)
+            except OSError as exc:
+                # The child also registers itself. Return its job ID even if
+                # this auxiliary parent write fails after the process starts.
+                logging.getLogger(__name__).warning("Background job %s started; parent identity recording deferred: %s", job_id, exc)
         return job_id
 
     def job_status(self, job_id: str | None = None) -> dict | None:
@@ -400,6 +425,39 @@ class Case:
         """All background ingest jobs recorded for this case, most recently
         started first."""
         return _list_jobs(self.case_dir)
+
+    def cancel_job(self, job_id: str) -> dict:
+        """Cancel an owned local background process and its workers.
+
+        A committed import stays visible. Uncommitted work remains invisible
+        and can be reclaimed with :meth:`cleanup_ingest` or the next ingest.
+        """
+        from .ingest.job_control import cancel_job
+        return cancel_job(self.case_dir, job_id)
+
+    def cleanup_ingest(self, *, log_retention_days: int = 7) -> dict:
+        """Remove inactive uncommitted output and expired terminal-job logs.
+
+        Preserve source evidence, committed data, job status, and audit metadata.
+        Active worker leases protect output even after the coordinator exits.
+        """
+        from .ingest.job_control import cleanup_job_logs
+        from .ingest.snapshots import cleanup_retired
+        if isinstance(log_retention_days, bool) or not isinstance(log_retention_days, int) or log_retention_days < 0:
+            raise ValueError("log retention days must be a nonnegative integer")
+        self.list_jobs()  # reconcile dead processes before deciding log retention
+        return {"uncommitted_paths": cleanup_uncommitted(self.case_dir, self.cluster_config),
+                "retired_paths": cleanup_retired(self.case_dir, self.cluster_config),
+                "log_paths": cleanup_job_logs(self.case_dir, log_retention_days)}
+
+    def compact(self):
+        """Merge small local Parquet files without invalidating active readers."""
+        from .ingest.compaction import compact_case
+        report = compact_case(self.case_dir, self.cluster_config)
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+        return report
 
     # -- query --------------------------------------------------------------
     @property

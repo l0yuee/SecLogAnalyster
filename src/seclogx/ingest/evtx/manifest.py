@@ -1,9 +1,8 @@
-"""Staging manifest and ingest report.
+"""Per-source recovery, decoding metadata, and conversion counts.
 
-The manifest is the record of what happened during staging (one row per
-source .evtx file): how many records were recovered, whether the file
-parsed cleanly, partially, or not at all, and why. This is the direct
-answer to "ELK silently drops records on import" -- nothing here is silent.
+Parser errors and header discrepancies are reported explicitly. Header
+counts remain consistency evidence, not proof that every damaged record
+was recoverable or that all upstream parser errors were exposed.
 """
 
 from __future__ import annotations
@@ -36,6 +35,10 @@ class StagedFile:
     ndjson_path: str | None
     staged_at: str
     chunks: list[StagedChunk] = field(default_factory=list)
+    ansi_codec: str = "windows-1252"
+    ansi_codec_source: str = "default"
+    staging_format: str = "ndjson"
+    header_record_count: int | None = None
 
 
 @dataclass
@@ -52,6 +55,7 @@ class IngestReport:
     records_flattened: int
     staged_files: list[StagedFile] = field(default_factory=list)
     aux: "AuxIngestReport | None" = None
+    already_imported: list[dict] = field(default_factory=list)
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame([dataclasses.asdict(f) for f in self.staged_files])
@@ -63,9 +67,10 @@ class IngestReport:
         lines = [
             f"Ingest batch {self.batch_id} for case '{self.case_name}'",
             f"  files discovered : {self.files_discovered}",
+            f"  already imported : {len(self.already_imported)}",
             f"  files ok         : {self.files_ok}",
             f"  files partial    : {self.files_partial}"
-            + ("  <-- some records lost mid-file, see per-file errors" if self.files_partial else ""),
+            + ("  <-- recovery warnings, see per-file errors" if self.files_partial else ""),
             f"  files failed     : {self.files_failed}"
             + ("  <-- zero records recovered, see per-file errors" if self.files_failed else ""),
             f"  records staged   : {self.records_staged}",

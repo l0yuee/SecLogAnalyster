@@ -13,8 +13,9 @@ below, see [03. Querying & search](03_querying_and_search.md).
 
 ## Notebook environment
 
-Prepare the project once using the [installation guide](01_getting_started.md#install),
-including Rust/Cargo and the platform compiler for a source installation.
+Prepare the project once using the [installation guide](01_getting_started.md#install).
+A matching prebuilt wheel needs no Rust toolchain. A source installation
+needs Rust/Cargo and the platform compiler.
 The normal project install includes the native parser. Then start Jupyter in
 the dedicated environment:
 
@@ -60,22 +61,60 @@ job_id = c.ingest_background([r"E:\evidence:HOST01"])
 c.job_status(job_id)
 ```
 
-Wait for `done`, inspect the log and file report, then reopen the Case for fresh
-query views. `done` can include partial, failed or unknown sources. Captured
-exceptions mark the job `failed`; a killed process can leave a stale status.
+Wait for `done`, inspect the file report, then reopen the Case for fresh
+query views. `done` means the accepted batch was committed; individual sources
+can still be partial, failed or unknown. A heartbeat updates independently of
+file progress. Captured exceptions become `failed`; a verified dead local
+process becomes `interrupted`, or `done` when its commit was already recorded.
 Logs and status snapshots are in `c.case_dir / "jobs"`; an unknown job returns
-`None`. Foreground/background calls are alternatives: repeating the same import
-can append duplicates. Neither mode provides automatic resume, early-query
-guarantees or atomic visibility of the whole import.
+`None`. Job identities include the hostname, PID and process creation time.
+
+Both entry points publish the batch's files, source ledger and history together.
+Uncommitted output remains invisible. An unchanged source already committed
+under the same path, host and interpretation is skipped on retry; changed
+content or interpretation is a separate import and can contain overlapping
+rows. A failed batch restarts its unfinished work; this is not byte-offset resume.
+An existing query connection keeps its committed snapshot until closed.
 
 When `report.aux` exists, `report.aux.to_dataframe()` includes
 `parser_backend` / `backend_reason` for the actual parser and
-`output_format` / `parquet_paths` for the output. Direct sources publish private
-Parquet after closure and source checks; ordinary parsing errors can retain a
+`output_format` / `parquet_paths` for the output. Direct sources finalize private
+Parquet after closure and source checks, then join the batch commit; ordinary parsing errors can retain a
 complete prefix with `partial` status. Other formats and compatibility replay
 still stage before conversion. See [performance and scale](08_performance_and_scale.md).
 
+## Job control, source interpretation and maintenance
+
+```python
+# Cancel a background job owned by this machine, including its local workers.
+status = c.cancel_job(job_id)
+
+# Reclaim inactive uncommitted work, retired files no reader needs, and old logs.
+cleaned = c.cleanup_ingest(log_retention_days=7)
+
+# Merge eligible small Parquet files; automatic ingest maintenance also does this.
+compaction = c.compact()
+```
+
+Cancellation preserves committed data. Cleanup keeps job status JSON, source
+evidence and files still needed by live workers or query readers. Close old
+Case connections with a context manager to release their snapshots. Manual
+compaction currently supports local filesystem storage only; S3 is unsupported.
+
+For EVTX ANSI fields, supply the acquired system's code page when it differs
+from the default Windows-1252. This describes how evidence is decoded; Unicode
+EVTX fields are unaffected. Both ingest entry points accept `SourceSpec`:
+
+```python
+from pathlib import Path
+from seclogx import SourceSpec
+
+sources = [SourceSpec(path=Path("/evidence/events.evtx"), host="HOST01", ansi_codec="gbk")]
+report = c.ingest(sources)
+```
+
 ## Advanced resource and diagnostic controls
+
 
 `IngestOptions` is intended for deployment budgets and troubleshooting, not a
 required analysis workflow. Defaults use at most eight local parsing workers,
@@ -95,7 +134,7 @@ serially in the caller. Conversion threads are a separate budget.
 
 `staging_format="auto"` applies only to staged sources: at least 16 MiB selects
 Arrow IPC/ZSTD, otherwise gzip NDJSON. `"arrow"` / `"ndjson"` force the format;
-EVTX remains NDJSON. Strict native parsing on the staged path requires Arrow,
+EVTX uses the same automatic threshold. Strict native parsing on the staged path requires Arrow,
 including for small files. Direct output has no small-file Arrow threshold.
 
 After ingest, unfiltered `c.query()` and `c.web_logs()` still materialize whole
@@ -244,7 +283,8 @@ c.auth_events()
 
 # Hunt
 results = c.hunt()                      # or c.hunt(rules_dir=Path("..."), min_level="high")
-results.matches                         # DataFrame: matched event rows + sigma_rule_id/title/level/attack ids
+results.preview()                       # bounded DataFrame preview; attrs describe completeness
+results.total_matches                   # full match count, including rows outside the preview
 results.rule_summary                    # DataFrame: one row per rule evaluated, with match counts
 results.skipped                         # list[(path, reason)] for unsupported-logsource rules
 results.failures                        # list[RuleFailure] for conversion/execution errors
@@ -258,12 +298,21 @@ with Case.open("incident42") as c:
     df = c.summary()
 ```
 
+`results.matches` remains a DataFrame for small hunts. Large results stay on
+disk and this property raises `MemoryError`; use `results.preview()`,
+`results.iter_chunks()` or `results.save(path)` instead. `preview()` labels its
+DataFrame through `attrs`, including `total_matches`, `preview_rows` and
+`complete`. The complete result can be reopened later with
+`HuntResults.open(results.result_dir)` from `seclogx.detect.results`.
+
 ## Method reference
+
 
 | Category | Methods |
 |---|---|
 | Lifecycle | `Case.create(name, case_root=, cluster_config=)`, `Case.open(name, case_root=, cluster_config=)`, `Case.list_cases(case_root=)`, `c.info()` |
 | Ingest | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`; `c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`; `c.job_status(job_id=)` -> `dict \| None`; `c.list_jobs()` -> `list[dict]` |
+| Maintenance | `c.cancel_job(job_id)` -> `dict`; `c.cleanup_ingest(log_retention_days=7)` -> `dict`; `c.compact()` -> `CompactionReport` |
 | Ingest resources | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="auto", direct_parquet=None)` |
 | Exploration | `c.summary()`, `c.channels()`, `c.hosts()`, `c.table_counts()` |
 | Fields / no-SQL search | `c.fields(table, sample_size=)`, `c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`, `c.search_chunks(...)`, `c.search_to_csv(table, path, ...)` |
@@ -286,10 +335,12 @@ neither method accepts a `cluster_config` argument. Set the
 [10. Distributed deployment](10_distributed_deployment.md) before creating or
 opening the Case, or pass an explicit configuration to those factory methods.
 
-`ingest_background()` starts a new CLI process that resolves cluster settings
-from its inherited environment. An explicit in-memory `c.cluster_config` is not
-serialized to that child; configure the environment before spawning background
-work. The local `workers` budget does not control the size of a distributed queue.
+`ingest_background()` passes the Case's resolved configuration to its CLI
+child through the environment, including an explicit local configuration.
+SourceSpec host and ANSI-codec metadata are preserved too. Authentication
+continues through the inherited credential chain. The local `workers` budget
+does not control the size of a distributed queue. All participating machines
+need the shared metadata and source paths described in the deployment guide.
 
 Next: [07. Recipes](07_recipes.md) for worked, copy-pasteable examples
 using this API (and its `seclogx search` no-SQL equivalents).

@@ -20,6 +20,7 @@ from ..resources import CONVERSION_LOCK, IngestOptions
 from ..arrow_staging import arrow_reader
 
 from ...distributed.config import ClusterConfig
+from ...paths import duckdb_path
 from ...distributed.storage import ensure_hive_partition_dirs, get_storage_backend
 from .partitioning import PartitionRow
 from .schema import TABLES, cast_sql_for
@@ -64,7 +65,7 @@ def flatten_table(
         options.configure_connection(con)
         backend.configure_duckdb(con)
 
-        paths_sql = "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in ndjson_paths) + "]"
+        paths_sql = "[" + ", ".join("'" + duckdb_path(p).replace("'", "''") + "'" for p in ndjson_paths) + "]"
         # Read normalized fields as text before applying the canonical casts.
         # Automatic inference can interpret a timestamp-shaped message/user
         # name as TIMESTAMP in one shard, changing its original spelling when
@@ -107,11 +108,12 @@ def flatten_table(
                     bind_arrow()
             ensure_hive_partition_dirs(backend, lake_location, partition_columns, partition_rows)
 
+        destination = duckdb_path(backend.copy_target(lake_location)).replace("'", "''")
         (row_count,) = con.execute(
             f"""
             COPY (
               {select_query}
-            ) TO '{backend.copy_target(lake_location)}' (
+            ) TO '{destination}' (
               FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 1,
               PARTITION_BY ({partition_by}), OVERWRITE_OR_IGNORE true, FILENAME_PATTERN '{{uuid}}'
             )

@@ -83,6 +83,11 @@ workspace instead of raw XML and inconsistent text logs.
   rules are reported. Discovery filters known unrelated suffixes and empty
   files, and can skip inaccessible paths, so this is not a complete evidence
   inventory. See [known limitations](docs/known_limitations.md).
+- **Atomic import visibility and safe retries.** A query reads a committed
+  snapshot. Failed batches stay invisible; retrying unchanged sources with the
+  same provenance and decoding settings reuses committed imports. Background
+  jobs report process identity and heartbeat, support cancellation, and retain
+  audit records when abandoned output is cleaned.
 
 **Full documentation: [English](docs/index.md) | [中文](docs/index.zh-CN.md)**
 
@@ -93,8 +98,12 @@ edge cases.
 
 ## Install
 
-Normal installation now includes the Rust parser; no separate accelerator
-package or per-import performance switch is needed. **Installing this checkout
+Normal installation includes the Rust parser; no separate accelerator
+package or per-import performance switch is needed. A matching precompiled
+wheel installs without Rust/C++ build tools. Download the platform wheel from
+a successful [Product tests and wheels workflow](https://github.com/l0yuee/SecLogAnalyster/actions/workflows/ci.yml)
+run, extract its artifact, and follow the installation guide. Workflow artifacts
+are distinct from published Releases and may expire. **Installing this checkout
 from source requires stable Rust/Cargo and a native compiler/linker.** On Windows,
 install Visual Studio Build Tools with Desktop development with C++, MSVC tools
 and a Windows SDK, then the stable MSVC Rust toolchain. Linux needs GCC or Clang;
@@ -116,9 +125,9 @@ The project uses conda **`python314`**, isolated from `base`; the installation
 guide also covers creating it. Python >=3.10 is required. Pip installs the
 build backend and Python dependencies automatically. With matching dependency
 wheels, no separate DuckDB server or Arrow C++ installation is needed.
-Installing a maintainer-built platform wheel requires no Rust compiler for
-seclogx itself; this repository does not assume publicly available seclogx
-wheels. After upgrades, repeat the project install and restart Jupyter kernels.
+DuckDB 1.5.5 and EVTX 0.12.1 are pinned to the versions used for SQL isolation
+and recovery validation. After upgrades, repeat the project install and restart
+Jupyter kernels. See the installation guide for wheel download and install commands.
 
 ## Quickstart
 
@@ -134,7 +143,7 @@ wheels. After upgrades, repeat the project install and restart Jupyter kernels.
 seclogx ingest incident42 --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01
 
 # Alternative for a large import: start a separate case in the background.
-# Do not re-import the same evidence into one case; imports are additive.
+# Unchanged sources already committed with the same identity are skipped.
 seclogx ingest large_case --source /evidence/full_kape_output --background
 seclogx ingest-status large_case --watch
 
@@ -186,7 +195,10 @@ print(report.summary_text())
 To keep the Notebook responsive, use `c.ingest_background(sources)` instead
 of the foreground call, then poll `c.job_status(job_id)`. Wait for completion,
 inspect the report and reopen the Case before analysis. Background execution
-does not provide automatic resume or reduce the work itself.
+does not reduce the work itself. A failed batch can be retried without exposing
+its incomplete output; this is a batch restart, not continuation at a saved byte
+offset. `c.cancel_job(job_id)` stops owned local workers. `c.cleanup_ingest()`
+reclaims inactive uncommitted data and expired job logs while retaining audit JSON.
 
 Temporary staging is now removed after successful conversion by default;
 **source evidence is never deleted**. Use `keep_staging=True` only when you need
@@ -206,8 +218,9 @@ c = Case.open("incident42")
 
 c.summary()                       # pandas.DataFrame
 c.query("SELECT * FROM events WHERE event_id = 4688 LIMIT 10")
-c.hunt().matches                  # matched events/web_logs, tagged with rule + ATT&CK ids
-c.hunt().rule_summary             # one row per rule evaluated, with match counts
+h = c.hunt()                      # all matches saved; small results also fit in a DataFrame
+h.preview()                      # bounded preview; full count is h.total_matches
+h.rule_summary                   # one row per rule evaluated, with match counts
 c.timeline(host="WKS01", event_id=[4624, 4625])
 c.table_counts()                  # what log families this case has
 
@@ -258,6 +271,9 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | `seclogx case init <name>` / `case list` / `case info <name>` | Manage case workspaces (`--dir` overrides the case root) |
 | `seclogx ingest <case> --source PATH[:HOST]...` | Discover and normalize all supported log families (`--background` to run detached; `--staging-format auto/arrow/ndjson`) |
 | `seclogx ingest-status <case> [job_id] [--watch]` | Check on a `--background` ingest job |
+| `seclogx ingest-cancel <case> <job_id>` | Stop an owned local background job and its workers |
+| `seclogx ingest-cleanup <case>` | Reclaim inactive uncommitted/retired data and expired job logs |
+| `seclogx compact <case>` | Merge small local Parquet files while preserving active readers |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
 | `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, qcloud_logs, registry) |
@@ -279,9 +295,15 @@ Run any command with `--help` for full options.
 
 ```bash
 conda activate python314
-python -m pip install -e ".[dev]"
+python -m pip install -c constraints/python314.txt -e ".[dev,cluster]"
 python -m pytest
 ```
+
+The shared suite includes compact synthetic source samples, fault recovery,
+encoding, SQL isolation, native parser and installation checks. CI runs this
+same product suite against built wheels on CPython 3.14.2, on Windows x64,
+Linux x64, and macOS arm64/x64. Dependency constraints and fixture hashes keep
+local and clean-checkout validation aligned; see [testing instructions](tests/README.md).
 
 `python -m pip install -e ".[cluster]"` in the same environment adds `redis`/`rq`/`boto3`, needed only for
 distributed mode (`seclogx worker`, `seclogx cluster status`,

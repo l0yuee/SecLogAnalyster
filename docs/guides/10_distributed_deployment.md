@@ -26,7 +26,7 @@ Turning cluster mode on changes two things:
    Workers parse and write staging shards; the coordinator reads their
    manifests and performs the bounded DuckDB-to-Parquet conversions.
 2. **Sigma hunting.** `seclogx hunt` fans independent rules out across
-   workers the same way, then merges the matches back. Every rule's query
+   workers the same way, then assembles their saved result fragments. Every rule's query
    is already independent of every other rule's, so this is a pure
    parallel map -- not a different implementation of rule evaluation than
    the sequential path uses.
@@ -80,8 +80,8 @@ Changing the environment does not reconfigure an already-open object.
 | Variable | Default | Meaning |
 |---|---|---|
 | `SECLOGX_BROKER_URL` | unset | A `redis://...` URL. Its mere presence is what turns on distributed ingest/hunt dispatch -- unset, everything runs exactly as it always has, locally. |
-| `SECLOGX_STORAGE_BACKEND` | `local` | `local` (the case's `lake/` directory on disk, as always) or `s3` (the lake lives on S3-compatible object storage instead). |
-| `SECLOGX_S3_BUCKET` | unset | Required when `SECLOGX_STORAGE_BACKEND=s3`. The lake is stored under `s3://<bucket>/<case name>/lake/...` -- keyed by case name, so one bucket can hold many cases. |
+| `SECLOGX_STORAGE_BACKEND` | `local` | `local` (committed Parquet files under the case directory) or `s3` (the lake lives on S3-compatible object storage instead). |
+| `SECLOGX_S3_BUCKET` | unset | Required when `SECLOGX_STORAGE_BACKEND=s3`. New batches write under `s3://<bucket>/<case name>/ingest/<transaction id>/lake/...`; the committed catalog selects the visible objects. Legacy `.../<case name>/lake/...` remains readable. |
 | `SECLOGX_S3_ENDPOINT_URL` | unset | For MinIO or another S3-compatible endpoint instead of real AWS S3. |
 | `SECLOGX_S3_REGION` | unset | Passed through to both boto3 and DuckDB's `httpfs`. |
 
@@ -96,8 +96,8 @@ analysts), or use a broker with a filesystem lake that all hunt workers can
 read at the same path. S3 shares the Parquet lake; it does not transport
 source files or staging shards, and it does not distribute conversion work.
 
-`case.json`, `staging/` and `staging_aux/` remain under `--case-root` in
-every mode. **Source paths and writable staging paths must be shared at
+`case.json` and batch workspaces `.ingest/<transaction id>/` (including
+`s_evtx/` and `s_aux/`) remain under `--case-root` in every mode. **Source paths and writable staging paths must be shared at
 identical absolute paths between the coordinator and ingest workers.**
 Jobs carry file/path descriptions and options; they do not upload evidence
 or return file contents through Redis. Mounting a path only in the
@@ -107,9 +107,9 @@ the workers are Linux containers.
 
 Distributed and object-storage configurations automatically use staging.
 Staging holds the parsed dataset and can be large. Each ingest path finishes
-staging before converting groups, with no disk-space backpressure. Auxiliary
+staging before converting groups, with no disk-space backpressure. EVTX and auxiliary
 `auto` staging chooses Arrow IPC/ZSTD for source files at least 16 MiB and
-gzip NDJSON for smaller ones; EVTX retains NDJSON. Budget shared staging,
+gzip NDJSON for smaller ones. Budget shared staging,
 Parquet and temporary space: the default `keep_staging=False` deletes shards
 only after successful conversion. Use `keep_staging=True` for diagnostic
 retention; source evidence is unaffected. Distributed hunts also need the configured
@@ -150,7 +150,7 @@ is set, per-file parsing and hunt tasks use Redis/RQ. The ingest coordinator
 waits for staging and then converts it; it still needs CPU, memory and I/O.
 
 ```bash
-seclogx case init incident42 --case-root /shared/cases
+seclogx case init incident42 --dir /shared/cases
 seclogx ingest incident42 --case-root /shared/cases \
   --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01 \
   --memory-limit 2GB --duckdb-threads 2 --staging-format auto
@@ -196,14 +196,38 @@ duplicate of that reference.
 
 ## Locking and concurrent writers
 
-Updates to `case.json` use a local file lock, or a Redis lock when a broker
-is configured. This protects metadata read-modify-write, not the full
-ingest operation. It does not provide cross-run deduplication, rollback,
-atomic lake publication or consistent query snapshots. Coordinate one
-ingest writer per case and wait for completion before analysis. Separate
-coordinators and background jobs do not share `CONVERSION_LOCK`; adding a
-broker does not make their writes transactional. Redis lock identity also
-depends on the resolved case path, reinforcing the need for consistent mounts.
+An ingest batch prepares private output and atomically replaces the committed
+catalog in `case.json`, including file membership, source identities and run
+history. Uncommitted files remain invisible to normal queries. Retrying a
+committed unchanged source with the same identity skips it; changed content
+is a separate import and is not row-level deduplication. A query connection
+holds a reader lease for its captured catalog until closed. Distributed hunt
+workers open their own query snapshots, so avoid concurrent commits if all
+rules must see exactly the same dataset.
+
+The whole ingest operation uses a local file lock or, with a broker, a Redis
+lock. Redis ownership is renewed and checked before publication. This is
+**not strict fencing**: a coordinator paused longer than the Redis lease TTL
+can lose ownership, and a resumed process is not fenced by the storage system.
+Coordinate one ingest writer per case; Redis alone does not establish a
+distributed consensus or crash-safety guarantee for arbitrary shared storage.
+Separate coordinators also do not share the process-local `CONVERSION_LOCK`
+or its memory budget.
+
+Even with S3, all participants require the same case metadata at identical
+absolute paths on a reliable shared filesystem supporting atomic replacement
+and the required locking semantics. Redis lock identity uses the resolved case
+path. New catalogs record their storage backend, bucket, endpoint and region;
+opening them under a different storage identity is rejected. Moving a case to
+another backend needs an explicit migration, not an environment-variable switch.
+Legacy catalogs without this identity remain compatible.
+
+Small-file compaction currently supports local filesystem storage only; S3
+compaction is unsupported. `ingest-cancel` terminates verified processes on the
+originating host, not remote RQ workers. Worker leases prevent cleanup from
+removing active output; unknown remote process liveness is treated
+conservatively. Coordinate remote worker shutdown through the deployment.
+
 
 ## How it actually works (for the curious, or when something needs debugging)
 

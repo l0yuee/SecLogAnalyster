@@ -21,4 +21,4 @@ def hunt_command(
     console.print(results.summary_text())
     if out:
         results.save(out)
-        console.print(f"[green]wrote {len(results.matches)} matched rows to {out}[/green]")
+        console.print(f"[green]wrote {results.total_matches} matched rows to {out}[/green]")

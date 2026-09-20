@@ -31,20 +31,23 @@ provider 特有的字段存放在 `event_data` 内部，而不是作为顶层列
 先查看报告中的暂存和转换阶段，再调整参数，见[性能与规模](08_performance_and_scale.zh-CN.md)。
 
 **修复问题后想重新执行导入**
-每次导入都会追加记录，重复导入相同来源可能造成重复，转换失败也可能留下部分 Parquet 输出。
-当前没有自动续跑、去重或事务回滚。重新构建同一批证据时使用新 Case。保留的 NDJSON/Arrow 分片
-有助于排查失败；调用内部 flatten 函数不是受支持的断点恢复协议。
+未提交尝试的数据对查询不可见；重新调用 `c.ingest(sources)` 会在新工作区重放输入。
+新版本已提交、身份和 SHA-256 均不变的来源会跳过，报告中的 `already_imported` 列出详情。
+不同主机、格式或 EVTX 解码语义视为不同来源；已提交的 partial 仍保留其状态。
+没有字节位置续跑。旧 Case 会对 Parquet 溯源列做一次聚合，以路径、主机与 SHA-256
+识别未变化来源；EVTX 仅在默认解码且 `keep_raw=False` 时复用，辅助来源不受该选项影响。
+旧登记标为 `legacy_unknown`，不能证明旧解析完整。旧重复数据不会自动修复；需要修复旧结果时使用新 Case 重建。
 
 **Jupyter 一直忙碌，或内核使用了错误的 Python 环境**
 启动本地 Python 或 JupyterLab 前激活 `python314`，并检查所选内核的 `sys.executable`。
 `c.ingest()` 会阻塞直到完成；`c.ingest_background(sources)`
 使用同一解释器启动独立后台进程。通过 `c.job_status(job_id)` 查看进度，失败时检查
 `<case>/jobs/<job_id>.log`。阶段为 `done` 后重新打开 Case，以建立最新查询视图。
-后台执行不会降低内存需求，也不提供自动恢复；避免同时向同一 Case 写入。
+后台执行不会降低内存需求。任务会核对进程身份，支持取消，并沿用同一提交和重试规则；避免同时重复启动相同输入。
 
 **为什么出现 `.arrow` 文件，暂存为什么仍然很大？**
 兼容的本地 Web/IIS 来源自动跳过暂存。其他来源使用 `staging_format="auto"`：达到
-16 MiB 时采用 Arrow IPC/ZSTD，较小时采用 gzip NDJSON，EVTX 仍是 NDJSON。
+16 MiB 时采用 Arrow IPC/ZSTD，较小时采用 gzip NDJSON，EVTX 也采用该选择。
 这些来源仍先完成暂存再转换，因此临时磁盘需求可随完整暂存数据增长。转换成功后默认
 删除分片；`keep_staging=True` 会保留中间文件并选择暂存路径，不会删除原始证据。
 即使自动清理，也应为来源、暂存、Parquet 与临时文件共同预留空间。
@@ -84,6 +87,22 @@ key 查找（例如内置的 `scheduled_tasks` 和 `registry` 表——见[《3.
 对这一整列做文本匹配，而不要尝试按字段名深入到其中某一项——它们是 JSON
 *数组*，不是对象，按 key 提取不适用。
 
+**GBK 文本和 EVTX ANSI 字段应该如何处理？**
+文本读取不会仅因偶数字节就选择 UTF-16；BOM、交错 NUL/ASCII 证据和严格解码共同决定路径。
+无 BOM 且缺少明确证据的文本仍有歧义。EVTX ANSI 字段默认明确使用 `windows-1252`；
+已知来源代码页时传入 `SourceSpec(..., ansi_codec="gbk")`，Unicode 字段不受影响。
+查看来源报告中的 `ansi_codec`、`ansi_codec_source` 与恢复警告，见[日志类型](02_log_types_and_schema.zh-CN.md)。
+
+**Hunt 命中很多，无法读取 `.matches`**
+完整命中已自动保存在结果目录。查看 `total_matches`、`preview()`，通过 `iter_chunks()`
+逐块分析，或 `save(path)` 导出全部命中。大结果不再自动堆积成一个 DataFrame。
+
+**为什么合并之后旧 Parquet 文件仍然存在？**
+合并只替换已提交目录，旧文件继续供已打开的 `CaseDB` 快照读取。关闭旧读者后，
+用 `c.cleanup_ingest()` 回收已退役的受管理文件；旧版 `lake/` 文件仍保留。
+外部直接 DuckDB/文件读取不会登记租约，应在回收之前结束。自动整理针对本地的小文件密集分区，
+`c.compact()` 是显式本地维护入口；目前尚未实现 S3 合并。
+
 ## 已知限制
 
 完整、最新的 v1 范围决策与已知边界列表位于
@@ -97,8 +116,8 @@ key 查找（例如内置的 `scheduled_tasks` 和 `registry` 表——见[《3.
 - 导入时文本和注册表记录逐条输出到有界暂存批次，不再保留每个来源的全部行。计划任务 XML 整文档解析、
   注册表恢复和巨大的单个值仍是例外。worker 数量会放大解析器和缓冲开销；`memory_limit` 只控制单个
   DuckDB 转换的受管理内存，不是总 RSS 上限。见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
-- 解析与转换尚未形成带磁盘背压的流水线。自动续跑、跨次导入幂等、数据湖原子提交和查询快照均未实现；
-  元数据锁也不会使并发导入成为事务。
+- 解析与转换尚未形成带磁盘背压的流水线，也没有字节位置续跑。新导入使用原子目录提交及来源登记；
+  已有查询连接保持其快照。旧数据中的历史重复不会自动修复。
 - `.query()`/`.table()`/`.web_logs()` 等方法会把完整结果物化成一个 DataFrame；对于尚未过滤/聚合到较小规模的场景，请改用对应的
   `_chunks` 方法（见[《3. 查询与搜索》](03_querying_and_search.zh-CN.md)）。
 

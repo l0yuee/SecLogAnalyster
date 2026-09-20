@@ -73,9 +73,37 @@ change anything described above unless you turn it on.
 
 The package includes its Rust parser: one normal installation provides the
 Python API and the native extension. Analysts do not install an accelerator
-separately or choose performance modes for each import. This repository
-currently documents a **source installation**, which requires the build tools
-below. It does not assume a published, ready-to-download seclogx wheel.
+separately or choose performance modes for each import. Choose a matching
+precompiled wheel when available; source installation requires the build tools
+listed below.
+
+### Install a precompiled wheel
+
+Open a successful [Product tests and wheels workflow run](https://github.com/l0yuee/SecLogAnalyster/actions/workflows/ci.yml)
+for the version you intend to use. Download and extract `wheels-windows-x64`,
+`wheels-linux-x64`, `wheels-macos-arm64`, or `wheels-macos-x64` as appropriate.
+Artifacts may require a GitHub sign-in and expire; if the needed artifact is
+unavailable, use the source instructions below. Workflow artifacts are not
+package-index or GitHub Release publications.
+
+In `python314`, install the extracted wheel by its actual filename. For example,
+on Windows x64:
+
+```console
+conda activate python314
+python -m pip install --only-binary=:all: ./seclogx-0.2.0-cp310-abi3-win_amd64.whl
+python -m pip install jupyterlab ipykernel
+python -m ipykernel install --user --name python314 --display-name "Python (python314)"
+python -m jupyterlab
+```
+
+Create the environment first if needed: `conda create -n python314 python=3.14.2 pip`.
+The matching wheel includes the Rust extension and rules. **The analyst does not
+need Rust, Cargo, maturin, or a C/C++ compiler for this installation.** Pip installs
+runtime dependencies; `--only-binary=:all:` fails clearly if a dependency wheel is
+missing instead of starting a source build. Linux wheels require glibc 2.28 or
+newer; use the correct OS and CPU architecture. Platform runtime libraries, such
+as the Windows Visual C++ Redistributable mentioned below, may still be needed.
 
 ### Prepare the machine once
 
@@ -132,7 +160,7 @@ cd SecLogAnalyster
 ```
 
 If `python314` does not exist yet, create it once with
-`conda create -n python314 python=3.14 pip`; reuse the existing environment
+`conda create -n python314 python=3.14.2 pip`; reuse the existing environment
 otherwise. Then run from the repository root:
 
 ```bash
@@ -184,63 +212,84 @@ boundaries.
 
 ## The case workspace
 
-Everything revolves around a **case** -- a named workspace under
-`./cases/<name>/` (`case init/list/info` use `--dir`; ingest/query commands use
-`--case-root`) that holds:
+A **case** is a named workspace under `./cases/<name>/`. Case management commands
+use `--dir`; ingest and analysis commands use `--case-root`.
 
-```
+```text
 cases/<name>/
-  case.json                         # hosts and ingest run history
-  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX temporary shards (removed after successful conversion)
-  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # auxiliary temporary shards (direct sources skip these)
-  logs/ingest_<batch_id>.log          # EVTX reconciliation report
-  jobs/<job_id>.json                 # background status snapshot
-  jobs/<job_id>.log                  # background stdout/stderr and reports
-  lake/
-    events/host=<h>/channel=<c>/*.parquet                       # Windows Event Log
-    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat access logs
-    web_error_logs/host=<h>/log_type=<t>/*.parquet               # nginx/Apache/Tomcat/IIS HTTPERR error logs
-    scheduled_tasks/host=<h>/*.parquet                           # Task Scheduler definitions
-    exchange_message_tracking/host=<h>/*.parquet                 # Exchange mail flow
-    exchange_logs/host=<h>/log_type=<t>/*.parquet                # other Exchange CSV logs
-    syslog/host=<h>/*.parquet                                    # generic syslog, incl. auth.log/secure
-    auditd_logs/host=<h>/record_type=<r>/*.parquet                # Linux Audit Framework
-    journal_logs/host=<h>/*.parquet                              # systemd journal export
-    db_logs/host=<h>/log_type=<t>/*.parquet                       # MySQL/PostgreSQL/MSSQL/Oracle logs
-    qcloud_logs/host=<h>/log_type=<t>/*.parquet                   # Tencent Cloud Host Security client logs
-    registry/host=<h>/hive_type=<t>/*.parquet                     # Windows Registry hives
+  case.json                   # atomic committed catalog, source ledger, ingest history
+  .ingest/<transaction_id>/
+    state.json                # batch state and process identity
+    report.json               # detailed per-source outcomes
+    s_evtx/                   # EVTX temporary shards
+    s_aux/                    # auxiliary temporary shards; direct sources skip these
+    lake/<table>/.../*.parquet # immutable output, visible only when committed
+    logs/                     # batch reconciliation logs
+    workers/                  # active worker identities protect cleanup
+  .readers/                   # leases protecting open query snapshots
+  jobs/<job_id>.json          # progress, process identity and heartbeat
+  jobs/<job_id>.log           # background stdout/stderr and reports
+  hunts/<run>/               # complete saved hunt matches and summary
+  lake/                      # older case layouts remain readable
 ```
 
-`lake/` can live on S3-compatible object storage instead of local disk
-(`SECLOGX_STORAGE_BACKEND=s3` -- opt-in, see
-[10. Distributed deployment](10_distributed_deployment.md)); `case.json`,
-`staging/`, `staging_aux/`, `logs/`, and `jobs/` always stay local/NFS, in every
-mode.
+Tables retain their format-specific Hive partitions; see [schemas](02_log_types_and_schema.md).
+With S3 configured, Parquet objects live in object storage; metadata, staging,
+worker/reader coordination and job files still require the shared case directory.
+See [distributed deployment](10_distributed_deployment.md).
 
-You create a case once (`seclogx case init`), then `ingest` into it as
-many times as you like -- from different source paths, different hosts,
-even weeks apart. Every ingest run is additive and recorded in
-`case.json`. A single `ingest` run discovers and ingests every supported
-format found under the source paths in one pass -- you don't ingest each
-log type separately. A case only exposes the tables it actually has data
-for; check with `seclogx sources <case>` / `Case.table_counts()`.
+An ingest writes into a private batch workspace. One atomic catalog replacement
+publishes its Parquet files, source ledger and run history together. An aborted
+batch never becomes a partial query result. `partial` source outcomes can still
+be committed: inspect the report to distinguish recovered data from complete
+sources. Query connections retain the committed snapshot captured when opened;
+reopen an existing Case after a background import to see its new commit.
 
-Imports are additive, without cross-run deduplication or checkpoint/resume.
-Overlapping source paths are deduplicated within one scan, but running the same
-import twice appends duplicate rows. Compatible local Web/IIS sources use native
-direct output automatically; other sources stage before conversion. Temporary
-shards are removed after successful conversion by default. `keep_staging=True`
-retains them for diagnosis and selects the staged path, without affecting source
-evidence. Retained staging is not a resumable checkpoint, and cleanup does not
-eliminate peak staging disk use. Background ingest does not
-guarantee consistent queries while files are still being written. Wait for
-completion, review the report and reopen the Case before analysis.
+Retrying an unchanged source already committed with the same path, host, format,
+EVTX decoding/raw settings and ingest contract skips it and reports
+`already_imported`. Different hosts are kept distinct. A changed file or different
+source identity is a separate import; this is not row-level duplicate removal.
+An unsuccessful batch restarts from its sources on retry, not a saved byte offset.
+Do not manually delete committed `.ingest` directories: the catalog can reference
+their files even though the directory name starts with a dot.
 
-For sources that need staging, `auto` selects Arrow IPC for files of at least 16 MiB
-with ZSTD level 1, smaller files use gzip NDJSON. EVTX always uses NDJSON.
-Auxiliary Parquet uses ZSTD level 1. Advanced diagnostic overrides,
-memory/thread budgets and batch sizes are documented in the
-[CLI reference](05_cli_reference.md) and [Notebook API](06_python_api.md).
+Compatible local Web/IIS sources automatically use native direct output. Other
+inputs stage before conversion; `auto` selects Arrow IPC/ZSTD for supported
+staging paths at 16 MiB or above, gzip NDJSON below that threshold. EVTX also
+supports Arrow staging, and final Parquet uses ZSTD level 1. Temporary shards are
+removed after successful conversion unless `keep_staging=True`; source evidence
+is never deleted. Retaining staging supports diagnosis, not offset-based resume.
+
+Background jobs have an independent heartbeat and use PID plus creation time to
+identify processes. `c.cancel_job(job_id)` stops owned local processes and workers.
+`c.cleanup_ingest()` removes inactive uncommitted outputs, safely retired files,
+and terminal job logs older than seven days, keeping status and audit JSON.
+The next ingest also cleans inactive uncommitted work. An active worker prevents
+cleanup even after its coordinator dies. Cross-host process cancellation must be
+performed on the originating host.
+
+Small local Parquet files are merged automatically after committed imports when
+enough accumulate in one partition. `c.compact()` or `seclogx compact <case>` can
+request maintenance sooner. Open readers keep their old snapshot; retired files
+are reclaimed only after their reader leases end. Compaction does not currently
+support S3 storage.
+
+### Reproduce the product tests
+
+CI uses CPython 3.14.2 and the same committed product suite on Windows x64, Linux
+x64 and macOS arm64/x64. The runtime pins DuckDB 1.5.5 and EVTX 0.12.1 to the
+versions used for SQL isolation and recovery validation. Shared constraints pin
+the remaining validation dependencies. With source build tools prepared:
+
+```console
+conda activate python314
+python -m pip install -c constraints/python314.txt -e ".[dev,cluster]"
+python -m pytest
+```
+
+Small synthetic fixtures and generated failure cases are committed together
+with the tests; [testing instructions](../../tests/README.md) explain collection
+and wheel verification. These tests do not establish large-volume performance.
 
 ## Quickstart
 

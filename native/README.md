@@ -18,7 +18,9 @@ processes.
 
 Normal `Case.ingest(sources)` and `ingest_background(sources)` calls automatically
 use native Arrow-to-DuckDB conversion for compatible local sources and publish
-private Parquet after conversion and source checks finish. Other inputs and
+private Parquet after conversion and source checks finish. The complete ingest
+becomes visible through one atomic case-catalog update; source-level native
+success alone does not publish a partially completed batch. Other inputs and
 execution contexts use the staged compatibility path. `parser_backend="auto"`,
 `direct_parquet=None` and `keep_staging=False` are defaults; advanced overrides
 remain for diagnostics. No accelerator installation or per-import switch is
@@ -64,7 +66,7 @@ This builds the release extension and installs it with the Python package.
 `pip install .` does the same for a regular installation. Rules and reference
 data are included in normal wheels. No separate `pip install ./native` is
 needed. The old standalone `seclogx-native` build remains a developer compatibility
-target; the main adapter prefers its bundled extension.
+target; the main adapter loads only its bundled extension.
 
 The build targets Python's stable ABI for GIL-enabled CPython 3.10 and newer,
 not the distinct free-threaded ABI. This is a build target, not a claim that
@@ -80,7 +82,10 @@ conda run --no-capture-output -n python314 python -m pip wheel --no-deps . --whe
 An analyst installing the completed matching wheel does not need Rust/C++
 build tools for seclogx itself. Dependency wheels and platform runtime libraries
 still need to be available. These instructions do not imply a public wheel has
-already been published. Without Cargo, maturin may acquire a temporary Rust
+already been published. The [CI workflow](../.github/workflows/ci.yml) builds
+Windows x64, Linux x64 manylinux_2_28 and macOS arm64/x64 artifacts and runs the
+same product suite against them. Download artifacts only from a successful run;
+see the installation guide. Without Cargo, maturin may acquire a temporary Rust
 toolchain during the build; setting `MATURIN_NO_INSTALL_RUST=1` disables that
 acquisition. An offline source build needs a prepared Rust/compiler toolchain,
 Python build/runtime dependencies and Cargo's cached crates. There is no runtime
@@ -97,6 +102,21 @@ The interpreter resolves inside the selected environment. Rust source changes
 need a new build/install, including with editable installation. Do not use a
 debug wheel to assess release performance. `API_VERSION` identifies the adapter
 contract; unsupported versions must be rejected before records are staged.
+
+CI pins Rust 1.96.0, maturin 1.15.0, CPython 3.14.2, Cargo.lock and
+[validation dependencies](../constraints/python314.txt). Native parser semantic
+and Arrow ownership tests live in `tests/unit/test_native_web_semantics.py` and
+are part of the default product suite; a missing bundled extension fails them.
+
+```powershell
+conda run --no-capture-output -n python314 python -m pip install -c constraints/python314.txt -e ".[dev,cluster]"
+conda run --no-capture-output -n python314 python -m pytest
+conda run --no-capture-output -n python314 python scripts/check_wheel.py dist
+```
+
+The last check installs into a temporary target with Rust hidden, checks all
+bundled resources, and performs a native ingest outside the source checkout.
+It does not change the caller's installed project unless `--install` is passed.
 
 The release profile retains line tables for native stack diagnosis without
 changing its optimization level. On MSVC builds the matching PDB is a separate

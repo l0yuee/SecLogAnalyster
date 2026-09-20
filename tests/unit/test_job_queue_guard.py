@@ -57,9 +57,8 @@ def test_empty_batch_is_a_no_op():
 def _run_script(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
     script = tmp_path / "user_script.py"
     script.write_text(textwrap.dedent(body))
-    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
     return subprocess.run(
-        [sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=180
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=180
     )
 
 

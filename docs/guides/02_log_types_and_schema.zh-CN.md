@@ -26,6 +26,31 @@
 | `event_data` | provider 特有字段，以 JSON 形式存储（见下文） |
 | `source_file` / `source_path` / `file_sha256` | 溯源信息 / 证据链 |
 
+## 编码与 EVTX 恢复
+
+文本分类与整文件解码共享编码策略：UTF-16 需要 BOM 或明确的交错 NUL/ASCII 字节证据，
+不会因 GBK 文件字节数为偶数就优先选 UTF-16。16 KiB 分类前缀允许末尾截断一个多字节字符。
+其他文本严格尝试 UTF-8、GB18030，再回退 Latin-1；无法明确判断的无 BOM 文本仍可能误判。
+
+EVTX 在可恢复的块错误之后继续读取后续块。来源报告保留恢复数量、错误信息及
+`header_record_count`，后者来自有效块头的物理记录序号，是一致性检查，不是对全部损坏记录的保证。
+`partial` 表示需要检查恢复警告；转换记录数不一致、I/O 错误和检测到的来源变化会中止导入。
+
+EVTX 的 ANSI 字段使用来源机器的代码页，与 Unicode 字段分开处理。无法从文件可靠推断时，
+默认显式使用 `windows-1252`，不跟随分析员电脑的区域设置，也不假定所有来源都是中文系统。
+已知来源代码页时可传入证据元数据：
+
+```python
+from pathlib import Path
+from seclogx import SourceSpec
+
+report = c.ingest([SourceSpec(Path("evidence/Security.evtx"), host="HOST01", ansi_codec="gbk")])
+report.to_dataframe()[["source_file", "ansi_codec", "ansi_codec_source", "status", "record_count"]]
+```
+
+`cp936` 也可表示 GBK；报告记录实际代码页及其来自显式来源信息还是默认值。
+相同文件采用不同主机标签或解码语义时，不会被视为同一份已导入来源。
+
 ## `event_data` 字段
 
 所有 provider 特有的内容（Sysmon 的 `Image`、`CommandLine`、`ParentImage`；Security 的
@@ -57,7 +82,7 @@ Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每�
 访问器，直接返回 `pandas.DataFrame`（`c.web_logs()`、`c.scheduled_tasks()` 等），与
 `events` 通过 `summary()`/`hosts()`/`channels()` 获得的一等待遇完全相同——见[《6. Python API》](06_python_api.zh-CN.md)。
 
-两种暂存格式使用相同的归一化列。默认情况下，非 EVTX 源文件达到 16 MiB 时使用
+两种暂存格式使用相同的归一化列。默认情况下，暂存源文件（包括 EVTX）达到 16 MiB 时使用
 Arrow IPC/ZSTD level 1，更小的文件使用 gzip NDJSON。二者均使用固定输入类型再转换为规范类型：
 缺失字段及无效的类型值成为 `NULL`，形似时间戳的普通文本保持原样。`extra`、`fields`
 等 JSON 列在 Parquet 中实际保存为 JSON 文本。显式带时区偏移的时间归一为 UTC；

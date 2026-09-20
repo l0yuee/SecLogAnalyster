@@ -16,13 +16,10 @@ discard each chunk to avoid accumulating the full result. Chunking limits
 the rows delivered to Python at once; row width and query execution can
 still require substantial memory.
 
-The lake is organized as one table per log family under `lake/<table>/`
-(`events` for Windows Event Log; `web_logs`, `web_error_logs`,
-`scheduled_tasks`, `exchange_message_tracking`, `exchange_logs` for the
-other artifact types -- see ingest/logsources/schema.py). A view is created per
-subdirectory found, so a case only ever exposes tables it actually has
-data for, and a new log family only needs a lake subdirectory to become
-queryable here -- true for both the eager and chunked accessors.
+Views use the exact committed Parquet paths in case.json. Legacy cases
+without a catalog enumerate lake/<table>/ once to capture a snapshot.
+Reader leases keep retired files available until connections and active
+streaming cursors close.
 """
 
 from __future__ import annotations
@@ -33,10 +30,13 @@ from typing import Iterator
 
 import duckdb
 import pandas as pd
+import weakref
 
 from .distributed.config import ClusterConfig
 from .distributed.storage import get_storage_backend
 from .memcheck import available_memory_bytes
+from .paths import duckdb_path
+from .ingest.snapshots import capture_snapshot, release_snapshot, retain_snapshot
 
 # DuckDB's internal vector size (rows per execution batch) -- fetch_df_chunk()
 # takes a count of these, not a row count, so user-facing `chunksize` (rows)
@@ -84,6 +84,8 @@ class CaseDB:
         self.lake_dir = self.backend.lake_location(self.case_dir)
         self._con = duckdb.connect()
         self.backend.configure_duckdb(self._con)
+        self._active_streams = 0
+        self._close_requested = False
         self.tables: list[str] = []
         # search.py's per-table "which columns hold a JSON object" detection
         # is content-sniffed (see there for why), not free -- cached here so
@@ -94,17 +96,16 @@ class CaseDB:
         # Likewise for DESCRIBE results (search.py's `_table_columns`),
         # which field resolution needs once per search condition.
         self._table_columns_cache: dict[str, list[tuple[str, str]]] = {}
-        if self.backend.exists(self.lake_dir):
-            for table_name in sorted(self.backend.table_dirs(self.lake_dir)):
-                table_location = self.backend.join(self.lake_dir, table_name)
-                if not self.backend.has_parquet(table_location):
-                    continue
-                glob = self.backend.parquet_glob(table_location)
-                self._con.execute(
-                    f"CREATE VIEW {table_name} AS "
-                    f"SELECT * FROM read_parquet('{glob}', hive_partitioning=true, union_by_name=true)"
-                )
+        self.parquet_files, lease = capture_snapshot(self.case_dir, self.cluster_config, self.backend)
+        self._release = weakref.finalize(self, release_snapshot, self._con, lease)
+        try:
+            for table_name, paths in sorted(self.parquet_files.items()):
+                self._con.read_parquet([duckdb_path(path) for path in paths],
+                                       hive_partitioning=True, union_by_name=True).create_view(table_name)
                 self.tables.append(table_name)
+        except BaseException:
+            self._release()
+            raise
         self._has_data = "events" in self.tables
 
     @property
@@ -113,6 +114,8 @@ class CaseDB:
         return self._con
 
     def _require_data(self) -> None:
+        if self._close_requested:
+            raise RuntimeError("query connection is closed")
         if not self.tables:
             raise RuntimeError(f"case at {self.case_dir} has no ingested data yet -- run `ingest` first")
 
@@ -143,12 +146,26 @@ class CaseDB:
         self._require_data()
         vectors_per_chunk = max(1, chunksize // _DUCKDB_VECTOR_SIZE)
         cursor = self._con.cursor()
-        cursor.execute(query, params or [])
-        while True:
-            chunk = cursor.fetch_df_chunk(vectors_per_chunk)
-            if chunk.empty:
-                return
-            yield chunk
+        try:
+            lease = retain_snapshot(self.case_dir, self.cluster_config, self.parquet_files)
+        except BaseException:
+            cursor.close()
+            raise
+        self._active_streams += 1
+        try:
+            cursor.execute(query, params or [])
+            while True:
+                chunk = cursor.fetch_df_chunk(vectors_per_chunk)
+                if chunk.empty:
+                    return
+                yield chunk
+        finally:
+            try:
+                release_snapshot(cursor, lease)
+            finally:
+                self._active_streams -= 1
+                if self._close_requested and not self._active_streams:
+                    self._release()
 
     def estimate(self, query: str, params: list | None = None, sample_rows: int = 2000) -> ResultSizeEstimate:
         """Cheaply estimate a query's result size before deciding whether
@@ -266,7 +283,9 @@ class CaseDB:
         return sorted((r[0] for r in rows), key=lambda x: (x is None, x))
 
     def close(self) -> None:
-        self._con.close()
+        self._close_requested = True
+        if not self._active_streams:
+            self._release()
 
     def __enter__(self) -> "CaseDB":
         return self

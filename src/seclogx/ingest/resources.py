@@ -39,7 +39,7 @@ class IngestOptions:
     threads: int = 2
     staging_chunk_bytes: int = 64 * 1024 * 1024
     flatten_batch_bytes: int = 256 * 1024 * 1024
-    # Auxiliary text/artifact staging only; EVTX keeps its raw JSON contract.
+    # Shared bounded staging; EVTX preserves its raw data JSON inside Arrow.
     staging_format: str = "auto"
     # Native parsers preserve the same canonical table contract.
     parser_backend: str = "auto"

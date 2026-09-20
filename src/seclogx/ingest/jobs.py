@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -47,11 +48,22 @@ def jobs_dir(case_dir: Path) -> Path:
 
 
 def job_status_path(case_dir: Path, job_id: str) -> Path:
+    validate_job_id(job_id)
     return jobs_dir(case_dir) / f"{job_id}.json"
 
 
 def job_log_path(case_dir: Path, job_id: str) -> Path:
+    validate_job_id(job_id)
     return jobs_dir(case_dir) / f"{job_id}.log"
+
+
+def validate_job_id(job_id: str) -> str:
+    """A job identifier is one portable filename component, never a path."""
+    if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id):
+        raise ValueError("invalid job ID")
+    if job_id.upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        raise ValueError("invalid job ID")
+    return job_id
 
 
 def write_job_status(case_dir: Path, job_id: str, status: dict) -> None:
@@ -84,18 +96,26 @@ def write_job_status(case_dir: Path, job_id: str, status: dict) -> None:
             tmp.unlink(missing_ok=True)
 
 
-def read_job_status(case_dir: Path, job_id: str) -> dict | None:
+def read_job_status(case_dir: Path, job_id: str, *, reconcile: bool = True) -> dict | None:
     path = job_status_path(case_dir, job_id)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        status = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         # A reader can race a concurrent write to the same path in theory
         # (os.replace is atomic, but a prior read of a since-deleted file
         # or a transient decode hiccup shouldn't crash `ingest-status`);
         # the next poll simply tries again.
         return None
+    if not isinstance(status, dict):
+        return None
+    if status.get("job_id") not in (None, job_id):
+        return None
+    if reconcile and status.get("job_id") == job_id:
+        from .job_control import reconcile_status
+        return reconcile_status(Path(case_dir), status)
+    return status
 
 
 def list_jobs(case_dir: Path) -> list[dict]:
@@ -105,8 +125,10 @@ def list_jobs(case_dir: Path) -> list[dict]:
     statuses = []
     for p in sorted(d.glob("*.json")):
         try:
-            statuses.append(json.loads(p.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
+            status = read_job_status(case_dir, p.stem)
+            if status is not None:
+                statuses.append(status)
+        except ValueError:
             continue
     statuses.sort(key=lambda s: s.get("started_at") or "", reverse=True)
     return statuses

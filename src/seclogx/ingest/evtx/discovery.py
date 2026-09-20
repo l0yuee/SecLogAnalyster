@@ -20,6 +20,7 @@ class DiscoveredFile:
     path: Path
     host: str
     size_bytes: int
+    ansi_codec: str | None = None
 
 
 def discover_evtx_files(sources: list[SourceSpec]) -> list[DiscoveredFile]:

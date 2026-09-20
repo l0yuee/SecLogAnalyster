@@ -10,7 +10,7 @@
 
 `seclogx hunt` 会运行所有能够加载并转换成功的 Sigma 规则，并报告三类信息：
 
-- **匹配结果（`results.matches`）**：实际匹配到的事件行，每一行都附带
+- **匹配结果（小型狩猎使用 `results.matches`）**：实际匹配到的事件行，每一行都附带
   `sigma_rule_id`、`sigma_rule_title`、`sigma_level` 以及 `sigma_attack_ids`（以逗号分隔的
   MITRE ATT&CK 技术编号列表，例如 `T1003.001, T1003.002`）。
 - **规则汇总（`results.rule_summary`）**：**每条被评估的规则**一行（而非每条匹配一行）——包含标题、级别、作者、匹配计数、ATT&CK 标签、参考链接。某条规则
@@ -35,10 +35,52 @@ IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内�
 排查计划任务，`Case.suspicious_registry()` / `seclogx registry --suspicious`
 排查注册表，`web_error_logs`、Exchange 与 `db_logs` 数据则用原生 SQL 或 `search()`（见[《7. 常用查询》](07_recipes.zh-CN.md)）。
 
-狩猎结果并非分块交付：每条规则的匹配行会物化为 pandas DataFrame，保留后再合并。同一事件命中多条规则时可以重复出现。
-宽泛规则可能使内存随总匹配数增长；`IngestOptions` 和 `search()` 的结果大小检查不限制此路径。
-分布式狩猎也会把匹配结果返回协调进程。可按需要缩小规则目录并使用 `min_level`/`--min-level`。
-需要完整批次视图时，应在导入完成后狩猎；导入没有原子快照提交。
+## 在 Jupyter 中处理大型结果
+
+`c.hunt()` 会自动将完整匹配保存为案例 `hunts/` 目录下的 Parquet 文件。
+小型结果仍可通过 `results.matches` 或 `results.to_dataframe()` 获得完整 DataFrame。
+当所有规则的累计结果超过自动内存或行数预算时，这两个入口会抛出带有操作说明的 `MemoryError`。
+这项行为自动生效，无需调整导入或狩猎参数。
+
+```python
+results = c.hunt()
+print(results.summary_text())
+print(results.total_matches)       # 已评估规则的精确总命中数
+display(results.preview(100))      # 预览，不代表完整结果
+
+results.save("all-matches.csv")    # 流式导出全部匹配，大结果同样适用
+for chunk in results.iter_chunks():
+    # 分析或汇总当前分块，处理后释放。
+    print(chunk["sigma_rule_title"].value_counts())
+```
+
+`preview()` 在预览字节预算内返回不超过指定行数的结果，默认请求 100 行。
+返回 DataFrame 的 `attrs` 包含 `total_matches`、`preview_rows`、`complete`，分别表示总命中数、
+预览行数和是否完整。`is_spilled` 表示完整结果超过了自动 DataFrame 加载预算。
+`iter_chunks()` 按有界批次读取所有已保存的行；请只保留需要的汇总，不要把全部分块收集到列表中。
+Arrow 批次大小会根据 Parquet 元数据调整，较宽的批次在转为 pandas 之前拆分。
+单条特别宽的记录或 Parquet 字典解码仍可能超过批次的字节目标，目标并非进程内存硬上限。
+
+关闭 Case 或重启 Jupyter 后，保存的结果仍然可用：
+
+```python
+from seclogx.detect import HuntResults
+
+saved_directory = results.result_dir  # 保存此路径，供后续会话使用
+reopened = HuntResults.open(saved_directory)
+display(reopened.preview())
+```
+
+同一事件可以因命中多条规则而出现多次，因此总数是规则命中数，不是唯一事件数。
+完整匹配可能占用较多磁盘空间。失败规则会保留在 `failures` 中，其未完成输出不会计入结果。
+每次本地狩猎读取一个已提交的案例快照；分布式 worker 分别获取已提交快照，
+如需所有 worker 针对同一份数据运行，应等导入结束后再狩猎。
+分布式 worker 返回结果路径和计数，需要能够访问共享的案例目录。
+
+外部规则字段会经过校验和标识符引用，只有项目维护的字段映射可以生成 SQL 表达式。
+生成的查询在独立受限连接中运行，仅允许目标案例表和支持的条件表达式；
+额外 SQL 语句、任意函数和无关文件访问会被拒绝。这些限制不会判断检测规则是否有效或执行代价是否合理，
+仍应检查命中数与失败信息。
 
 ## 扩展检测能力：自定义规则与字段映射
 

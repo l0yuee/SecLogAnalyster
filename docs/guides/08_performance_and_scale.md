@@ -46,7 +46,7 @@ The default `parser_backend="auto"` selects compatible native parsing and uses
 Python for unsupported formats, encodings or syntax. If the installed extension
 cannot load, runtime compatibility handling records the reason and uses Python;
 this is distinct from a failed source installation, which requires build tools.
-EVTX retains its existing parser. A late capability mismatch discards all private
+EVTX retains its Rust dependency, with one native thread per file worker. A late capability mismatch discards all private
 native output for that source before replaying the entire source in Python.
 Such replay can add a read. I/O errors, detected source changes and invalid
 native batches are errors, not reasons to silently replay.
@@ -77,21 +77,43 @@ Python staging replay. Direct batches use the fixed VARCHAR input schema,
 canonical SQL and ZSTD Parquet output; `staging_format` applies only to other
 sources and compatibility replay.
 
-Each direct source writes private files under `<case>/_ingest_private/`, outside
-`lake/`, and publishes them only after conversion, closure and source checks.
-An ordinary parsing error can publish a complete accepted prefix as `partial`;
-zero recovered rows produce `failed` without output. Source changes, I/O,
-invalid batches and conversion errors fail instead of switching backends.
-Manifests distinguish parsing from `output_format` (`staged` or `parquet`) and
-`parquet_paths`.
+Each direct source writes inside the attempt's `.ingest/<id>/` workspace.
+After conversion, closure and source checks, it enters that attempt's private
+lake. All conversion counts must reconcile before one atomic `case.json`
+replacement commits the output catalog, source ledger and run record together.
+Queries cannot see any of the new attempt before that commit.
 
-This is a source-level boundary, not an atomic whole-import transaction:
-previously published sources remain if a later one fails, and a crash can leave
-private files. There is no automatic recovery, resume or cross-run deduplication.
-Windows publication refuses to overwrite an existing file. POSIX publication
-requires hard links and a shared filesystem for private output and destination;
-unsupported publication fails rather than copying or replaying. These paths do
-not imply every platform/dependency combination has been validated.
+The ledger combines canonical source path, host, kind, EVTX ANSI codec/raw
+retention, ingest contract and SHA-256. Unchanged committed sources are skipped
+and listed in `report.already_imported`; different hosts or decoding semantics
+remain distinct. Committed partial sources keep their partial status. Retry
+reparses failed-attempt input in a new workspace, not from byte checkpoints.
+
+Legacy `lake/` files are adopted without rewriting. A one-time provenance-column
+aggregation reconstructs path/host/SHA-256 entries; matching unchanged sources are
+skipped under the default EVTX decoding and `keep_raw=False` policy, while auxiliary
+sources are independent of that flag. Such entries are `legacy_unknown`, because
+old rows cannot prove a complete parse. Existing duplicates are not repaired. Cleanup protects active
+coordinators/workers, source evidence and committed output; inactive uncommitted
+bulk data can be removed while retaining state/reports. This is process-interruption
+atomicity, not a universal power-loss durability guarantee.
+
+## Automatic small-file maintenance
+
+After a successful ingest, local partitions with at least 128 files smaller than
+8 MiB each are eligible for automatic compaction. Groups contain at most 256 MiB
+of compressed input and share a 2GB/two-thread conversion budget. `c.compact()` or
+`seclogx compact CASE` explicitly considers smaller groups of two or more small
+files. Rows and schema must match before an atomic catalog replacement; compaction
+does not remove repeated event rows.
+
+Old physical files remain for registered `CaseDB` readers of the previous snapshot.
+`c.cleanup_ingest()` reclaims retired managed `.ingest/` files only after those
+readers close. Legacy `lake/` files are retained for older-reader compatibility.
+Direct external DuckDB/file readers are not tracked; finish them before reclamation.
+Budget for both old and new output during compaction. S3 automatic maintenance is
+skipped and explicit S3 compaction is unsupported. Benefits depend on file sizes
+and queries, not merely the number of files.
 
 ## Advanced deployment and diagnostic controls
 
@@ -113,8 +135,7 @@ memory. Change budgets for deployment constraints, not as a routine analysis ste
 On staged sources, `staging_format="auto"` uses Arrow IPC/ZSTD level 1 at
 16 MiB or more and gzip NDJSON below that size. Explicit `"arrow"` / `"ndjson"`
 override this. Native parsing on the staged path requires Arrow; strict native
-mode needs `staging_format="arrow"` for small files too. EVTX staging remains
-NDJSON. Direct conversion has no staging-size threshold. The CLI exposes these
+mode needs `staging_format="arrow"` for small files too. EVTX follows the same automatic Arrow/NDJSON selection. Direct conversion has no staging-size threshold. The CLI exposes these
 advanced overrides as `--parser-backend`, `--direct-parquet` /
 `--no-direct-parquet`, and `--staging-format`; omission keeps automatic selection.
 
@@ -136,17 +157,17 @@ Detaching frees the Notebook for other cells; it does not reduce the ingest's
 work, memory or disk needs. Check for phase `done` or `failed` and inspect
 `<case>/jobs/<job_id>.log` on failure. After `done`, reopen the case to query
 with fresh views; an existing query connection is not refreshed by another
-process. A background job is not a resumable transaction.
+process. Background and foreground imports share catalog commits and safe whole-attempt retry.
 
-Do not run both examples against the same evidence to switch modes: repeated ingest can duplicate records. See [Python API](06_python_api.md) for callbacks and script guards.
+Unchanged sources registered by this version are explicitly skipped on repeat; simultaneous duplicate starts still waste uncommitted work. See [Python API](06_python_api.md) for callbacks and script guards.
 
 ## Memory and disk boundaries
 
 - Text-log and registry parsers emit completed records during ingest. Direct parser calls without `emit` retain the full-list API and its memory cost. Scheduled Task XML remains a whole-document parse, limited to 8 MiB by ingest. Registry uses a file-backed hive; transaction-log recovery through regipy and exceptionally large individual values remain memory exceptions.
-- During auxiliary text ingest, SHA-256 and strict UTF-8 validation share one bounded full-file pass, followed by the parsing pass. Non-UTF-8 sources retain the strict UTF-16/GB18030/Latin-1 fallback sequence and may require more reads; QCloud requires a UTF-16 BOM. Validation completes before any record is emitted. File identity, size and timestamps are checked when reusing this preparation; this is not an immutable evidence snapshot. Direct parser calls outside ingest still validate their input independently.
+- During auxiliary text ingest, SHA-256 and strict UTF-8 validation share one bounded full-file pass, followed by the parsing pass. UTF-16 requires a BOM or strong interleaved NUL/ASCII evidence; other non-UTF-8 sources try strict GB18030 then Latin-1 and may require more reads; QCloud requires a UTF-16 BOM. Validation completes before any record is emitted. File identity, size and timestamps are checked when reusing this preparation; this is not an immutable evidence snapshot. Direct parser calls outside ingest still validate their input independently.
 - Physical text lines have an 8 Mi-character limit. Logical-record and format limits also apply, including QCloud's 4 Mi characters/100,000 lines, database limits and CSV field size. Oversized records produce explicit errors; see [known limitations](../known_limitations.md).
 - `staging_chunk_bytes` targets **uncompressed bytes**: encoded NDJSON bytes for gzip, or Arrow batch buffer bytes for IPC. Gzip shards rotate between records with a bounded 256 KiB write buffer. Arrow uses record batches bounded by 16,384 rows and a 16 MiB size estimate, rotating shards between batches, plus a 1 MiB output buffer per active writer. One record can exceed a batch/shard target; encoded records above 32 MiB are rejected.
-- Scratch paths include batch IDs: `staging/<batch_id>/<host>/` and `staging_aux/<batch_id>/<host>/`. Sources on the staged paths complete staging before flattening bounded shard groups. `flatten_batch_bytes` is a target, and an indivisible shard can exceed it. File/shard metadata grows with its count, and the full staged dataset can accumulate before conversion, including other formats and compatibility replays when direct conversion is enabled.
+- Scratch paths are isolated under `.ingest/<id>/s_evtx/` and `.ingest/<id>/s_aux/`. Sources on the staged paths complete staging before flattening bounded shard groups. `flatten_batch_bytes` is a target, and an indivisible shard can exceed it. File/shard metadata grows with its count, and the full staged dataset can accumulate before conversion, including other formats and compatibility replays when direct conversion is enabled.
 - Gzip and Arrow staging are **removed after successful conversion by default**. Automatic direct output skips these shards for compatible local sources; other sources can still accumulate a complete staged dataset before conversion. `keep_staging=True` retains intermediate files and selects staging. Source evidence is never deleted. Budget for source evidence, staging, Parquet and temporary working files together; cleanup does not eliminate peak staging usage.
 - EVTX `keep_raw=True` uses temporary SQLite indexing instead of a whole-file XML dictionary. It still adds an XML parse, index I/O, larger output and temporary disk space; no fixed speed or memory multiplier is promised.
 - The 2 GiB non-EVTX source-file exclusion has been removed. Supported large files reach their parser; record/document limits remain. A shared scan classifies both pipelines using bounded content peeks. Unknown files are reported without full hashing or parsing tasks.
@@ -156,6 +177,24 @@ DuckDB reads each bounded group into partitioned Parquet. Arrow staging feeds ba
 Auxiliary staging also collects a bounded partition list, allowing Windows local storage to pre-create Hive directories without rereading all staged rows. Collection is limited to 4,096 partitions and 1 MiB of encoded partition values per source; a conversion group also falls back above 4,096 unique partitions. Legacy manifests, unsupported values or an exceeded bound retain the authoritative DuckDB `SELECT DISTINCT` scan. These limits disable the optimization, not the import. EVTX keeps its existing partition-discovery path; POSIX/object storage do not need the Windows directory pre-creation step.
 
 Auxiliary conversion uses fixed VARCHAR input columns followed by canonical casts, without schema-inference sampling. Date-shaped free text therefore keeps its original spelling across different shard boundaries. Tomcat records exceeding 200 continuation lines are rejected before emitting the current entry; completed earlier records can remain in a partial file.
+
+## EVTX integrity and analysis results
+
+Recoverable EVTX iterator errors do not terminate the whole file; later valid
+chunks are read. The hash pass audits structurally valid chunk-header record
+counts and marks discrepancies partial. Corrupt headers and unexposed upstream
+errors still limit this check; recovered counts are not proof of complete recovery
+for arbitrary damage. Known ANSI source metadata uses `SourceSpec.ansi_codec`, with
+an explicit `windows-1252` default; see [log types](02_log_types_and_schema.md#encoding-and-evtx-recovery).
+
+EVTX Arrow removes the outer JSON staging encode/reparse while preserving rendered
+JSON/XML and canonical SQL. The dependency still crosses the Python boundary per
+record. Parquet uses ZSTD level 1. `keep_raw=True` still adds XML parsing and disk
+indexing costs.
+
+Hunt automatically retains complete results on disk. Small results keep `.matches`;
+large results use `preview()`, `iter_chunks()` or `save()`. `total_matches` counts
+all matches, and a preview never silently substitutes for complete results.
 
 ## Deployment diagnosis before changing parallelism
 
@@ -170,7 +209,7 @@ records as well as speed. Measure:
 
 Start with `workers=1` for a tighter budget and change one setting at a time. More workers can increase disk contention and memory even with streaming. Lower DuckDB memory can increase spilling or fail conversion; reserve temporary disk space and inspect reported errors.
 
-Automatic resume, cross-run idempotency, atomic query snapshots and immediate flattening with disk-space backpressure are not implemented. Failure after some conversion groups were written can leave partial lake output. Retained shards help investigation but do not provide a resume/commit protocol.
+There is no byte-offset resume or immediate flattening with disk-space backpressure. Failed attempts remain invisible and are replayed on retry. Existing query connections retain a committed snapshot; reopen after another process imports. Retained shards are diagnostic material, not an alternative public commit interface.
 
 After ingest, use filtered queries or `_chunks` accessors for large results. Unfiltered `.query()`/`.web_logs()` still materialize complete DataFrames; ingest options do not change query delivery. See [Querying & search](03_querying_and_search.md).
 

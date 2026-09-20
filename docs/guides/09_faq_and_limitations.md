@@ -37,11 +37,15 @@ SQLite indexing; its cost is workload-dependent. Check the reported staging
 and conversion phases before tuning; see [Performance & scale](08_performance_and_scale.md).
 
 **I want to re-run ingest after fixing something**
-Ingest appends records. Repeating the same source can duplicate data, and a
-failed conversion can leave some Parquet output. There is no automatic
-resume, deduplication or transactional rollback. Use a fresh case when
-rebuilding the same evidence. Retained NDJSON/Arrow shards help diagnose a
-failure; calling internal flatten functions is not a supported resume protocol.
+Uncommitted output is invisible. Repeating `c.ingest(sources)` replays failed-attempt
+input in a fresh workspace. Sources committed by this version with unchanged
+identity and SHA-256 are skipped and listed in `already_imported`. Different hosts,
+formats or EVTX decoding semantics remain distinct; committed partial sources keep
+their status. There is no byte-offset resume. Legacy Parquet provenance columns
+are aggregated once to recognize unchanged path/host/SHA-256 under default EVTX
+decoding and `keep_raw=False` (auxiliary sources are unaffected by that flag).
+These entries are `legacy_unknown`, not evidence of a complete old parse. Existing
+duplicates are not repaired; rebuild in a fresh Case when repairing old results.
 
 **Jupyter stays busy, or the kernel uses the wrong Python environment**
 Activate `python314` before starting local Python or JupyterLab and verify the
@@ -49,13 +53,13 @@ selected kernel's `sys.executable`. `c.ingest()` blocks until it completes;
 `c.ingest_background(sources)` starts a detached child
 using that interpreter. Poll `c.job_status(job_id)` and inspect
 `<case>/jobs/<job_id>.log` on failure. After phase `done`, reopen the case for
-fresh query views. Background execution does not reduce memory requirements
-or implement recovery; avoid concurrent writes to the same case.
+fresh query views. Background execution does not reduce memory requirements. Process-identity checks,
+cancellation and the same catalog/retry rules apply; avoid simultaneous duplicate starts.
 
 **Why are there `.arrow` files, and why is staging still large?**
 Compatible local Web/IIS sources automatically bypass staging. Other sources
 use `staging_format="auto"`: Arrow IPC/ZSTD at 16 MiB or more, gzip NDJSON below
-that; EVTX remains NDJSON. These sources still finish staging before conversion,
+that; EVTX follows the same choice. These sources still finish staging before conversion,
 so temporary disk usage can grow with the staged dataset. Successful conversion
 removes those shards by default. `keep_staging=True` retains intermediates and
 selects staging; it never deletes source evidence. Reserve source, staging,
@@ -111,6 +115,28 @@ directly with `--contains`/`--regex` (whole-column text match) rather
 than a field name nested inside it -- those are JSON *arrays*, not
 objects, so keyed extraction doesn't apply.
 
+**How are GBK text and EVTX ANSI fields handled?**
+Text decoding does not select UTF-16 merely because byte length is even. BOMs,
+interleaved NUL/ASCII evidence and strict validation determine the path; ambiguous
+BOM-less text remains possible. EVTX ANSI fields explicitly default to `windows-1252`.
+Supply known source metadata with `SourceSpec(..., ansi_codec="gbk")`; Unicode fields
+are unaffected. Check `ansi_codec`, `ansi_codec_source` and recovery warnings in the
+source report; see [log types](02_log_types_and_schema.md).
+
+**A large hunt cannot be read using `.matches`**
+Complete matches have already been saved in the result directory. Inspect
+`total_matches` and `preview()`, analyze with `iter_chunks()`, or export everything
+with `save(path)`. Large results are no longer automatically accumulated in one
+DataFrame.
+
+**Why do old Parquet files remain after compaction?**
+Compaction changes the committed catalog while keeping previous files available
+to open `CaseDB` snapshots. Close old readers, then use `c.cleanup_ingest()` to
+reclaim retired managed files. Legacy `lake/` files are retained. External direct
+DuckDB/file readers are untracked and should finish before reclamation. Automatic
+compaction targets local partitions with many small files; `c.compact()` is an
+explicit local maintenance entry point. S3 compaction is not implemented.
+
 ## Known limitations
 
 The complete, current list of v1 scope decisions and known
@@ -134,9 +160,9 @@ likely to come up in day-to-day use:
   count multiplies parser/buffer costs; `memory_limit` controls one DuckDB
   conversion's managed memory, not total RSS. See
   [08. Performance & scale](08_performance_and_scale.md).
-- Parsing and conversion do not yet form a disk-backpressured pipeline.
-  Automatic resume, cross-run idempotency and atomic lake commits/snapshots
-  are not implemented. Metadata locks do not make concurrent ingest transactional.
+- Parsing and conversion do not yet form a disk-backpressured pipeline, and there
+  is no byte-offset resume. New imports use catalog commits/source ledgers and
+  existing readers keep their snapshot. Legacy duplicate rows are not repaired.
 - `.query()`/`.table()`/`.web_logs()`/etc. materialize the full result as
   one DataFrame; use the `_chunks` sibling for anything not already
   filtered/aggregated down to something small (see

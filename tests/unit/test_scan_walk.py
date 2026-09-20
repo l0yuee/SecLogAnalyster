@@ -16,6 +16,15 @@ from seclogx.ingest.scan import scan_sources
 _SYSLOG_LINE = "<34>1 2026-01-01T00:00:00Z host01 sshd 123 - - Failed password\n"
 
 
+def _symlink(link: Path, target: Path, *, target_is_directory=False):
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link privilege")
+        raise
+
+
 def test_walk_follows_file_symlinks_but_not_directory_symlinks(tmp_path: Path):
     """Matches what `rglob("*")` + `Path.is_file()` did before: a symlink
     to a log file is that log file, while a symlinked directory is not
@@ -28,11 +37,11 @@ def test_walk_follows_file_symlinks_but_not_directory_symlinks(tmp_path: Path):
 
     target = real / "real.log"
     target.write_text(_SYSLOG_LINE)
-    (root / "link.log").symlink_to(target)
+    _symlink(root / "link.log", target)
 
     # A directory symlink pointing back at an ancestor: descending it would
     # recurse forever.
-    (root / "loop").symlink_to(tmp_path, target_is_directory=True)
+    _symlink(root / "loop", tmp_path, target_is_directory=True)
 
     result = scan_sources([SourceSpec(path=root, host="H")])
 
@@ -52,9 +61,9 @@ def test_walk_dedups_the_same_file_reached_two_ways(tmp_path: Path):
 
     other = tmp_path / "second"
     other.mkdir()
-    (other / "auth-alias.log").symlink_to(real)
+    _symlink(other / "auth-alias.log", real)
 
-    result = scan_sources([SourceSpec(path=root, host="A"), SourceSpec(path=other, host="B")])
+    result = scan_sources([SourceSpec(path=root, host="A"), SourceSpec(path=other, host="A")])
     assert len(result.aux_files) == 1
 
 
@@ -71,21 +80,23 @@ def test_walk_dedups_hard_links(tmp_path: Path):
     assert len(result.aux_files) == 1
 
 
-def test_walk_skips_unreadable_directories_without_failing(tmp_path: Path):
+def test_walk_skips_unreadable_directories_without_failing(tmp_path: Path, monkeypatch):
+    import seclogx.ingest.scan as scan_module
     root = tmp_path / "acq"
     (root / "readable").mkdir(parents=True)
     (root / "readable" / "auth.log").write_text(_SYSLOG_LINE)
     locked = root / "locked"
     locked.mkdir()
     (locked / "hidden.log").write_text(_SYSLOG_LINE)
-    locked.chmod(0o000)
-    try:
-        result = scan_sources([SourceSpec(path=root, host="A")])
-    finally:
-        locked.chmod(0o755)
+    real_scandir = scan_module.os.scandir
 
-    if not result.aux_files:  # running as root, which can read it anyway
-        pytest.skip("cannot make a directory unreadable as this user")
+    def scandir(path):
+        if Path(path) == locked:
+            raise PermissionError("test directory is unreadable")
+        return real_scandir(path)
+
+    monkeypatch.setattr(scan_module.os, "scandir", scandir)
+    result = scan_sources([SourceSpec(path=root, host="A")])
     assert {f.path.name for f in result.aux_files} == {"auth.log"}
 
 

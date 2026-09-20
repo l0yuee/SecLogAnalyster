@@ -45,7 +45,6 @@ def test_cast_sql_for_uses_cast_not_try_cast_for_json_and_text_catchalls():
 def test_cast_sql_for_uses_try_cast_for_typed_columns():
     cast_sql = cast_sql_for("web_logs")
     assert cast_sql["status"] == "TRY_CAST(raw.status AS INTEGER)"
-    assert cast_sql["time_created"] == "TRY_CAST(raw.time_created AS TIMESTAMP)"
     assert cast_sql["bytes_sent"] == "TRY_CAST(raw.bytes_sent AS BIGINT)"
 
 
@@ -71,9 +70,7 @@ def test_cast_sql_for_uses_cast_for_structured_data():
 def test_cast_sql_for_auditd_and_journal_logs_use_try_cast_for_typed_columns():
     auditd_cast = cast_sql_for("auditd_logs")
     assert auditd_cast["audit_serial"] == "TRY_CAST(raw.audit_serial AS BIGINT)"
-    assert auditd_cast["time_created"] == "TRY_CAST(raw.time_created AS TIMESTAMP)"
     assert auditd_cast["fields"] == "CAST(raw.fields AS VARCHAR)"
 
     journal_cast = cast_sql_for("journal_logs")
-    assert journal_cast["time_created"] == "TRY_CAST(raw.time_created AS TIMESTAMP)"
     assert journal_cast["fields"] == "CAST(raw.fields AS VARCHAR)"

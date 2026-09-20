@@ -39,7 +39,7 @@ def test_scan_sources_dedups_across_overlapping_sources(tmp_path: Path):
     aux = root / "auth.log"
     aux.write_text("<34>1 2026-01-01T00:00:00Z host01 sshd 123 - - Failed password\n")
 
-    result = scan_sources([SourceSpec(path=root, host="A"), SourceSpec(path=root, host="B")])
+    result = scan_sources([SourceSpec(path=root, host="A"), SourceSpec(path=root, host="A")])
     assert len(result.evtx_files) == 1
     assert len(result.aux_files) == 1
 

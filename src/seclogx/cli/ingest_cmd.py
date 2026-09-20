@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import typer
@@ -9,8 +11,9 @@ from ..case import Case
 from ..ingest.resources import IngestOptions
 from ..config import DEFAULT_CASE_ROOT
 from ..errors import CaseNotFoundError, NoSourcesFoundError
-from ..ingest.common import now_iso
-from ..ingest.jobs import job_log_path, read_job_status, write_job_status
+from ..ingest.common import SourceSpec, now_iso, parse_source_arg
+from ..ingest.jobs import job_log_path, read_job_status, validate_job_id
+from ..ingest.job_control import JobCancelledError, JobHeartbeat
 from ._render import console
 
 
@@ -40,42 +43,25 @@ def _spawn_background_job(
 
 
 def _run_as_background_child(c: Case, job_id: str, case_name: str, source, workers, keep_raw, keep_staging, options=None) -> None:
-    # write_job_status() replaces the whole file rather than merging, so
-    # fields the parent wrote before spawning us (started_at, sources) --
-    # which ProgressReporter's snapshot doesn't know about -- have to be
-    # carried forward into every write here, or the first progress update
-    # would silently erase them.
-    existing = read_job_status(c.case_dir, job_id) or {}
-    started_at = existing.get("started_at") or now_iso()
-
-    def on_progress(snapshot: dict) -> None:
-        snapshot["job_id"] = job_id
-        snapshot["case_name"] = case_name
-        snapshot["sources"] = source
-        snapshot["started_at"] = started_at
-        snapshot["updated_at"] = now_iso()
-        write_job_status(c.case_dir, job_id, snapshot)
-
+    validate_job_id(job_id)
+    existing = read_job_status(c.case_dir, job_id, reconcile=False) or {}
+    initial = {**existing, "job_id": job_id, "case_name": case_name,
+               "started_at": existing.get("started_at") or now_iso(), "phase": "scanning"}
+    c._background_job_id = job_id
     try:
-        report = c.ingest(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging, on_progress=on_progress, options=options)
+        with JobHeartbeat(c.case_dir, job_id, initial) as heartbeat:
+            report = c.ingest(source, workers=workers, keep_raw=keep_raw, keep_staging=keep_staging,
+                              on_progress=heartbeat.update, options=options)
+            # Progress callback failures are deliberately isolated by ingest;
+            # make the final durable status write explicit and observable.
+            heartbeat.update({"phase": "done", "committed": True, "error": None})
+    except JobCancelledError:
+        return
     except NoSourcesFoundError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-    except Exception as e:  # noqa: BLE001 -- nothing else is watching this process live; record the failure
-        write_job_status(
-            c.case_dir,
-            job_id,
-            {
-                "job_id": job_id,
-                "case_name": case_name,
-                "sources": source,
-                "started_at": started_at,
-                "phase": "failed",
-                "error": str(e),
-                "updated_at": now_iso(),
-            },
-        )
-        raise
+    finally:
+        del c._background_job_id
 
     console.print(report.summary_text())
 
@@ -132,6 +118,7 @@ def ingest_command(
     keep_staging: bool = typer.Option(
         False, "--keep-staging/--no-keep-staging", help="Retain temporary staged data after successful conversion (default: remove it)"
     ),
+    evtx_ansi_codec: str | None = typer.Option(None, "--evtx-ansi-codec", help="Original Windows code page for EVTX ANSI fields, e.g. gbk; default: windows-1252. Unicode fields are unaffected."),
     case_root: Path = typer.Option(DEFAULT_CASE_ROOT, "--case-root"),
     background: bool = typer.Option(
         False,
@@ -144,7 +131,7 @@ def ingest_command(
     duckdb_threads: int = typer.Option(2, "--duckdb-threads", min=1),
     staging_chunk_mb: int = typer.Option(64, "--staging-chunk-mb", min=1, help="Uncompressed MiB per staging shard"),
     flatten_batch_mb: int = typer.Option(256, "--flatten-batch-mb", min=1, help="Uncompressed MiB per conversion batch"),
-    staging_format: str = typer.Option("auto", "--staging-format", help="Auxiliary staging: auto (Arrow for sources >=16 MiB), ndjson or arrow; EVTX uses NDJSON"),
+    staging_format: str = typer.Option("auto", "--staging-format", help="EVTX and auxiliary staging: auto (Arrow for sources >=16 MiB), ndjson or arrow"),
     parser_backend: str = typer.Option("auto", "--parser-backend", help="Advanced override: auto selects native parsing with compatibility fallback (default); python or native forces a backend"),
     direct_parquet: bool | None = typer.Option(None, "--direct-parquet/--no-direct-parquet", help="Advanced override: automatically stream supported local sources to Parquet by default; force or disable direct output"),
     _staging_chunk_bytes: int | None = typer.Option(None, "--staging-chunk-bytes", hidden=True, min=1),
@@ -152,6 +139,18 @@ def ingest_command(
     _job_id: str = typer.Option(None, "--_job-id", hidden=True),
 ) -> None:
     try:
+        if evtx_ansi_codec is not None:
+            source = [SourceSpec(spec.path, spec.host, evtx_ansi_codec)
+                      for spec in map(parse_source_arg, source)]
+        if _job_id is not None:
+            validate_job_id(_job_id)
+            encoded = os.environ.get("SECLOGX_SOURCE_SPECS")
+            if encoded:
+                specs = json.loads(encoded)
+                if not isinstance(specs, list) or not specs:
+                    raise ValueError("invalid background source metadata")
+                source = [SourceSpec(Path(spec["path"]), spec.get("host"), spec.get("ansi_codec"))
+                          for spec in specs]
         options = IngestOptions(
             memory_limit=memory_limit, threads=duckdb_threads,
             staging_chunk_bytes=_staging_chunk_bytes or staging_chunk_mb * 1024 * 1024,
@@ -162,7 +161,7 @@ def ingest_command(
         )
         if direct_parquet and keep_staging:
             raise ValueError("--direct-parquet requires --no-keep-staging")
-    except ValueError as exc:
+    except (ValueError, KeyError, TypeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     if background and _job_id is None:
         _spawn_background_job(case_name, source, workers, keep_raw, keep_staging, case_root, options)

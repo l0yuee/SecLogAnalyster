@@ -20,7 +20,7 @@ S3 兼容的对象存储上，而不必局限于本地磁盘。
    进程认领执行，前提是这些进程能够访问来源和暂存路径。worker 解析并写出暂存分片；
    协调端收到清单后读取分片，执行有界的 DuckDB 到 Parquet 转换。
 2. **Sigma 狩猎。** `seclogx hunt` 会用同样的方式把互不依赖的规则分发到各个 worker
-   上执行，再把匹配结果合并回来。每条规则本身的查询早已与其他规则互不依赖，所以这只是一次纯粹的并行映射（map）——并不是为顺序执行路径之外另外实现了一套规则求值逻辑。
+   上执行，再汇集已保存的结果片段。每条规则本身的查询早已与其他规则互不依赖，所以这只是一次纯粹的并行映射（map）——并不是为顺序执行路径之外另外实现了一套规则求值逻辑。
 
 **没有改变的是：seclogx 没有引入分布式 SQL 查询引擎。** DuckDB
 仍然是唯一的查询引擎，任何单条查询或单条 Sigma 规则依然只在一个进程内针对
@@ -58,8 +58,8 @@ S3 的 Parquet 实际读写走的是 DuckDB 自带的 `httpfs`
 | 变量 | 默认值 | 含义 |
 |---|---|---|
 | `SECLOGX_BROKER_URL` | 未设置 | 一个 `redis://...` URL。它是否存在，决定了导入/狩猎任务是否会分布式派发——未设置时，一切都和以前一样在本地运行。 |
-| `SECLOGX_STORAGE_BACKEND` | `local` | `local`（案例的 `lake/` 目录仍在本地磁盘，和一直以来一样）或 `s3`（数据湖改为存放在 S3 兼容的对象存储上）。 |
-| `SECLOGX_S3_BUCKET` | 未设置 | 当 `SECLOGX_STORAGE_BACKEND=s3` 时必填。数据湖存放在 `s3://<bucket>/<案例名>/lake/...` 下——按案例名分区，因此一个桶（bucket）可以容纳多个案例。 |
+| `SECLOGX_STORAGE_BACKEND` | `local` | `local`（已提交的 Parquet 保存在案例目录下）或 `s3`（数据湖改为存放在 S3 兼容的对象存储上）。 |
+| `SECLOGX_S3_BUCKET` | 未设置 | 当 `SECLOGX_STORAGE_BACKEND=s3` 时必填。新批次写入 `s3://<bucket>/<案例名>/ingest/<事务 ID>/lake/...`，由已提交目录决定可见对象；旧的 `.../<案例名>/lake/...` 仍可读取。 |
 | `SECLOGX_S3_ENDPOINT_URL` | 未设置 | 用于指向 MinIO 或其他 S3 兼容端点，而不是真正的 AWS S3。 |
 | `SECLOGX_S3_REGION` | 未设置 | 同时透传给 boto3 与 DuckDB 的 `httpfs`。 |
 
@@ -71,14 +71,15 @@ S3 凭据走 boto3 的标准凭据链（`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS
 broker，也可以只配置 broker，并将文件系统数据湖以相同路径挂载给所有狩猎 worker。
 S3 只共享 Parquet 数据湖，不负责传输来源或暂存分片，也不会把转换工作分发给 worker。
 
-无论哪种模式下，`case.json`、`staging/` 和 `staging_aux/` 都保留在 `--case-root` 下。
+无论哪种模式下，`case.json` 与 `.ingest/<事务 ID>/` 批次工作区（包含 `s_evtx/`、
+`s_aux/`）都保留在 `--case-root` 下。
 **协调端与导入 worker 必须以相同绝对路径共享来源和可写暂存目录。** 队列传递文件描述、路径和选项，
 不会通过 Redis 上传证据或返回文件内容。只在协调端容器挂载路径是不够的。跨平台路径表示也必须一致，
 因此 Linux 容器 worker 通常配合 Linux 容器协调端更容易配置。
 
 分布式与对象存储配置会自动选择暂存路径。暂存保存解析后的数据集，体积可能很大。每条导入通路先完成暂存，再分组转换，没有磁盘背压。
-辅助来源默认 `auto`：达到 16 MiB 的来源文件使用 Arrow IPC/ZSTD，较小来源用 gzip NDJSON；
-EVTX 保持 NDJSON。默认 `keep_staging=False` 也要为共享暂存、Parquet 和临时文件预留空间，
+EVTX 和辅助来源默认 `auto`：达到 16 MiB 的来源文件使用 Arrow IPC/ZSTD，较小来源用 gzip NDJSON；
+默认 `keep_staging=False` 也要为共享暂存、Parquet 和临时文件预留空间，
 因为删除发生在转换成功之后。`keep_staging=True` 用于诊断保留，不影响原始证据。
 分布式狩猎还要求 worker 能够访问任务中指定的案例和自定义规则路径。
 
@@ -112,7 +113,7 @@ broker、存储配置和必要文件系统挂载。RQ worker 可使用仓库提�
 狩猎任务进入 Redis/RQ；导入协调端等待暂存结束后仍要完成转换，需要自身的 CPU、内存和 I/O 资源。
 
 ```bash
-seclogx case init incident42 --case-root /shared/cases
+seclogx case init incident42 --dir /shared/cases
 seclogx ingest incident42 --case-root /shared/cases \
   --source /evidence/wks01:WKS01 --source /evidence/dc01:DC01 \
   --memory-limit 2GB --duckdb-threads 2 --staging-format auto
@@ -147,11 +148,27 @@ seclogx CLI 没有分布式任务超时覆盖参数。派发耗时较长的文�
 
 ## 加锁与并发写入
 
-`case.json` 更新使用本地文件锁；配置 broker 后改用 Redis 锁。它只保护元数据的读取、修改和写入，
-不覆盖整个导入操作，也不提供跨次去重、回滚、数据湖原子发布或一致查询快照。
-应协调同一 Case 同时只有一个导入写入方，完成后再分析。不同协调端和后台任务不共享
-`CONVERSION_LOCK`，增加 broker 也不会让并发写入成为事务。Redis 锁的标识包含解析后的案例路径，
-因此不同机器的挂载路径也需要一致。
+导入批次先准备私有输出，再原子替换 `case.json` 中的已提交目录，一起更新可见文件、来源
+身份及运行历史。普通查询看不到未提交文件。相同身份且未改变的已提交来源在重试时跳过；
+内容改变属于新的导入，不做逐行去重。查询连接为其目录快照持有读者租约，关闭时释放。
+分布式狩猎的各 worker 分别打开查询快照；若所有规则必须看到完全相同的数据集，应避免
+在狩猎期间并发提交。
+
+整个导入操作使用本地文件锁；有 broker 时使用 Redis 锁，持续续期并在发布前检查所有权。
+这**不具备严格 fencing 保证**：协调端暂停超过 Redis 租约 TTL 后可能失去所有权，存储系统
+不能强制阻止恢复执行的旧进程。应协调同一 Case 同时只有一个导入写入方；单靠 Redis
+不能为任意共享存储建立分布式共识或崩溃安全保证。不同协调进程也不共享 `CONVERSION_LOCK`
+及其内存预算。
+
+即使使用 S3，所有参与方仍需在相同绝对路径访问同一份案例元数据，并依赖支持原子替换和
+所需加锁语义的可靠共享文件系统。Redis 锁标识使用解析后的案例路径。新目录会记录存储
+后端、bucket、endpoint 和 region；改用不同存储身份打开时会被拒绝。迁移存储需要显式
+处理，不能只修改环境变量。没有记录存储身份的旧目录保持兼容。
+
+小文件合并目前仅支持本地文件系统，不支持 S3。`ingest-cancel` 终止来源主机上经过身份
+核验的进程，不终止其他机器的 RQ worker。worker 租约防止清理活动输出；远程进程活跃状态
+无法确认时保守保留。远程 worker 的停止应通过部署系统协调。
+
 
 ## 实现原理（供感兴趣的读者，或排查问题时参考）
 

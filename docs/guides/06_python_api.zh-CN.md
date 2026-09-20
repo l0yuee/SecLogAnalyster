@@ -11,8 +11,8 @@ Python API 为 Notebook 和脚本提供 DataFrame、分块迭代器、导入报�
 
 ## Notebook 环境
 
-先按[安装指南](01_getting_started.zh-CN.md#安装)一次性准备环境；源码安装需要 Rust/Cargo
-和对应平台的编译工具。正常安装主包就已包含原生解析器。随后在专用环境启动 Jupyter：
+先按[安装指南](01_getting_started.zh-CN.md#安装)一次性准备环境；匹配的预构建 wheel
+不需要 Rust 工具链，源码安装需要 Rust/Cargo 和对应平台的编译工具。正常安装主包就已包含原生解析器。随后在专用环境启动 Jupyter：
 
 ```bash
 conda activate python314
@@ -51,18 +51,51 @@ job_id = c.ingest_background([r"E:\evidence:HOST01"])
 c.job_status(job_id)
 ```
 
-等状态为 `done`、检查日志与逐文件报告后，再重新打开 Case 建立最新查询视图。
-`done` 可能仍包含部分恢复、失败或未知来源。可捕获异常会标记为 `failed`，强制终止
-则可能留下过期状态。日志和状态快照位于 `c.case_dir / "jobs"`；不存在的任务返回 `None`。
-前台与后台是替代用法，不要对同一份证据依次导入，否则可能追加重复记录。
-两者均不提供自动续跑、提前查询保证或整次导入的原子可见性。
+等状态为 `done`、检查逐文件报告后，再重新打开 Case 建立最新查询视图。
+`done` 表示已接受的批次已经提交，单个来源仍可能是部分恢复、失败或未知。心跳独立于文件
+处理进度更新。可捕获异常标记为 `failed`；核验已退出的本地进程后，状态变为 `interrupted`，
+如果已存在对应提交记录则恢复为 `done`。日志和状态快照位于 `c.case_dir / "jobs"`；
+不存在的任务返回 `None`。进程身份同时核对主机名、PID 和进程创建时间。
+
+两种入口均将整批文件、来源账本及历史一起发布，未提交输出不可见。已经提交且路径、主机、
+解读方式相同的未改变来源在重试时跳过；内容或解读方式改变属于新的导入，可能包含重叠行。
+失败批次重新执行未完成工作，不是按字节偏移续跑。已有查询连接会保持其已提交快照直到关闭。
 
 存在 `report.aux` 时，`report.aux.to_dataframe()` 的 `parser_backend` /
 `backend_reason` 说明实际解析器，`output_format` / `parquet_paths` 说明输出形式。
-直接来源的私有 Parquet 在关闭及来源核验后发布；普通解析错误可以保留完整前缀并标记
+直接来源的私有 Parquet 在关闭及来源核验后定稿，再随整批提交发布；普通解析错误可以保留完整前缀并标记
 `partial`。其他格式与兼容回退仍先暂存再转换。详见[性能与规模](08_performance_and_scale.zh-CN.md)。
 
+## 任务控制、来源解读与维护
+
+```python
+# 取消本机拥有的后台任务及其本地 worker。
+status = c.cancel_job(job_id)
+
+# 回收不活跃的未提交工作、无读者需要的旧文件和过期日志。
+cleaned = c.cleanup_ingest(log_retention_days=7)
+
+# 合并符合条件的小 Parquet 文件；导入也会自动执行这项维护。
+compaction = c.compact()
+```
+
+取消不会破坏已提交数据。清理保留任务状态 JSON、原始证据，以及活动 worker 或查询读者
+仍然需要的文件。使用上下文管理器关闭旧 Case 连接，释放其快照。手动合并目前仅支持本地
+文件系统存储，不支持 S3。
+
+如果 EVTX ANSI 字段的原系统代码页不是默认的 Windows-1252，应提供实际编码；这是证据
+解读元数据，不影响 EVTX Unicode 字段。两种导入入口都接受 `SourceSpec`：
+
+```python
+from pathlib import Path
+from seclogx import SourceSpec
+
+sources = [SourceSpec(path=Path("/evidence/events.evtx"), host="HOST01", ansi_codec="gbk")]
+report = c.ingest(sources)
+```
+
 ## 高级资源与诊断控制
+
 
 `IngestOptions` 用于部署预算和故障诊断，不是分析员的必填流程。默认最多使用八个本地
 解析 worker，`memory_limit="2GB"`、`threads=2`，暂存目标 64 MiB、转换分组目标
@@ -79,7 +112,7 @@ c.job_status(job_id)
 | `c.ingest(sources, keep_staging=True)` | 保留中间分片并自动走暂存路径，不影响原始来源。 |
 
 `staging_format="auto"` 只影响需要暂存的来源：达到 16 MiB 时采用 Arrow IPC/ZSTD，
-较小时采用 gzip NDJSON；`"arrow"` / `"ndjson"` 可强制格式，EVTX 仍为 NDJSON。
+较小时采用 gzip NDJSON；`"arrow"` / `"ndjson"` 可强制格式，EVTX 使用相同的自动阈值。
 暂存路径严格使用原生解析时必须选择 Arrow，小文件也如此；直接输出没有这一小文件门槛。
 
 导入后的无限制 `c.query()`、`c.web_logs()` 仍会构造完整 DataFrame。先过滤或逐批消费
@@ -213,7 +246,8 @@ c.auth_events()
 
 # 狩猎
 results = c.hunt()                      # 或 c.hunt(rules_dir=Path("..."), min_level="high")
-results.matches                         # DataFrame：匹配的事件行 + sigma_rule_id/title/level/attack ids
+results.preview()                       # 有界 DataFrame 预览；attrs 标注是否完整
+results.total_matches                   # 全部匹配数，包含预览之外的记录
 results.rule_summary                    # DataFrame：每条被评估的规则一行，含匹配计数
 results.skipped                         # list[(path, reason)]，日志来源类别不受支持的规则
 results.failures                        # list[RuleFailure]，转换/执行失败的规则
@@ -227,12 +261,20 @@ with Case.open("incident42") as c:
     df = c.summary()
 ```
 
+小规模狩猎的 `results.matches` 仍为 DataFrame；大结果保留在磁盘，该属性会抛出
+`MemoryError`，请用 `results.preview()`、`results.iter_chunks()` 或 `results.save(path)`。
+`preview()` 通过 DataFrame 的 `attrs` 标注 `total_matches`、`preview_rows` 和 `complete`。
+可从 `seclogx.detect.results` 导入 `HuntResults`，用
+`HuntResults.open(results.result_dir)` 在后续会话重新打开完整结果。
+
 ## 方法一览
+
 
 | 分类 | 方法 |
 |---|---|
 | 生命周期 | `Case.create(name, case_root=, cluster_config=)`、`Case.open(name, case_root=, cluster_config=)`、`Case.list_cases(case_root=)`、`c.info()` |
 | 导入 | `c.ingest(sources, workers=, keep_raw=, keep_staging=, on_progress=, options=)` -> `IngestReport`；`c.ingest_background(sources, workers=, keep_raw=, keep_staging=, options=)` -> `job_id`；`c.job_status(job_id=)` -> `dict \| None`；`c.list_jobs()` -> `list[dict]` |
+| 维护 | `c.cancel_job(job_id)` -> `dict`；`c.cleanup_ingest(log_retention_days=7)` -> `dict`；`c.compact()` -> `CompactionReport` |
 | 导入资源 | `IngestOptions(memory_limit="2GB", threads=2, staging_chunk_bytes=64 * 1024 * 1024, flatten_batch_bytes=256 * 1024 * 1024, staging_format="auto", parser_backend="auto", direct_parquet=None)` |
 | 探索 | `c.summary()`、`c.channels()`、`c.hosts()`、`c.table_counts()` |
 | 字段发现 / 免 SQL 搜索 | `c.fields(table, sample_size=)`、`c.search(table, eq=, contains=, regex=, match=, case_sensitive=)`、`c.search_chunks(...)`、`c.search_to_csv(table, path, ...)` |
@@ -249,6 +291,8 @@ with Case.open("incident42") as c:
 
 `Case.create()` 与 `Case.open()` 在构造 Case 时从环境变量解析 `ClusterConfig`，也可传入显式的 `cluster_config=`。之后的前台 `ingest()` 与 `hunt()` 使用 Case 保存的配置，两个方法本身均不接受 `cluster_config` 参数。请在创建或打开 Case 前设置[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)所述的 `SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`/`SECLOGX_S3_*` 环境变量，或在这两个工厂方法中传入配置。
 
-`ingest_background()` 会启动新的 CLI 进程，由子进程从继承的环境变量解析集群配置；内存中的显式 `c.cluster_config` 不会序列化给它。因此应在启动后台任务前配置环境变量。本地 `workers` 预算不控制分布式队列的工作进程总数。
+`ingest_background()` 通过环境变量把 Case 已解析的配置传给 CLI 子进程，包括显式本地配置；
+SourceSpec 的主机和 ANSI 编码元数据也会保留。认证继续使用继承的凭据链。本地 `workers`
+预算不控制分布式队列的工作进程总数；各机器需要部署指南要求的共享元数据及来源路径。
 
 下一步：[《7. 常用查询》](07_recipes.zh-CN.md)，用这套 API（以及对应的 `seclogx search` 免 SQL 写法）给出的实际可用的例子。

@@ -1,4 +1,4 @@
-# Known limitations (v1)
+# Known limitations
 
 These are current scope boundaries and known edge cases, documented so
 analysts can distinguish supported behavior from remaining gaps.
@@ -21,7 +21,8 @@ analysts can distinguish supported behavior from remaining gaps.
   on staging shard boundaries or the DuckDB session timezone, and plain
   text fields that happen to resemble timestamps retain their original text.
   Existing Parquet files are not rewritten by this change; it applies to
-  new imports. Re-importing into an existing case can append duplicate rows.
+  new imports. An unchanged committed source is skipped by the source ledger;
+  rebuild into a separate case when an older dataset needs renormalization.
 - **`UserData`-based providers are stored but not field-flattened.** Many
   providers (RDP `TerminalServices-RemoteConnectionManager`, some Task
   Scheduler and Defender events) use `UserData` instead of `EventData`.
@@ -107,11 +108,12 @@ analysts can distinguish supported behavior from remaining gaps.
   outright** (reported as a failed file, not silently skipped) as a
   defense-in-depth XXE guard, rather than attempting to sanitize or
   safely parse it -- legitimate Task Scheduler exports never contain one.
-- **Text/XML decoding tries UTF-8, UTF-16, then GB18030 (a superset of
-  GBK/GB2312) before an always-succeeds Latin-1 fallback**
+- **Text/XML decoding tries strict UTF-8, evidence-backed UTF-16, then
+  GB18030 (a superset of GBK/GB2312) before a Latin-1 fallback**
   (`textdecode.decode_text` for small documents and
   `textdecode.iter_text_lines` for streaming logs; QCloud only considers
-  UTF-16 when a BOM is present). This
+  UTF-16 when a BOM is present). Other text inputs require a UTF-16 BOM
+  or strong interleaved NUL/ASCII evidence before trying UTF-16. This
   covers many Chinese-locale inputs and binary-ish
   data without crashing, but is still a best-effort guess, not real
   charset detection -- content in an encoding outside this list (e.g.
@@ -496,17 +498,17 @@ analysts can distinguish supported behavior from remaining gaps.
   run concurrently (more ingest files parsed in parallel across machines,
   more hunt rules evaluated in parallel, more analysts querying the same
   lake at once); it does not make one query faster.
-- **S3-backed storage (`SECLOGX_STORAGE_BACKEND=s3`) needs a broker
-  (`SECLOGX_BROKER_URL`) configured too if more than one machine will run
-  `seclogx ingest` against the same case concurrently** -- `case.json`'s
-  locking falls back to a Redis-based lock once a broker is configured,
-  which is what makes concurrent multi-machine writers to the same case
-  safe from lost metadata updates; this is not a lake transaction or a
-  consistent query snapshot. A plain local file lock (used when no broker is configured) isn't
-  a reliable cross-machine coordination mechanism over a network
-  filesystem.
-- **`case.json`, `staging/`, and `logs/` are never moved to S3, in any
-  mode.** Only `lake/` (the Parquet payload) is affected by
+- **Coordinate one ingest writer per case in distributed deployments.**
+  With a broker, the ingest lock uses Redis renewal and checks ownership
+  before publication. This is not strict fencing for a process paused past
+  the lease TTL: storage cannot reject the old coordinator's later writes.
+  All hosts, including S3 users, still need identical case paths and reliable
+  shared filesystem metadata with atomic replacement and locking semantics.
+  Redis alone does not guarantee safety on arbitrary network filesystems.
+  New catalogs reject changes to their recorded backend/bucket/endpoint/region;
+  legacy catalogs without this identity remain compatible.
+- **`case.json`, `.ingest/` batch metadata/staging/logs and reader leases
+  are never moved to S3.** Only the Parquet payload is affected by
   `SECLOGX_STORAGE_BACKEND` -- case metadata and ingest-time scratch space
   stay on whatever local/NFS directory `--case-root` points at. This is a
   deliberate scope boundary. Metadata is small, but staging can contain
@@ -551,14 +553,13 @@ analysts can distinguish supported behavior from remaining gaps.
   bound raises before the incomplete current entry is emitted. Encoding
   after validation is strict; no replacement characters are silently
   inserted to handle later decode failures. QCloud requires a BOM before
-  trying UTF-16; other text parsers preserve the legacy trial order.
+  trying UTF-16; other text parsers require a BOM or strong NUL/ASCII evidence.
 - **`IngestOptions` limits each conversion's work, not total RSS.**
   Defaults are `memory_limit="2GB"`, `threads=2`,
   `staging_chunk_bytes=64 * 1024 * 1024` and
   `flatten_batch_bytes=256 * 1024 * 1024`, with `staging_format="auto"`.
-  Auxiliary sources at least 16 MiB use Arrow/ZSTD1; smaller sources use
-  gzip NDJSON, and either format can be explicitly selected. EVTX staging
-  is unchanged. Arrow also uses a fixed 1 MiB output buffer per active
+  EVTX and auxiliary sources at least 16 MiB use Arrow/ZSTD1; smaller sources
+  use gzip NDJSON, and either format can be explicitly selected. Arrow also uses a fixed 1 MiB output buffer per active
   staging writer. Byte targets use uncompressed JSON or Arrow buffer sizes.
   Shards/records are indivisible and may exceed a target;
   encoded records over 32 MiB are rejected. DuckDB's memory limit covers
@@ -594,8 +595,9 @@ analysts can distinguish supported behavior from remaining gaps.
   source checks complete. Ordinary parse errors can publish a complete prefix
   as `partial`; zero recovered rows produce `failed` without output. Source
   changes, I/O, invalid native batches and conversion errors do not become
-  compatibility replay. A crash can leave `_ingest_private` files without
-  automatic recovery.
+  compatibility replay. Finalized files join the atomic batch commit; a crash
+  can leave invisible work under `.ingest/`. `cleanup_ingest()` reclaims
+  inactive uncommitted work while protecting live worker leases.
 
 - **Direct publication depends on local filesystem operations.** Windows uses
   a rename that refuses to overwrite an existing destination. POSIX requires
@@ -618,16 +620,25 @@ analysts can distinguish supported behavior from remaining gaps.
   usage can grow with the complete input, and discovery/manifest memory
   grows with file and shard count. Direct conversion bypasses shards only for
   eligible sources; it does not add backpressure to the remaining staged work.
-- **Resume, cross-run idempotency and query snapshots are not provided.**
-  Re-importing evidence can append duplicates; a failure after earlier
-  flatten groups were written can leave partial data in the lake. Unique
-  output filenames, metadata locking and isolated scratch space do not
-  constitute an atomic dataset commit. Source-level publication on the direct
-  path does not roll back earlier published sources if a later one fails.
-  Arrow IPC staging still produces intermediate files before its conversion.
-  No fixed throughput/RSS guarantee applies across arbitrary data sizes,
-  formats or machines; EVTX native parsing and Registry recovery have
-  additional format-specific resource requirements.
+- **Retry safety is not byte-offset resume or row-level deduplication.**
+  Accepted files, source identities and history publish together in an atomic
+  catalog replacement. Uncommitted output remains invisible, and unchanged
+  sources already committed under the same path, host and interpretation
+  are skipped. Changed source versions are separate imports and may contain
+  overlapping records. Failed batches restart unfinished work. A committed
+  batch can contain explicitly reported partial sources; inspect its report.
+  Legacy cases without a source ledger cannot infer all past source identities.
+- **Query snapshots retain files until readers release them.** A connection
+  captures the committed file catalog and holds a reader lease. Reopen a Case
+  to see later background commits, and close old connections to enable safe
+  reclamation. Compaction publishes replacement files atomically; cleanup keeps
+  old files while readers need them. S3 compaction is not supported. Distributed
+  hunt workers open separate snapshots and may see different revisions if a
+  commit occurs during fan-out.
+- **No fixed throughput or RSS guarantee applies to arbitrary inputs.**
+  Arrow staging still produces intermediate files before conversion. Formats,
+  record sizes, storage and hardware affect resources; EVTX parsing and
+  Registry recovery have additional format-specific requirements.
 - **Staging is compressed and removed after successful conversion by default.**
   NDJSON uses gzip level 1 and Arrow IPC uses ZSTD level 1. Automatic direct
   output bypasses these files only for eligible local sources; other sources
@@ -635,5 +646,5 @@ analysts can distinguish supported behavior from remaining gaps.
   retains intermediates and automatically selects staging; source evidence is
   never deleted. Compression reduces disk requirements but still costs CPU,
   and cleanup after conversion does not remove peak staging usage. Retained
-  shards help diagnosis but do not implement automatic resume. See
+  shards help diagnosis but do not implement byte-offset resume. See
   [performance and scale](guides/08_performance_and_scale.md).

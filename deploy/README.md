@@ -82,7 +82,7 @@ paths match. It inherits the service's broker/S3 settings and both mounts:
 
 ```bash
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.shared.yml run --rm \
-  worker case init incident42 --case-root /shared/cases
+  worker case init incident42 --dir /shared/cases
 
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.shared.yml run --rm \
   worker ingest incident42 --case-root /shared/cases --source /evidence:HOST01 \
@@ -149,7 +149,7 @@ variables alone are insufficient.
 - Keep coordinator and worker package versions aligned. Auxiliary staging
   defaults to `auto`: Arrow IPC/ZSTD for source files at least 16 MiB and
   gzip NDJSON for smaller files. `--staging-format arrow|ndjson` forces a
-  format; EVTX still uses NDJSON.
+  format; EVTX uses the same automatic threshold.
 - `--staging-chunk-bytes` reaches parsing workers. `--flatten-batch-bytes`,
   `--memory-limit` and `--duckdb-threads` govern coordinator conversions.
   `--workers` controls local multiprocessing, not RQ worker replica count.
@@ -163,11 +163,18 @@ variables alone are insufficient.
   job timeout/retry options. It relies on installed RQ defaults, and seclogx
   exposes no distributed timeout override. Check long-file suitability
   before dispatch. Failed tasks raise errors; automatic resume is absent.
-- Use one ingest writer per case. The metadata lock protects `case.json`,
-  while conversion locking is local to one coordinator process. Neither
-  makes lake writes transactional or queries atomic snapshots. Retrying a
-  source can duplicate records; failed conversions can leave partial lake
-  output. Use a fresh case when rebuilding the same evidence.
+- Use one ingest writer per case. Accepted batches publish atomically through
+  the case catalog; unchanged source identities are skipped on retry, and
+  query connections retain committed snapshots. A changed source is a new
+  import and may contain overlapping rows. Redis lock renewal and ownership
+  checks are not strict fencing when a coordinator pauses past its lease TTL.
+  Metadata still requires a reliable shared filesystem with atomic replacement,
+  locking and identical absolute paths, even when Parquet lives in S3.
+  Conversion locking and its memory budget remain local to one process.
+- New catalogs record their storage identity; changing the backend, bucket,
+  endpoint or region requires an explicit migration. S3 compaction is currently
+  unsupported. Cancellation targets verified local processes on the coordinator
+  host; stop remote RQ workers through the deployment when needed.
 - Linux containers are the supplied RQ deployment path. Local Windows
   ingest support does not imply native Windows RQ worker compatibility.
 

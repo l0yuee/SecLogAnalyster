@@ -1,7 +1,6 @@
 """Case.ingest() now scans the source tree once (ingest.scan.scan_sources)
-and runs the EVTX and aux pipelines concurrently instead of back-to-back,
-splitting the local worker budget between them when both have work and no
-explicit --workers was given. These tests monkeypatch the two orchestrator
+and shares one local worker budget between EVTX and aux pipelines.
+workers=1 runs them sequentially. These tests monkeypatch the two orchestrator
 entry points (seclogx.case.run_ingest / run_aux_ingest) rather than doing a
 real EVTX parse, so they can assert on exactly what Case.ingest() passed
 each pipeline without needing a real .evtx fixture.
@@ -10,7 +9,10 @@ each pipeline without needing a real .evtx fixture.
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 import seclogx.case as case_module
 from seclogx.case import Case
@@ -18,6 +20,7 @@ from seclogx.distributed.queue import DEFAULT_LOCAL_INGEST_WORKERS
 from seclogx.ingest.evtx.manifest import IngestReport
 from seclogx.ingest.jobs import ProgressReporter
 from seclogx.ingest.logsources.manifest import AuxIngestReport
+from seclogx.ingest.resources import IngestOptions
 
 
 def _fake_ingest_report(files_discovered: int) -> IngestReport:
@@ -58,6 +61,7 @@ def _build_source_tree(tmp_path: Path) -> Path:
 
 
 def test_ingest_calls_both_pipelines_concurrently_with_split_workers(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(case_module, "DEFAULT_LOCAL_INGEST_WORKERS", 8)
     root = _build_source_tree(tmp_path)
     calls: dict[str, dict] = {}
     concurrently_running = threading.Event()
@@ -83,7 +87,7 @@ def test_ingest_calls_both_pipelines_concurrently_with_split_workers(tmp_path: P
     assert concurrently_running.is_set()
     assert len(calls["evtx"]["discovered"]) == 1
     assert len(calls["aux"]["classified"]) == 1
-    expected_split = max(1, DEFAULT_LOCAL_INGEST_WORKERS // 2)
+    expected_split = 4
     assert calls["evtx"]["workers"] == expected_split
     assert calls["aux"]["workers"] == expected_split
     assert calls["evtx"]["progress"] is None  # no on_progress given -> no reporter constructed
@@ -115,12 +119,13 @@ def test_ingest_does_not_split_workers_when_only_aux_has_files(tmp_path: Path, m
 
     # Only one pipeline had work -- it should get the full default budget,
     # not half of it.
-    assert calls["aux"]["workers"] is None
+    assert calls["aux"]["workers"] == DEFAULT_LOCAL_INGEST_WORKERS
     assert report.files_discovered == 0
     assert report.aux.files_discovered == 1
 
 
-def test_ingest_respects_explicit_workers_even_with_both_pipelines_present(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("workers", [2, 3, 8])
+def test_ingest_shares_explicit_worker_budget_between_pipelines(tmp_path: Path, monkeypatch, workers):
     root = _build_source_tree(tmp_path)
     calls: dict[str, dict] = {}
 
@@ -136,10 +141,67 @@ def test_ingest_respects_explicit_workers_even_with_both_pipelines_present(tmp_p
     monkeypatch.setattr(case_module, "run_aux_ingest", fake_run_aux_ingest)
 
     c = Case.create("c", case_root=tmp_path / "cases")
-    c.ingest([str(root)], workers=3)
+    c.ingest([str(root)], workers=workers)
 
-    assert calls["evtx_workers"] == 3
-    assert calls["aux_workers"] == 3
+    assert calls["evtx_workers"] >= 1
+    assert calls["aux_workers"] >= 1
+    assert calls["evtx_workers"] + calls["aux_workers"] == workers
+
+
+def test_one_worker_runs_both_pipelines_sequentially_on_caller_thread(tmp_path: Path, monkeypatch):
+    root = _build_source_tree(tmp_path)
+    caller_thread = threading.get_ident()
+    calls = []
+    passed_options = []
+    options = IngestOptions(memory_limit="512MB", threads=1)
+
+    def fake_run_ingest(*, discovered, workers, **kwargs):
+        assert threading.get_ident() == caller_thread
+        assert workers == 1
+        assert kwargs["options"] == replace(options, direct_parquet=True)
+        assert kwargs["keep_staging"] is False
+        passed_options.append(kwargs["options"])
+        calls.append("evtx")
+        return _fake_ingest_report(len(discovered))
+
+    def fake_run_aux_ingest(case_dir, sources, *, classified, workers, **kwargs):
+        assert threading.get_ident() == caller_thread
+        assert workers == 1
+        assert kwargs["options"] is passed_options[0]
+        assert kwargs["keep_staging"] is False
+        assert calls == ["evtx"]
+        calls.append("aux")
+        return _fake_aux_report(len(classified))
+
+    monkeypatch.setattr(case_module, "run_ingest", fake_run_ingest)
+    monkeypatch.setattr(case_module, "run_aux_ingest", fake_run_aux_ingest)
+    c = Case.create("c", case_root=tmp_path / "cases")
+    c.ingest([str(root)], workers=1, options=options)
+    assert calls == ["evtx", "aux"]
+
+
+def test_unknown_aux_files_do_not_consume_evtx_worker_budget(tmp_path: Path, monkeypatch):
+    root = tmp_path / "evidence"
+    root.mkdir()
+    (root / "Security.evtx").write_bytes(b"fake")
+    (root / "unknown.txt").write_bytes(b"unrecognized content")
+    calls = {}
+
+    def fake_run_ingest(*, discovered, workers, **kwargs):
+        calls["workers"] = workers
+        return _fake_ingest_report(len(discovered))
+
+    monkeypatch.setattr(case_module, "run_ingest", fake_run_ingest)
+    c = Case.create("c", case_root=tmp_path / "cases")
+    c.ingest([str(root)], workers=3)
+    assert calls["workers"] == 3
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5, "2"])
+def test_ingest_rejects_invalid_worker_budget_before_scanning(tmp_path: Path, workers):
+    c = Case.create("c", case_root=tmp_path / "cases")
+    with pytest.raises(ValueError, match="workers"):
+        c.ingest([str(tmp_path / "does-not-exist")], workers=workers)
 
 
 def test_ingest_on_progress_builds_reporter_and_reports_terminal_phase(tmp_path: Path, monkeypatch):

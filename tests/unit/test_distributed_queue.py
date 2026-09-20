@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, Future
 
 import pytest
 
@@ -29,6 +30,46 @@ def _boom(*_args):
 
 
 class TestLocalJobQueue:
+    def test_pending_futures_stay_bounded_while_all_results_are_delivered(self, monkeypatch):
+        import seclogx.distributed.queue as queue_module
+
+        outstanding = set()
+        peak = 0
+
+        class ControlledExecutor:
+            def __init__(self, **kwargs):
+                assert kwargs["max_workers"] == 2
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                assert not outstanding
+
+            def submit(self, fn, *args):
+                nonlocal peak
+                future = Future()
+                future.task = (fn, args)
+                outstanding.add(future)
+                peak = max(peak, len(outstanding))
+                return future
+
+        def complete_one(pending, return_when):
+            assert return_when == FIRST_COMPLETED
+            future = next(iter(pending))
+            fn, args = future.task
+            future.set_result(fn(*args))
+            outstanding.remove(future)
+            return {future}, pending - {future}
+
+        monkeypatch.setattr(queue_module, "ProcessPoolExecutor", ControlledExecutor)
+        monkeypatch.setattr(queue_module, "wait", complete_one)
+        seen = []
+        result = LocalJobQueue(workers=2).submit_all(_add, [(i, 1) for i in range(100)], on_result=seen.append)
+        assert sorted(result) == list(range(1, 101))
+        assert sorted(seen) == list(range(1, 101))
+        assert peak <= 4
+
     def test_runs_all_tasks_and_returns_results(self):
         queue = LocalJobQueue(workers=2)
         results = queue.submit_all(_add, [(1, 2), (3, 4), (5, 6)])

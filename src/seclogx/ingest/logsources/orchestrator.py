@@ -64,7 +64,7 @@ def run_aux_ingest(
             problem_files=[],
         )
 
-    staging_dir = case_dir / "staging_aux" / batch_id
+    staging_dir = case_dir / "s_aux" if case_dir.parent.name == ".ingest" else case_dir / "staging_aux" / batch_id
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
@@ -178,6 +178,15 @@ def run_aux_ingest(
             rows_written[table] += rows
             if progress:
                 progress.on_table_flattened(table, rows)
+
+    expected_rows: dict[str, int] = {}
+    for f in staged:
+        if f.table and f.status in (StageStatus.OK, StageStatus.PARTIAL):
+            expected_rows[f.table] = expected_rows.get(f.table, 0) + f.record_count
+    if any(rows_written.get(table, 0) != count for table, count in expected_rows.items()) or any(
+        count and table not in expected_rows for table, count in rows_written.items()
+    ):
+        raise RuntimeError(f"auxiliary row-count mismatch: staged={expected_rows}, written={rows_written}; staging retained")
 
     if not keep_staging:
         for f in staged:

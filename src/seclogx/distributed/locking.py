@@ -19,6 +19,7 @@ extra infrastructure cost.
 from __future__ import annotations
 
 import time
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -56,6 +57,10 @@ class LocalCaseLock:
         finally:
             self._fh.close()
 
+    def assert_owned(self) -> None:
+        if self._fh is None or self._fh.closed:
+            raise RuntimeError("case metadata lock is not held")
+
     @staticmethod
     def _lock_file(fh) -> None:
         try:
@@ -89,16 +94,42 @@ class RedisCaseLock:
             raise ClusterConfigError(
                 "distributed case-metadata locking requires the 'cluster' extra: pip install 'seclogx[cluster]'"
             ) from e
-        client = redis.from_url(broker_url)
+        client = redis.from_url(broker_url, socket_timeout=min(timeout / 3, 5.0),
+                                socket_connect_timeout=min(timeout / 3, 5.0))
         key = f"seclogx:case-lock:{Path(case_dir).resolve()}"
-        self._lock = client.lock(key, timeout=timeout)
+        self._lock = client.lock(key, timeout=timeout, thread_local=False)
+        self._timeout = timeout
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._thread = None
 
     def __enter__(self) -> "RedisCaseLock":
-        self._lock.acquire()
+        if not self._lock.acquire(blocking_timeout=self._timeout):
+            raise TimeoutError("timed out waiting for the distributed case metadata lock")
+        self._stop.clear()
+        self._lost.clear()
+        self._thread = threading.Thread(target=self._renew, name="seclogx-case-lock", daemon=True)
+        self._thread.start()
         return self
 
     def __exit__(self, *exc) -> None:
-        self._lock.release()
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._timeout)
+        if self._lock.owned():
+            self._lock.release()
+
+    def _renew(self) -> None:
+        while not self._stop.wait(max(0.01, self._timeout / 3)):
+            try:
+                self._lock.extend(self._timeout, replace_ttl=True)
+            except Exception:
+                self._lost.set()
+                return
+
+    def assert_owned(self) -> None:
+        if self._lost.is_set() or not self._lock.owned():
+            raise RuntimeError("distributed case metadata lock was lost; output was not committed")
 
 
 def get_case_lock(case_dir: Path, cluster_config: ClusterConfig | None = None) -> CaseLock:

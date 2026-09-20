@@ -36,8 +36,31 @@ Sigma 规则集，或多名分析师需要共同使用同一个案例的场景�
 ## 安装
 
 主包已经包含 Rust 解析器：**一次正常安装就同时安装 Python API 和原生扩展**。
-分析员不需要额外安装加速包，也不必在每次导入时选择性能模式。仓库当前提供的流程是
-**从源码安装**，需要先准备下面的构建工具；这里不假定已有公开发布、可直接下载的 seclogx wheel。
+分析员不需要额外安装加速包，也不必在每次导入时选择性能模式。优先使用匹配平台的预编译
+wheel；从源码安装时，再准备下文列出的构建工具。
+
+### 安装预编译 wheel
+
+打开目标版本对应的、成功完成的 [Product tests and wheels 工作流](https://github.com/l0yuee/SecLogAnalyster/actions/workflows/ci.yml)，
+按平台下载并解压 `wheels-windows-x64`、`wheels-linux-x64`、`wheels-macos-arm64` 或
+`wheels-macos-x64`。工作流产物可能需要登录 GitHub 才能下载，也有保存期限；所需产物不可用时，
+按下文从源码安装。工作流产物与包索引或 GitHub Release 发布是不同的交付渠道。
+
+在 `python314` 中按实际文件名安装解压后的 wheel。例如 Windows x64：
+
+```console
+conda activate python314
+python -m pip install --only-binary=:all: ./seclogx-0.2.0-cp310-abi3-win_amd64.whl
+python -m pip install jupyterlab ipykernel
+python -m ipykernel install --user --name python314 --display-name "Python (python314)"
+python -m jupyterlab
+```
+
+尚无环境时先执行 `conda create -n python314 python=3.14.2 pip`。匹配的 wheel 包含 Rust 扩展
+和规则，**分析员无需安装 Rust、Cargo、maturin 或 C/C++ 编译器**。pip 自动安装运行依赖；
+`--only-binary=:all:` 在依赖缺少 wheel 时明确报错，避免意外开始源码构建。Linux wheel 需要
+glibc 2.28 及以上；操作系统和 CPU 架构必须匹配。仍可能需要 Windows Visual C++
+Redistributable 等平台运行库，详见下文。
 
 ### 一次性准备机器环境
 
@@ -84,7 +107,7 @@ git clone https://github.com/l0yuee/SecLogAnalyster.git
 cd SecLogAnalyster
 ```
 
-尚无 `python314` 环境时，只需创建一次：`conda create -n python314 python=3.14 pip`。
+尚无 `python314` 环境时，只需创建一次：`conda create -n python314 python=3.14.2 pip`。
 已有该环境时直接复用。随后在仓库根目录执行：
 
 ```bash
@@ -127,42 +150,69 @@ ABI 与平台边界见[原生组件构建说明](../../native/README.md)。
 
 ## 案例工作区（Case workspace）
 
-一切都围绕**案例（case）**展开——它是位于 `./cases/<name>/` 下的一个命名工作区（`case init/list/info` 用 `--dir` 覆盖路径，导入/查询命令用 `--case-root`），其中包含：
+**案例（Case）**默认位于 `./cases/<name>/`。案例管理命令用 `--dir`，导入和分析命令用
+`--case-root` 指定根目录。
 
-```
+```text
 cases/<name>/
-  case.json                     # 已导入的主机列表、导入运行历史
-  staging/<batch_id>/<host>/*.ndjson.gz       # EVTX 临时分片，转换成功后默认删除
-  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # 辅助来源临时分片，直接输出的来源跳过此步骤
-  logs/ingest_<batch_id>.log      # EVTX 核对报告
-  jobs/<job_id>.json             # 后台状态快照
-  jobs/<job_id>.log              # 后台标准输出/错误及核对报告
-  lake/
-    events/host=<h>/channel=<c>/*.parquet                       # Windows 事件日志
-    web_logs/host=<h>/log_type=<t>/*.parquet                    # IIS/nginx/Apache/Tomcat 访问日志
-    web_error_logs/host=<h>/log_type=<t>/*.parquet               # nginx/Apache/Tomcat/IIS HTTPERR 错误日志
-    scheduled_tasks/host=<h>/*.parquet                           # 计划任务定义
-    exchange_message_tracking/host=<h>/*.parquet                 # Exchange 邮件流转
-    exchange_logs/host=<h>/log_type=<t>/*.parquet                # 其他 Exchange CSV 日志
-    syslog/host=<h>/*.parquet                                    # 通用 syslog，含 auth.log/secure
-    auditd_logs/host=<h>/record_type=<r>/*.parquet                # Linux 审计框架
-    journal_logs/host=<h>/*.parquet                              # systemd journal 导出
-    db_logs/host=<h>/log_type=<t>/*.parquet                       # MySQL/PostgreSQL/MSSQL/Oracle 日志
-    qcloud_logs/host=<h>/log_type=<t>/*.parquet                   # 腾讯云主机安全客户端日志
-    registry/host=<h>/hive_type=<t>/*.parquet                     # Windows 注册表配置单元
+  case.json                   # 原子提交目录、来源台账、导入历史
+  .ingest/<transaction_id>/
+    state.json                # 批次状态和进程身份
+    report.json               # 逐来源处理结果
+    s_evtx/                   # EVTX 临时分片
+    s_aux/                    # 辅助来源临时分片；直接输出来源跳过此步骤
+    lake/<table>/.../*.parquet # 不再改写的输出；提交前不可查询
+    logs/                     # 批次核对日志
+    workers/                  # 用于保护清理的活动 worker 身份
+  .readers/                   # 保护已有查询快照的读取租约
+  jobs/<job_id>.json          # 进度、进程身份和心跳
+  jobs/<job_id>.log           # 后台标准输出/错误及报告
+  hunts/<run>/               # 完整的狩猎命中结果及摘要
+  lake/                      # 兼容旧版案例布局
 ```
 
-`lake/` 可以存放在 S3 兼容的对象存储上，而不局限于本地磁盘（`SECLOGX_STORAGE_BACKEND=s3`
-——可选启用，见[《10. 分布式部署》](10_distributed_deployment.zh-CN.md)）；`case.json`、`staging/`、
-`staging_aux/`、`logs/` 与 `jobs/` 无论在哪种模式下都始终保留在本地/NFS。
+各表保留原有 Hive 分区方式，详见[日志类型与 Schema](02_log_types_and_schema.zh-CN.md)。
+配置 S3 后，Parquet 对象位于对象存储；元数据、暂存、读写进程协调和任务文件仍需要共享案例
+目录，详见[分布式部署](10_distributed_deployment.zh-CN.md)。
 
-你只需创建一次案例（`seclogx case init`），之后可以对它执行任意多次 `ingest`（导入）——来自不同的来源路径、不同的主机，甚至相隔数周也没问题。每次导入都是增量追加，并记录在
-`case.json` 中。一次 `ingest` 会在来源路径下一次性发现并导入所有支持的格式——不需要对每种日志类型分别导入。案例只会暴露它实际拥有数据的表；可用
-`seclogx sources <case>` / `Case.table_counts()` 查看。
+导入先写入私有批次工作区，再通过一次原子目录替换同时发布 Parquet、来源台账和运行历史。
+失败批次不会成为查询中的半份结果。来源状态为 `partial` 时，恢复出的数据仍可随批次提交；
+应检查报告，区分恢复数据与完整来源。查询连接在建立时固定已提交快照；后台导入提交后，
+重新打开已有 Case 才能看到新数据。
 
-当前没有跨批次去重或断点续跑。同一次扫描会对重叠来源路径去重，但重复运行同一次导入会追加重复行。兼容的本地 Web/IIS 来源自动采用原生直接输出，其他来源先暂存再转换。默认在转换成功后删除临时分片；`keep_staging=True` 会保留分片并选择暂存路径，不影响原始证据。保留暂存不是可恢复检查点，事后清理也不能消除暂存峰值。后台执行不保证在文件尚未写完时查询的一致性；应等导入结束、检查报告，再重新打开 Case 做分析。
+同一路径、主机、格式、EVTX 解码/原始 XML 设置及导入契约下，已提交且内容不变的来源在
+重试时会跳过，并在 `already_imported` 中报告。不同主机分别保留。内容变化或来源身份变化
+会作为新的导入处理；这不是逐行去重。失败批次重试会重新读取其来源，不从保存的字节偏移
+续跑。不要手工删除已提交的 `.ingest` 目录；目录虽以点开头，仍可能保存当前查询所需的数据。
 
-对于需要暂存的辅助来源，`auto` 在文件达到 16 MiB 时选择 Arrow IPC / ZSTD level 1，较小时选择 gzip NDJSON；EVTX 始终使用 NDJSON。辅助来源的 Parquet 使用 ZSTD level 1。高级诊断覆盖项、内存/线程预算与批次大小见[命令行参考](05_cli_reference.zh-CN.md)与[Notebook API](06_python_api.zh-CN.md)。
+兼容的本地 Web/IIS 自动使用原生直接输出。其他输入先暂存再转换；支持的暂存路径在 `auto`
+模式下，对至少 16 MiB 的来源选择 Arrow IPC/ZSTD，更小来源使用 gzip NDJSON。EVTX 也支持
+Arrow 暂存，最终 Parquet 使用 ZSTD level 1。转换成功后默认删除临时分片，`keep_staging=True`
+可以保留用于诊断；原始证据始终保留。保留暂存不提供按偏移续跑能力。
+
+后台任务有独立心跳，以 PID 和进程创建时间识别进程。`c.cancel_job(job_id)` 停止本机所属进程
+和 worker。`c.cleanup_ingest()` 清理无活动进程的未提交输出、安全退役的文件，以及超过七天的
+已结束任务日志，保留状态与审计 JSON。下次导入也会清理无活动进程的未提交输出。即使协调
+进程已经退出，存活的 worker 仍会阻止清理。跨主机任务必须在原启动主机上取消。
+
+同一分区积累足够多的小 Parquet 后，提交成功的导入会自动触发合并。也可通过 `c.compact()`
+或 `seclogx compact <case>` 提前请求维护。已有读取者继续使用旧快照，退役文件等读取租约
+结束后才回收。目前不支持对 S3 存储执行合并。
+
+### 复现产品测试
+
+CI 使用 CPython 3.14.2，在 Windows x64、Linux x64 和 macOS arm64/x64 上执行同一套已提交
+产品测试。运行依赖固定 DuckDB 1.5.5 和 EVTX 0.12.1，对应 SQL 隔离及恢复行为的验证版本；
+共享约束文件固定其他验证依赖。准备好源码构建工具后执行：
+
+```console
+conda activate python314
+python -m pip install -c constraints/python314.txt -e ".[dev,cluster]"
+python -m pytest
+```
+
+精简合成夹具和运行时构造的故障用例与测试共同提交。[测试说明](../../tests/README.md)包含
+收集范围与 wheel 验证方法；这些功能测试不代表大规模吞吐或内存表现。
 
 ## 快速上手示例
 

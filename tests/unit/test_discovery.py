@@ -57,5 +57,7 @@ def test_discover_evtx_files_dedup_across_sources(tmp_path: Path):
     f.write_bytes(b"fake")
 
     found = discover_evtx_files([SourceSpec(path=root, host="A"), SourceSpec(path=f, host="B")])
-    # same resolved file discovered via two overlapping sources -> only counted once
-    assert len(found) == 1
+    # Distinct host labels preserve distinct provenance even for identical bytes.
+    assert len(found) == 2
+    assert {f.host for f in found} == {"A", "B"}
+    assert len(discover_evtx_files([SourceSpec(path=root, host="A"), SourceSpec(path=f, host="A")])) == 1

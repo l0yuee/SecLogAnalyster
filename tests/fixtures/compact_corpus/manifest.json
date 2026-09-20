@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "origin": "Project-owned synthetic source samples",
+    "license": "MIT",
+    "contains_real_evidence": false
+  },
+  "files": [
+    {
+      "path": "noise/binary.bin",
+      "format": "binary",
+      "sample_method": "binary_prefix",
+      "bytes": 4096,
+      "sha256": "88532156f40b07798b96429425a6f4c31a8d9ddeacce555e8622b185c8fdb628",
+      "kind": null,
+      "table": null,
+      "records": 0,
+      "scan_status": "unknown"
+    },
+    {
+      "path": "noise/elf",
+      "format": "elf",
+      "sample_method": "binary_prefix",
+      "bytes": 4096,
+      "sha256": "42ab6ac423d7216b796965e294b5126e0065509bc5d58f4addd17aa3e96c06fe",
+      "kind": null,
+      "table": null,
+      "records": 0,
+      "scan_status": "unknown"
+    },
+    {
+      "path": "valid/exchange.log",
+      "format": "exchange",
+      "sample_method": "complete_record_prefix",
+      "bytes": 15735,
+      "sha256": "448b11f279f75511e5a2ef6c6637e6e53cc8d42be1bde185bb75a9c8965fade1",
+      "kind": "exchange_message_tracking",
+      "table": "exchange_message_tracking",
+      "records": 16,
+      "scan_status": "supported"
+    },
+    {
+      "path": "valid/iis.log",
+      "format": "iis",
+      "sample_method": "complete_record_prefix",
+      "bytes": 11139,
+      "sha256": "caa2ac60d09ea463a47fae47dc381a7e26b57825a5b4fc941a056ef516c2d2ee",
+      "kind": "iis",
+      "table": "web_logs",
+      "records": 16,
+      "scan_status": "supported"
+    },
+    {
+      "path": "valid/journal.log",
+      "format": "journal",
+      "sample_method": "complete_record_prefix",
+      "bytes": 13696,
+      "sha256": "c23c25d9f032de6ea415856e5d66a3442cc6a90b60dc42bffddbbd216a3002da",
+      "kind": "journal_export",
+      "table": "journal_logs",
+      "records": 16,
+      "scan_status": "supported"
+    },
+    {
+      "path": "valid/mysql_error.log",
+      "format": "mysql_error",
+      "sample_method": "complete_record_prefix",
+      "bytes": 13056,
+      "sha256": "8e99db0f2711ec2f15b1ee3e62b8a8e06c6674fcf35a708bfaf5d3f1fa07c111",
+      "kind": "mysql_error",
+      "table": "db_logs",
+      "records": 16,
+      "scan_status": "supported"
+    },
+    {
+      "path": "valid/nginx.log",
+      "format": "nginx",
+      "sample_method": "complete_record_prefix",
+      "bytes": 9344,
+      "sha256": "e7acac4d3c9db4c146c800ff9923849ebb21cd86270f270685ae5fc7e20919d0",
+      "kind": "web_access",
+      "table": "web_logs",
+      "records": 16,
+      "scan_status": "supported"
+    },
+    {
+      "path": "noise/pdf.pdf",
+      "format": "pdf",
+      "sample_method": "binary_prefix",
+      "bytes": 4096,
+      "sha256": "18ff49cb1e0f33b7254da706f6d021e786325aba047afc5346f75f28916602ea",
+      "kind": null,
+      "table": null,
+      "records": 0,
+      "scan_status": "skipped_suffix"
+    },
+    {
+      "path": "noise/pe.exe",
+      "format": "pe",
+      "sample_method": "binary_prefix",
+      "bytes": 4096,
+      "sha256": "d6b5f551ba73da50d138821d97c0f36602c2727f24aa143be48e947dd05c861e",
+      "kind": null,
+      "table": null,
+      "records": 0,
+      "scan_status": "skipped_suffix"
+    },
+    {
+      "path": "valid/syslog.log",
+      "format": "syslog",
+      "sample_method": "complete_record_prefix",
+      "bytes": 11264,
+      "sha256": "229e466c1e39eb0b8eb6dc3f6ffd71f366997ff94664879e5d8fb4a1de316a02",
+      "kind": "syslog",
+      "table": "syslog",
+      "records": 16,
+      "scan_status": "supported"
+    },
+    {
+      "path": "noise/text.txt",
+      "format": "text",
+      "sample_method": "complete_line_prefix",
+      "bytes": 4168,
+      "sha256": "87b5bcd70a1561459d8891555dd383639aaa897e81d94f6701cf2b3764e57830",
+      "kind": null,
+      "table": null,
+      "records": 0,
+      "scan_status": "unknown"
+    }
+  ]
+}

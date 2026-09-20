@@ -18,6 +18,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from ..resources import IngestOptions
+from ..activity import workspace_worker
 from ..staging import StagingWriter
 from ..arrow_staging import ArrowStagingWriter
 from ...textdecode import PreparedText, _verify_prepared, prepare_text, use_prepared_text
@@ -103,6 +104,7 @@ def _staging_path(cf: ClassifiedFile, staging_dir: Path, table: str) -> Path:
     return host_dir / f"{table}.{cf.path.stem}.{_short_hash(str(cf.path))}.ndjson.gz"
 
 
+@workspace_worker
 def stage_aux_file(
     cf: ClassifiedFile, staging_dir: Path, options: IngestOptions | None = None,
     *, prepared: PreparedText | None = None,

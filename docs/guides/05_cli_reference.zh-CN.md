@@ -39,13 +39,14 @@ seclogx case info incident42
 |---|---|---|
 | `--source PATH[:HOST]` | 必填，可重复 | 要递归扫描的文件或目录。`:HOST` 可显式指定主机标签；省略时使用来源根路径的名称，直接传入文件时就是文件名。含空格路径请加引号。 |
 | `--workers N` | 最多 8 | EVTX 与辅助通路共享的本地解析工作进程总预算。`1` 表示在调用方进程中暂存，且两条通路串行运行；文件分类另有有界线程池。 |
+| `--evtx-ansi-codec CODEC` | `windows-1252` | 原始 Windows 来源的 ANSI 字段编码，例如 `gbk`；不影响 Unicode 字段，不按分析员系统语言猜测。不同来源编码请使用 Python `SourceSpec`。 |
 | `--keep-raw` | 关闭 | 仅 EVTX：将原始 XML 写入 `raw_xml` 列，会增加 XML 解析和磁盘索引开销，实际成本随记录而异。 |
 | `--keep-staging` / `--no-keep-staging` | 删除 | 默认在转换成功后删除临时分片，不删除原始证据。`--keep-staging` 保留中间文件并自动选择暂存路径。清理不能消除暂存峰值，也不提供续跑。 |
 | `--memory-limit SIZE` | `2GB` | 单个 DuckDB 转换连接的受管内存预算，不是进程树 RSS 硬上限。 |
 | `--duckdb-threads N` | `2` | 单个 DuckDB 转换使用的线程数，与解析工作进程预算独立。 |
 | `--staging-chunk-mb N` | `64` | 单个暂存分片未压缩大小的目标值，单位实际为 MiB（1,048,576 字节）；不会拆开完整记录。 |
 | `--flatten-batch-mb N` | `256` | 单组转换的未压缩大小目标，单位为 MiB；单个暂存分片不可再拆分。 |
-| `--staging-format FORMAT` | `auto` | 辅助暂存格式：`auto` 对 >=16 MiB 的来源使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；`arrow` 或 `ndjson` 可强制指定。EVTX 仍使用 NDJSON。 |
+| `--staging-format FORMAT` | `auto` | 辅助暂存格式：`auto` 对 >=16 MiB 的来源使用 Arrow IPC / ZSTD level 1，较小来源使用 gzip NDJSON；`arrow` 或 `ndjson` 可强制指定。EVTX 使用相同的自动阈值。 |
 | `--parser-backend BACKEND` | `auto` | 高级诊断覆盖：默认兼容时自动使用原生，否则使用 Python。`python` 强制兼容解析；`native` 要求每个已识别辅助来源均支持原生。EVTX 保持现有解析器。 |
 | `--direct-parquet` / `--no-direct-parquet` | 自动 | 日常无需填写：兼容本地 Web/IIS 自动直接输出，其他情况暂存。正向覆盖严格要求不保留暂存、本地执行/存储、无 broker，后端为 `auto` 或 `native`；反向覆盖强制暂存。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
@@ -53,7 +54,7 @@ seclogx case info incident42
 
 如果 `<case>` 尚不存在，`ingest` 会自动创建它。可以单独导入 EVTX 或辅助日志；发现结果为空时抛出 `NoSourcesFoundError`。仅含无法识别的辅助候选文件时，也可能返回导入零行的报告，因此应检查逐文件状态与表行数。
 
-来源目录树只遍历一次，辅助文件的内容前缀分类并行进行。当两条通路都有已识别的任务且 `workers > 1` 时，它们共享预算并发运行；`workers=1` 时串行运行。同一协调进程内的 DuckDB 转换会串行化。辅助 Parquet 在两种暂存格式下均采用 ZSTD level 1。字节目标限制工作分组，并非解析器、Arrow、DuckDB 或整个进程树的内存上限。
+来源目录树只遍历一次，辅助文件的内容前缀分类并行进行。当两条通路都有已识别的任务且 `workers > 1` 时，它们共享预算并发运行；`workers=1` 时串行运行。同一协调进程内的 DuckDB 转换会串行化。EVTX 和辅助 Parquet 在两种暂存格式下均采用 ZSTD level 1。字节目标限制工作分组，并非解析器、Arrow、DuckDB 或整个进程树的内存上限。
 
 默认自动选择本地直接转换时，普通辅助来源先在工作池中完成暂存，随后
 直接来源由协调器逐个转换，与 EVTX 和暂存转换共享转换锁。来源哈希和严格编码准备仍然
@@ -63,7 +64,14 @@ seclogx case info incident42
 
 前台进度展示阶段、遍历/分类/暂存计数及各表写入行数。这些是文件/批次级进度，不是逐字节进度或剩余时间估计；处理大文件时计数可能较久不变。详见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)。
 
-每次调用都会追加新批次，目前不支持跨批次去重或断点续跑。暂存来源先完成暂存再转换；直接来源的私有 Parquet 在关闭和来源核验后才发布，也可能将完整前缀报告为 `partial`，这不等于整次导入原子提交。崩溃可能留下 `_ingest_private` 文件，当前不支持自动恢复。`--background` 和保留暂存均不保证提前查询或原子快照。应等导入完成并检查报告后再查询 Case。
+整个批次通过一次原子案例目录更新变为可见；此前查询继续使用先前已提交快照。导入发生致命
+错误时，不会发布半份批次。恢复状态为 `partial` 的来源仍可随批次提交，必须检查报告。进度中的
+写入计数表示已完成的工作，不代表提交前已经能查询到这些行。
+
+同一路径、主机、格式、EVTX 解码/原始 XML 设置及导入契约下，内容未变的已提交来源重试时会
+跳过。身份不同或内容变化仍作为独立导入处理，不做逐行去重。失败批次重试会从源文件重新开始，
+不从字节偏移续跑。下次导入或 `ingest-cleanup` 会清理无活动进程的未提交输出，保留审计元数据。
+后台提交后重新打开已有 Python Case 即可读取新快照。前台和后台使用相同的提交保证。
 
 示例：
 
@@ -88,7 +96,7 @@ seclogx ingest large_case --source /evidence/full_kape_output --background
 seclogx ingest-status large_case --watch
 ```
 
-前台导入正常结束后，seclogx 会打印**核对报告（reconciliation report）**：发现的文件数、成功导入数、部分恢复数、失败数，以及暂存记录数与写入数据湖的行数。解析不完整的文件会附带错误原因和恢复计数。EVTX 报告同时保存到 `cases/<name>/logs/ingest_<batch_id>.log`；后台任务会把两份报告都写入 `cases/<name>/jobs/<job_id>.log`。
+前台导入正常结束后，seclogx 会打印**核对报告（reconciliation report）**：发现的文件数、成功导入数、部分恢复数、失败数，以及暂存记录数与写入数据湖的行数。解析不完整的文件会附带错误原因和恢复计数。EVTX 报告同时保存到 `cases/<name>/.ingest/<transaction_id>/logs/ingest_<batch_id>.log`；后台任务会把两份报告都写入 `cases/<name>/jobs/<job_id>.log`。
 
 ```
 Ingest batch 66777433-... for case 'incident42'
@@ -127,14 +135,14 @@ Auxiliary log ingest (Scheduled Tasks / IIS / web access & error logs / Exchange
 
 ## `seclogx ingest-status <case> [job_id] [--watch]`
 
-查看一个 `seclogx ingest --background` 任务的状态：当前阶段（`scanning`/`staging`/`flattening`/`done`/`failed`）、目前已扫描的文件数、发现/暂存计数（成功/部分/失败/不支持），以及目前已写入各表的行数。读取的是
+查看一个 `seclogx ingest --background` 任务的状态：当前阶段（`scanning`/`staging`/`flattening`/`done`/`failed`/`interrupted`/`cancelled`）、目前已扫描的文件数、发现/暂存计数（成功/部分/失败/不支持），以及目前已写入各表的行数。读取的是
 `cases/<name>/jobs/<job_id>.json`——后台任务在运行过程中持续更新的一份小体积
 JSON 快照（见[《8. 性能与规模》](08_performance_and_scale.zh-CN.md)）。
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
 | `job_id` | 最近一次任务 | 要查看哪个任务；省略则显示最近启动的那一个。 |
-| `--watch` | 关闭 | 每秒轮询一次，状态发生变化时重新打印，直到任务进入 `done` 或 `failed`。 |
+| `--watch` | 关闭 | 每秒轮询一次，状态发生变化时重新打印，直到任务进入 `done`、`failed`、`interrupted` 或 `cancelled`。 |
 | `--case-root` | `./cases` | 案例工作区所在位置。 |
 
 ```bash
@@ -142,7 +150,44 @@ seclogx ingest-status incident42
 seclogx ingest-status incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f --watch
 ```
 
-后台导入使用调用方的 Python 解释器，立即返回任务 ID。可捕获异常会记录为 `failed`，详情见 `cases/<name>/jobs/<job_id>.log`。强制终止进程、系统崩溃或状态写入失败可能留下过期快照：当前没有独立的进程存活监督器，`--watch` 可能持续等待。`done` 仅表示任务结束，不表示所有文件都无错误。当前没有取消/续跑命令。任务完成后，已有的 Python `Case` 对象应重新打开，以更新缓存视图。
+后台导入使用调用方的 Python 解释器，立即返回任务 ID。独立心跳在文件进度没有变化时仍会更新。
+读取状态时核对 PID、进程创建时间及启动主机；协调进程退出后标记为 `interrupted`，若目录中
+已经存在提交则恢复为 `done`。可捕获异常记为 `failed`，取消记为 `cancelled`。`done` 不表示
+每个来源都完整解析。状态会记录已知的存活 worker，其租约阻止提前清理输出。不会用本机的
+进程表推断另一台主机上的任务是否存活。
+
+## `seclogx ingest-cancel <case> <job_id>`
+
+停止本机所属的协调进程及 worker，包括已记录的孤立 worker。启动期间的取消请求会先保存，
+在读取输入前处理；子进程登记身份期间可能短暂返回 `cancelling`。已经完成的提交保留，未完成
+输出保持不可见。
+
+```bash
+seclogx ingest-cancel incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f
+```
+
+必须在任务原启动主机上取消，不删除来源证据。通过 `--case-root` 选择工作区根目录。
+
+## `seclogx ingest-cleanup <case>`
+
+清理无活动进程的未提交批量输出，以及不再被读取者使用的已退役本地 Parquet 文件。worker 和
+读取者身份保护仍在使用的数据。保留状态 JSON 和批次审计记录。已结束任务的控制台日志超过
+`--log-retention-days` 指定天数（默认 `7`，最小 `0`）且没有关联活动进程后可以删除。
+已提交证据始终保留。
+
+```bash
+seclogx ingest-cleanup incident42 --log-retention-days 7
+```
+
+## `seclogx compact <case>`
+
+合并相同表/分区内的小 Parquet 文件，检查行数和 Schema 后替换目录。已有查询快照继续读取
+旧文件；读取者关闭后，再用 `ingest-cleanup` 回收退役文件。不支持 S3 合并。每次导入成功后
+已经会检查是否需要自动维护；此命令用于提前请求维护。这三个命令均接受 `--case-root`。
+
+```bash
+seclogx compact incident42
+```
 
 ## `seclogx query <case> "<SQL>"`
 

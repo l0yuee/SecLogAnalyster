@@ -29,6 +29,7 @@ from urllib.parse import quote, unquote
 import duckdb
 
 from ..errors import ClusterConfigError
+from ..paths import duckdb_path
 from .config import ClusterConfig
 
 
@@ -80,6 +81,14 @@ class StorageBackend(ABC):
     def copy_target(self, table_location: str) -> str:
         """String to hand a `COPY ... TO '<this>'` statement."""
 
+    def list_parquet(self, table_location: str) -> list[str]:
+        """Exact object names captured by an atomic case catalog."""
+        raise NotImplementedError
+
+    def remove_tree(self, location: str) -> None:
+        """Delete a caller-validated, exclusively owned output prefix."""
+        raise NotImplementedError
+
     def configure_duckdb(self, con: duckdb.DuckDBPyConnection) -> None:
         """Prepare a fresh DuckDB connection to read/write this backend's
         locations. A no-op locally; installs+configures `httpfs` for S3."""
@@ -110,22 +119,22 @@ class LocalStorageBackend(StorageBackend):
         return str(Path(location).joinpath(*parts))
 
     def exists(self, location: str) -> bool:
-        return Path(location).exists()
+        return Path(duckdb_path(location)).exists()
 
     def ensure_dir(self, location: str) -> None:
-        Path(location).mkdir(parents=True, exist_ok=True)
+        Path(duckdb_path(location)).mkdir(parents=True, exist_ok=True)
 
     def table_dirs(self, lake_location: str) -> list[str]:
-        root = Path(lake_location)
+        root = Path(duckdb_path(lake_location))
         if not root.exists():
             return []
         return sorted(p.name for p in root.iterdir() if p.is_dir())
 
     def has_parquet(self, table_location: str) -> bool:
-        return any(Path(table_location).rglob("*.parquet"))
+        return any(Path(duckdb_path(table_location)).rglob("*.parquet"))
 
     def host_partitions(self, table_location: str) -> set[str]:
-        table_dir = Path(table_location)
+        table_dir = Path(duckdb_path(table_location))
         if not table_dir.exists():
             return set()
         return {unquote(p.name[len("host=") :]) for p in table_dir.glob("host=*") if p.is_dir()}
@@ -135,6 +144,11 @@ class LocalStorageBackend(StorageBackend):
 
     def copy_target(self, table_location: str) -> str:
         return table_location
+
+    def list_parquet(self, table_location: str) -> list[str]:
+        raw_root = Path(table_location).resolve()
+        io_root = Path(duckdb_path(table_location))
+        return sorted(str(raw_root / path.relative_to(io_root)) for path in io_root.rglob("*.parquet"))
 
     @property
     def precreates_partition_dirs(self) -> bool:
@@ -181,6 +195,9 @@ class S3StorageBackend(StorageBackend):
 
     def lake_location(self, case_dir: Path) -> str:
         case_name = Path(case_dir).name
+        if Path(case_dir).parent.name == ".ingest":
+            owner = Path(case_dir).parent.parent.name
+            return f"s3://{self.bucket}/{owner}/ingest/{case_name}/lake"
         return f"s3://{self.bucket}/{case_name}/lake"
 
     def join(self, location: str, *parts: str) -> str:
@@ -196,8 +213,35 @@ class S3StorageBackend(StorageBackend):
 
     def table_dirs(self, lake_location: str) -> list[str]:
         prefix = self._key(lake_location).rstrip("/") + "/"
-        resp = self._client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, Delimiter="/")
-        return sorted(p["Prefix"][len(prefix) : -1] for p in resp.get("CommonPrefixes", []))
+        paginator = self._client.get_paginator("list_objects_v2")
+        return sorted(p["Prefix"][len(prefix) : -1]
+                      for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix, Delimiter="/")
+                      for p in page.get("CommonPrefixes", []))
+
+    def list_parquet(self, table_location: str) -> list[str]:
+        prefix = self._key(table_location).rstrip("/") + "/"
+        pages = self._client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
+        return sorted(f"s3://{self.bucket}/{obj['Key']}" for page in pages
+                      for obj in page.get("Contents", []) if obj["Key"].endswith(".parquet"))
+
+    def remove_tree(self, location: str) -> None:
+        prefix = self._key(location).rstrip("/") + "/"
+        parts = prefix.strip("/").split("/")
+        if len(parts) != 4 or parts[1] != "ingest" or parts[3] != "lake":
+            raise ValueError("only an owned ingest output prefix can be cleaned")
+        import uuid
+
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{22}", parts[2]):
+            uuid.UUID(parts[2])
+        pages = self._client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
+        for page in pages:
+            objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            if objects:
+                result = self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": objects})
+                if result.get("Errors"):
+                    raise OSError("could not remove all uncommitted objects")
 
     def has_parquet(self, table_location: str) -> bool:
         prefix = self._key(table_location).rstrip("/") + "/"

@@ -16,7 +16,20 @@ contain serialized JSON text and are physically stored as `VARCHAR` in
 Parquet. Auxiliary NDJSON and Arrow staging both expose fixed string
 columns before canonical casts; missing fields and invalid typed values
 become `NULL`, while timestamp-shaped text keeps its original spelling.
-Staging format selection does not change the table schema.
+Staging format selection does not change the table schema. EVTX uses the same
+canonical extraction SQL for Arrow and NDJSON, with an explicit BIGINT record-ID
+cast on the Arrow route. Rendered JSON and optional XML remain unchanged.
+
+Table names and column types are independent of storage paths. New imports are
+immutable files listed by an atomic `case.json` catalog under `.ingest/<id>/lake/`;
+legacy `lake/` files are adopted without rewriting. Query a Case rather than
+globbing every workspace, which would include uncommitted output.
+
+EVTX per-source reports additionally expose `ansi_codec`, `ansi_codec_source`,
+`staging_format` and `header_record_count`. These are ingest diagnostics, not new
+event columns. ANSI metadata is explicit (default Windows-1252) and does not alter
+Unicode fields. Header count discrepancies and recovery errors produce partial
+status; staged/written count mismatches abort before commit.
 
 Auxiliary timestamp casts normalize explicit ISO offsets to UTC and store
 timezone-free `TIMESTAMP` values with microseconds. Values without an
@@ -75,7 +88,7 @@ See `docs/known_limitations.md` for the cases where `event_data` isn't a flat Na
 
 **The remaining tables** (generated from / kept in sync with
 `src/seclogx/ingest/logsources/schema.py`) are the non-EVTX log families. Each
-lives under its own `lake/<table>/` subdirectory and is registered as a
+has its own `<table>` partitioned output listed in the catalog and is registered as a
 view of the same name by `CaseDB` -- only present if the case has
 ingested that log family (check `Case.table_counts()` / `seclogx sources`).
 See `docs/architecture.md` for how these are ingested.

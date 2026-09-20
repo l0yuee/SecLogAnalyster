@@ -12,7 +12,6 @@ from __future__ import annotations
 import codecs
 import hashlib
 import os
-import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -25,8 +24,8 @@ from typing import Iterator, TextIO
 # errors="replace", which maps every byte 1:1 and therefore can never
 # raise. GB18030 is a Python stdlib codec (`encodings.gb18030`), so this
 # adds no new dependency.
-_TRIAL_ENCODINGS = ("utf-8-sig", "utf-16", "gb18030")
 _DECODE_CHUNK_SIZE = 64 * 1024
+_ENCODING_PEEK_BYTES = 8192
 MAX_TEXT_RECORD_CHARS = 8 * 1024 * 1024
 _LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
@@ -86,10 +85,13 @@ def prepare_text(path: Path, *, utf16_requires_bom: bool = False) -> PreparedTex
     digest = hashlib.sha256()
     decoder = codecs.getincrementaldecoder("utf-8-sig")(errors="strict")
     utf8_valid = True
+    prefix = b""
     with path.open("rb") as source:
         if _stat_signature(os.fstat(source.fileno()))[:4] != signature[:4]:
             raise SourceChangedError(f"text source changed before preparing: {path}")
         while chunk := source.read(_DECODE_CHUNK_SIZE):
+            if not prefix:
+                prefix = chunk[:_ENCODING_PEEK_BYTES]
             digest.update(chunk)
             if utf8_valid:
                 try:
@@ -103,8 +105,10 @@ def prepare_text(path: Path, *, utf16_requires_bom: bool = False) -> PreparedTex
                 utf8_valid = False
         if _stat_signature(os.fstat(source.fileno()))[:4] != signature[:4]:
             raise SourceChangedError(f"text source changed while preparing: {path}")
-    encoding = "utf-8-sig" if utf8_valid else _validated_encoding(
-        path, utf16_requires_bom=utf16_requires_bom, skip_utf8=True,
+    encoding = "utf-8-sig" if utf8_valid and not utf16_encoding(
+        prefix, requires_bom=utf16_requires_bom,
+    ) else _validated_encoding(
+        path, utf16_requires_bom=utf16_requires_bom, skip_utf8=not utf8_valid,
     )
     prepared = PreparedText(path, digest.hexdigest(), encoding, utf16_requires_bom, signature)
     _verify_prepared(prepared)
@@ -140,10 +144,43 @@ def _open_text(path: Path, encoding: str, prepared: PreparedText | None) -> Iter
                 _verify_prepared(prepared, source)
 
 
-def decode_text(raw: bytes) -> str:
-    for encoding in _TRIAL_ENCODINGS:
+def utf16_encoding(raw: bytes, *, requires_bom: bool = False) -> str | None:
+    """Recognize a BOM or strong ASCII/NUL lane evidence, never byte parity.
+
+    BOM-less all-non-ASCII UTF-16 is inherently ambiguous. Without positive
+    evidence it follows the legacy-byte fallback instead of consuming any
+    even-length GBK file as arbitrary UTF-16 codepoints.
+    """
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return "utf-16"
+    if requires_bom:
+        return None
+    sample = raw[:_ENCODING_PEEK_BYTES]
+    pairs = len(sample) // 2
+    if pairs < 4:
+        return None
+    even, odd = sample[:pairs * 2:2], sample[1:pairs * 2:2]
+    # Text logs contain enough ASCII syntax to establish byte order. Require
+    # asymmetric NUL lanes and actual printable text, not a zero-filled file.
+    for encoding, text_lane, zero_lane in (("utf-16-le", even, odd), ("utf-16-be", odd, even)):
+        if (zero_lane.count(0) >= max(4, pairs // 4)
+                and text_lane.count(0) <= pairs // 32
+                and sum(c in (9, 10, 13) or 32 <= c < 127 for c in text_lane) >= pairs // 2):
+            return encoding
+    return None
+
+
+def _encoding_candidates(raw: bytes, *, utf16_requires_bom: bool = False) -> tuple[str, ...]:
+    utf16 = utf16_encoding(raw, requires_bom=utf16_requires_bom)
+    return ((utf16,) if utf16 else ()) + ("utf-8-sig", "gb18030")
+
+
+def decode_text(raw: bytes, *, partial: bool = False) -> str:
+    """Decode full text, or a prefix that may end inside a multibyte character."""
+    for encoding in _encoding_candidates(raw):
         try:
-            return raw.decode(encoding)
+            decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+            return decoder.decode(raw, final=not partial)
         except UnicodeError:
             continue
     return raw.decode("latin-1", errors="replace")
@@ -156,20 +193,14 @@ def _validated_encoding(
 
     Re-reading the selected encoding costs one sequential pass, but avoids
     emitting a prefix in one encoding and then duplicating it on fallback.
-    The BOM-less UTF-16 codec mirrors bytes.decode('utf-16')'s native order.
+    BOM-less UTF-16 requires positive text/byte-order evidence.
     Preparation can skip UTF-8 only after its hash pass has rejected it.
     """
     with path.open("rb") as source:
-        prefix = source.read(2)
-        has_utf16_bom = prefix in (b"\xff\xfe", b"\xfe\xff")
-        utf16 = "utf-16" if has_utf16_bom else (
-            "utf-16-le" if sys.byteorder == "little" else "utf-16-be"
-        )
-        candidates = ("utf-8-sig", utf16, "gb18030") if (
-            has_utf16_bom or not utf16_requires_bom
-        ) else ("utf-8-sig", "gb18030")
+        prefix = source.read(_ENCODING_PEEK_BYTES)
+        candidates = _encoding_candidates(prefix, utf16_requires_bom=utf16_requires_bom)
         if skip_utf8:
-            candidates = candidates[1:]
+            candidates = tuple(encoding for encoding in candidates if encoding != "utf-8-sig")
         for encoding in candidates:
             source.seek(0)
             decoder = codecs.getincrementaldecoder(encoding)(errors="strict")

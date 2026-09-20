@@ -30,6 +30,36 @@ The most important ones for day-to-day querying:
 | `event_data` | Provider-specific fields as JSON (see below) |
 | `source_file` / `source_path` / `file_sha256` | Provenance / chain of custody |
 
+## Encoding and EVTX recovery
+
+Text classification and full-file decoding share the same policy. UTF-16 needs a
+BOM or strong interleaved NUL/ASCII evidence; even-sized GBK input does not select
+UTF-16. A 16 KiB classification prefix may end inside a multibyte character.
+Other text tries strict UTF-8, GB18030, then Latin-1. Ambiguous BOM-less text can
+still be misidentified.
+
+EVTX recovery continues beyond recoverable chunk errors. Source reports preserve
+recovered counts, errors and `header_record_count`, derived from physical record
+ordinals in valid chunk headers. This is a consistency check, not a guarantee for
+all damaged records. `partial` requires reviewing recovery warnings. Conversion
+count mismatches, I/O failures and detected source changes abort the attempt.
+
+EVTX ANSI fields depend on the source Windows code page, independently of Unicode
+fields. The explicit fallback is `windows-1252`; the analyst computer's locale is
+not used to guess evidence encoding. Supply known source metadata when available:
+
+```python
+from pathlib import Path
+from seclogx import SourceSpec
+
+report = c.ingest([SourceSpec(Path("evidence/Security.evtx"), host="HOST01", ansi_codec="gbk")])
+report.to_dataframe()[["source_file", "ansi_codec", "ansi_codec_source", "status", "record_count"]]
+```
+
+`cp936` is also accepted for GBK. Reports identify whether the code page came from
+source metadata or the default. Different host labels or decoding semantics are
+distinct imports even when the underlying source bytes match.
+
 ## The `event_data` field
 
 Everything provider-specific (Sysmon's `Image`, `CommandLine`,
@@ -71,7 +101,7 @@ rather than being crammed into `events` -- full column reference in
 via `summary()`/`hosts()`/`channels()` -- see [06. Python API](06_python_api.md).
 
 The normalized columns are the same for both staging formats. By default,
-auxiliary source files at least 16 MiB use Arrow IPC/ZSTD level 1;
+staged source files, including EVTX, at least 16 MiB use Arrow IPC/ZSTD level 1;
 smaller files use gzip NDJSON. Both apply fixed input types and canonical
 casts, so missing/invalid typed values become `NULL` without reinterpreting
 timestamp-shaped free text. JSON columns such as `extra` and `fields`

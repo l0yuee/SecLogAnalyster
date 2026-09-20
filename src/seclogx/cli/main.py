@@ -8,8 +8,10 @@ from .. import __version__
 from .auth_cmd import auth_command
 from .case_cmds import case_app
 from .cluster_cmds import cluster_app
+from .compact_cmd import compact_command
 from .hunt_cmd import hunt_command
 from .ingest_cmd import ingest_command
+from .ingest_control_cmd import ingest_cancel_command, ingest_cleanup_command
 from .ingest_status_cmd import ingest_status_command
 from .query_cmd import channels_command, query_command, sources_command, summary_command, table_command
 from .registry_cmd import registry_command
@@ -52,6 +54,9 @@ app.add_typer(rules_app, name="rules")
 app.add_typer(cluster_app, name="cluster")
 app.command("ingest")(ingest_command)
 app.command("ingest-status")(ingest_status_command)
+app.command("ingest-cancel")(ingest_cancel_command)
+app.command("ingest-cleanup")(ingest_cleanup_command)
+app.command("compact")(compact_command)
 app.command("query")(query_command)
 app.command("summary")(summary_command)
 app.command("channels")(channels_command)

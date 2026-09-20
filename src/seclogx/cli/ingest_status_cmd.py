@@ -8,9 +8,10 @@ import typer
 from ..case import Case
 from ..config import DEFAULT_CASE_ROOT
 from ..errors import CaseNotFoundError
+from ..ingest.job_control import TERMINAL_PHASES
 from ._render import console
 
-_TERMINAL_PHASES = ("done", "failed")
+_TERMINAL_PHASES = TERMINAL_PHASES
 
 
 def _print_status(status: dict) -> None:

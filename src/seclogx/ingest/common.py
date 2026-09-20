@@ -34,6 +34,14 @@ MAX_CANDIDATE_SIZE = 2 * 1024 * 1024 * 1024
 class SourceSpec:
     path: Path
     host: str | None = None
+    # Source Windows ANSI code page for EVTX ANSI strings. Unicode EVTX
+    # fields are unaffected. None preserves the explicit Windows-1252 default.
+    ansi_codec: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ansi_codec is not None:
+            from .evtx.encoding import normalize_ansi_codec
+            object.__setattr__(self, "ansi_codec", normalize_ansi_codec(self.ansi_codec))
 
 
 def parse_source_arg(raw: str) -> SourceSpec:

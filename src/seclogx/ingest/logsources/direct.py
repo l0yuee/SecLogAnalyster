@@ -23,6 +23,7 @@ import pyarrow.compute as pc
 
 from ...distributed.storage import LocalStorageBackend, ensure_hive_partition_dirs
 from ...textdecode import PreparedText, _verify_prepared, prepare_text
+from ...paths import duckdb_path
 from ..arrow_staging import ArrowStagingWriter
 from ..resources import CONVERSION_LOCK, IngestOptions
 from .discovery import ClassifiedFile
@@ -143,7 +144,7 @@ def _copy_source(module, cf, prepared, validator, private_path, options, batch_i
     with CONVERSION_LOCK, duckdb.connect() as con:
         options.configure_connection(con)
         # Any DuckDB spill also belongs to this source's private lifetime.
-        temporary = str(private_path.parent / "duckdb_tmp").replace("'", "''")
+        temporary = duckdb_path(private_path.parent / "duckdb_tmp").replace("'", "''")
         con.execute(f"SET temp_directory = '{temporary}'")
         with _direct_reader(module, cf, prepared, validator, state) as reader:
             with ExitStack() as inputs:
@@ -158,7 +159,7 @@ def _copy_source(module, cf, prepared, validator, private_path, options, batch_i
                 # Existing partitioned COPY omits partition columns from
                 # physical files; Hive directories restore them.
                 query = f"SELECT * EXCLUDE (host, log_type) FROM ({normalized})"
-                destination = str(private_path).replace("'", "''")
+                destination = duckdb_path(private_path).replace("'", "''")
                 try:
                     result = con.execute(
                         f"COPY ({query}) TO '{destination}' "
@@ -249,7 +250,7 @@ def direct_web_file(
             ensure_hive_partition_dirs(backend, lake, ("host", "log_type"), [partition])
             parts = [f"{name}={quote(value, safe='')}" for name, value in zip(("host", "log_type"), partition)]
             published = Path(backend.join(lake, *parts, f"{uuid.uuid4().hex}.parquet"))
-            if published.exists():
+            if Path(duckdb_path(published)).exists():
                 raise FileExistsError(f"direct output already exists: {published}")
         manifest = AuxStagedFile(
             source_path=str(cf.path), source_file=cf.path.name, host=cf.host,
@@ -278,7 +279,7 @@ def direct_web_file(
         _verify_prepared(prepared)
         if os.name == "nt":
             # Windows rename fails atomically if the destination exists.
-            private_path.rename(published)
+            Path(duckdb_path(private_path)).rename(duckdb_path(published))
         else:
             # POSIX rename may replace an existing destination. Creating a
             # hard link is an atomic no-clobber publication on a local volume;

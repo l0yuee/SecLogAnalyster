@@ -50,13 +50,14 @@ core command.
 |---|---|---|
 | `--source PATH[:HOST]` | required, repeatable | A file or directory to scan recursively. An optional `:HOST` sets the host label; otherwise the source root's name is used (including a filename for a direct-file source). Quote paths containing spaces. |
 | `--workers N` | up to 8 | Total local parsing-worker budget shared by EVTX and auxiliary pipelines. `1` stages in the caller process and runs both pipelines serially. Classification uses a separate bounded thread pool. |
+| `--evtx-ansi-codec CODEC` | `windows-1252` | Original Windows source code page for ANSI fields, e.g. `gbk`; Unicode fields are unaffected. Use Python `SourceSpec` for different codecs across sources. |
 | `--keep-raw` | off | EVTX only: capture raw XML in the `raw_xml` column. Adds XML parsing and a disk-backed index; cost depends on the records. |
 | `--keep-staging` / `--no-keep-staging` | remove | Remove temporary shards after successful conversion by default, without deleting source evidence. `--keep-staging` retains intermediates and selects staging automatically. Cleanup does not eliminate peak staging usage or provide resume. |
 | `--memory-limit SIZE` | `2GB` | Managed memory budget per DuckDB conversion connection, not a hard limit on process-tree RSS. |
 | `--duckdb-threads N` | `2` | Threads per DuckDB conversion. Independent of the parsing-worker budget. |
 | `--staging-chunk-mb N` | `64` | Target uncompressed MiB per staging shard; a record is never split. Despite the flag name, one unit is 1,048,576 bytes. |
 | `--flatten-batch-mb N` | `256` | Target uncompressed MiB per conversion group; an individual staging shard remains indivisible. |
-| `--staging-format FORMAT` | `auto` | Auxiliary staging: `auto` selects Arrow IPC / ZSTD level 1 for sources >=16 MiB, gzip NDJSON otherwise; `arrow` or `ndjson` forces a format. EVTX remains NDJSON. |
+| `--staging-format FORMAT` | `auto` | Auxiliary staging: `auto` selects Arrow IPC / ZSTD level 1 for sources >=16 MiB, gzip NDJSON otherwise; `arrow` or `ndjson` forces a format. EVTX uses the same automatic threshold or explicit staging-format choice. |
 | `--parser-backend BACKEND` | `auto` | Advanced diagnostic override: automatically use native where compatible, otherwise Python. `python` forces compatibility parsing; `native` requires native support for each recognized auxiliary source. EVTX keeps its existing parser. |
 | `--direct-parquet` / `--no-direct-parquet` | automatic | Normally omitted: use direct output for compatible local Web/IIS sources, otherwise staging. The positive override strictly requires no retained staging, local execution/storage, no broker and backend `auto` or `native`; the negative override forces staging. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
@@ -88,13 +89,19 @@ written by table. These are file/batch progress counters, not byte-level progres
 or an ETA; a large file can take time without advancing them. See
 [08. Performance & scale](08_performance_and_scale.md).
 
-Every invocation appends a new batch. Cross-run deduplication and checkpoint/resume
-are not implemented. Staged sources finish staging before conversion. Direct
-sources publish a private Parquet file after closure and source checks, and
-may report an accepted prefix as `partial`; this is not an atomic whole-ingest
-commit. A crash can leave `_ingest_private` files without automatic recovery.
-Neither `--background` nor retained staging provides early-query or snapshot
-guarantees. Wait for completion and inspect the report before querying the Case.
+A complete batch becomes visible through one atomic case-catalog update. Until
+then, queries retain the previous committed snapshot. A fatal ingest failure
+leaves no partially published batch. Recovered `partial` sources can still be
+committed and must be reviewed in the report. Progress row counts describe work
+done, not visibility before commit.
+
+Retrying an unchanged source with the same path, host, format, EVTX decoding/raw
+settings and ingest contract skips its committed import. Different identities or
+changed content remain separate imports; there is no row-level deduplication.
+Failed batches restart from the source rather than a saved byte offset. The next
+ingest or `ingest-cleanup` removes inactive uncommitted output while keeping audit
+metadata. Reopen an existing Python Case after a background commit to see its new
+snapshot. Both foreground and background use these same guarantees.
 
 Examples:
 
@@ -124,7 +131,7 @@ files discovered vs. staged OK vs. partially recovered vs. failed, and
 staged records vs. rows actually written to the lake. Any file that
 didn't parse cleanly is listed with its exact error and how many
 records were recovered. The EVTX report is also saved to
-`cases/<name>/logs/ingest_<batch_id>.log`; background jobs capture both reports
+`cases/<name>/.ingest/<transaction_id>/logs/ingest_<batch_id>.log`; background jobs capture both reports
 in `cases/<name>/jobs/<job_id>.log`.
 
 ```
@@ -172,7 +179,7 @@ discovered file with its status, table, record/error counts.
 ## `seclogx ingest-status <case> [job_id] [--watch]`
 
 Checks on a `seclogx ingest --background` job: current phase
-(`scanning`/`staging`/`flattening`/`done`/`failed`), files scanned so
+(`scanning`/`staging`/`flattening`/`done`/`failed`/`interrupted`/`cancelled`), files scanned so
 far, discovered/staged counts (ok/partial/failed/unsupported), and rows
 written per table so far. Reads
 `cases/<name>/jobs/<job_id>.json` -- a small JSON snapshot the
@@ -182,7 +189,7 @@ background job updates as it runs (see
 | Option | Default | Meaning |
 |---|---|---|
 | `job_id` | most recent job | Which job to check; omit to see the most recently started one. |
-| `--watch` | off | Poll once a second and reprint whenever the status changes, until the job reaches `done` or `failed`. |
+| `--watch` | off | Poll once a second and reprint whenever the status changes, until the job reaches `done`, `failed`, `interrupted` or `cancelled`. |
 | `--case-root` | `./cases` | Where the case workspace lives. |
 
 ```bash
@@ -190,14 +197,53 @@ seclogx ingest-status incident42
 seclogx ingest-status incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f --watch
 ```
 
-Background imports use the same Python interpreter as the caller and return a
-job ID immediately. Caught exceptions are recorded as `failed`; inspect
-`cases/<name>/jobs/<job_id>.log` for details. A forced process termination, OS
-crash or failed status write can leave the last snapshot stale: there is no
-separate liveness supervisor, and `--watch` may continue waiting. `done` means
-the job finished, not that every source parsed without errors. There is no
-cancel/resume command. After completion, reopen an existing Python `Case` handle
-to refresh its cached views.
+Background imports use the caller's Python interpreter and return a job ID
+immediately. An independent heartbeat updates even while file progress is idle.
+Status reads verify PID, process creation time and originating host; an exited
+coordinator becomes `interrupted`, or `done` if its commit is already in the
+catalog. `failed` records caught exceptions, and `cancelled` records cancellation.
+`done` does not mean every source parsed completely. Status includes any known
+surviving workers; their leases prevent premature output cleanup. Remote process
+liveness is not inferred from the local process table.
+
+## `seclogx ingest-cancel <case> <job_id>`
+
+Stops the owned local coordinator and its workers, including recorded orphan
+workers. A request during startup is saved before input processing begins.
+`cancelling` can be returned briefly while the child registers. A commit that
+already completed is retained; incomplete output stays invisible.
+
+```bash
+seclogx ingest-cancel incident42 3b594cbe-f419-40d7-b598-31780bbe6c6f
+```
+
+Cancellation must run on the job's originating host. It does not delete source
+evidence. `--case-root` selects the workspace root.
+
+## `seclogx ingest-cleanup <case>`
+
+Reclaims inactive uncommitted bulk output and retired local Parquet files not
+needed by active readers. Worker and reader identities protect data still in use.
+Status JSON and batch audit records are retained. Terminal job console logs older
+than `--log-retention-days` (default `7`, minimum `0`) are removed when no associated
+process remains active. Committed evidence is preserved.
+
+```bash
+seclogx ingest-cleanup incident42 --log-retention-days 7
+```
+
+## `seclogx compact <case>`
+
+Merges small local Parquet files in the same table/partition, checking row counts
+and schema before replacing the catalog. Open query snapshots continue reading
+their old files. Run `ingest-cleanup` after readers close to reclaim retired files.
+S3 compaction is not supported. Each successful ingest already considers automatic
+maintenance; this command requests it sooner. All three commands accept
+`--case-root`.
+
+```bash
+seclogx compact incident42
+```
 
 ## `seclogx query <case> "<SQL>"`
 

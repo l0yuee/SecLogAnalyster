@@ -6,11 +6,9 @@ per rule -- deliberately not a full `SELECT ...` statement, so it stays
 decoupled from any particular view/table name. hunt.py wraps the fragment
 as `SELECT * FROM events WHERE <fragment>`.
 
-Field names arrive already mapped to full SQL expressions by
-detect/pipeline.py's ProcessingPipeline (e.g. Sigma's `Image` becomes
-`(event_data ->> 'Image')`), so `field_quote`/`field_escape` are left
-unset (no further quoting) and the base class inserts the mapped
-expression as-is wherever a template substitutes `{field}`.
+Field names remain untrusted until escape_and_quote_field resolves them.
+Only the project's exact field mapping may produce SQL expressions;
+other names must be simple identifiers and are always quoted.
 
 `convert_value_str` / `convert_condition_field_eq_val_str` are overridden
 (closely following the pattern used by pySigma-backend-sqlite) because the
@@ -31,10 +29,14 @@ template uniformly instead of patching each one individually.
 
 from __future__ import annotations
 
+import re
+
 from sigma.conditions import ConditionAND, ConditionNOT, ConditionOR
 from sigma.conversion.base import TextQueryBackend
 from sigma.conversion.state import ConversionState
 from sigma.types import SigmaString, SpecialChars
+
+from .pipeline import FIELD_MAPPING
 
 
 class DuckDBBackend(TextQueryBackend):
@@ -52,7 +54,7 @@ class DuckDBBackend(TextQueryBackend):
     not_token = "NOT"
     eq_token = " = "
 
-    # Fields arrive pre-mapped to full (parenthesized) SQL expressions.
+    # escape_and_quote_field owns both mapping and identifier validation.
     field_quote = None
     field_escape = None
 
@@ -71,7 +73,7 @@ class DuckDBBackend(TextQueryBackend):
     re_expression = "regexp_matches({field}, '{regex}')"
     re_escape_char = "\\"
     re_escape = ()
-    re_escape_escape_char = True
+    re_escape_escape_char = False
 
     # Numeric comparison (|lt, |gt, ...) modifiers are not supported in v1 --
     # left unset so rules using them fail conversion explicitly rather than
@@ -91,6 +93,19 @@ class DuckDBBackend(TextQueryBackend):
     deferred_start = ""
     deferred_separator = ""
     deferred_only_query = ""
+
+    def escape_and_quote_field(self, field_name: str) -> str:
+        if field_name in FIELD_MAPPING:
+            mapped = FIELD_MAPPING[field_name]
+            return mapped if mapped.startswith("(") else f'"{mapped}"'
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field_name):
+            raise ValueError(f"unsupported Sigma field name: {field_name!r}")
+        return f'"{field_name}"'
+
+    def convert_value_re(self, regex, state: ConversionState):
+        # DuckDB SQL strings escape apostrophes by doubling them. Backslashes
+        # belong to the regular expression and must reach RE2 unchanged.
+        return super().convert_value_re(regex, state).replace("'", "''")
 
     def convert_value_str(self, s: SigmaString, state: ConversionState, no_quote: bool = False) -> str:
         converted = s.convert(

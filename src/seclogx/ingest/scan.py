@@ -164,12 +164,17 @@ def scan_sources(
             if on_walked is not None and walked % _WALK_REPORT_INTERVAL == 0:
                 on_walked(walked)
 
-            identity = _identity(path, st)
+            # Identical physical evidence assigned to different hosts is
+            # distinct provenance, not a duplicate acquisition path.
+            identity = (_identity(path, st), host)
             suffix = path.suffix.lower()
 
             if suffix == ".evtx":
+                from .evtx.encoding import normalize_ansi_codec
+                identity = (identity, normalize_ansi_codec(spec.ansi_codec))
                 if identity not in evtx_seen:
-                    evtx_seen[identity] = DiscoveredFile(path=path, host=host, size_bytes=st.st_size)
+                    evtx_seen[identity] = DiscoveredFile(path=path, host=host, size_bytes=st.st_size,
+                                                       ansi_codec=spec.ansi_codec)
                 continue
 
             if suffix in SKIP_SUFFIXES or identity in aux_seen:

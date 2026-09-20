@@ -21,6 +21,12 @@ class _InlineJobQueue(JobQueue):
 
 
 def test_distributed_hunt_matches_sequential_hunt(synth_case: Case, monkeypatch):
+    from seclogx.ingest import snapshots
+    from seclogx.distributed.locking import LocalCaseLock
+
+    # This transport double runs on one machine; retain real local snapshot
+    # locking while Redis lock behavior is exercised in its dedicated suite.
+    monkeypatch.setattr(snapshots, "get_case_lock", lambda case, config: LocalCaseLock(case))
     sequential = synth_case.hunt()
 
     monkeypatch.setattr(hunt_module, "get_job_queue", lambda *a, **k: _InlineJobQueue())

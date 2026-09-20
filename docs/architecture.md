@@ -1,574 +1,183 @@
 # Architecture
 
-seclogx turns scattered forensic acquisitions -- `.evtx`, on-disk
-Scheduled Task definitions, IIS/nginx/Apache/Tomcat access and error
-logs, Exchange CSV logs, Linux syslog/auditd/systemd-journal exports,
-MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, Tencent Cloud Host
-Security client logs, and Windows Registry hives -- into one queryable,
-huntable case workspace,
-using set-based DuckDB SQL for canonical conversion. There are two
-pipelines sharing one case workspace and one query layer: the EVTX
-pipeline (stages 1-3 below) and a second one for everything else ("Non-EVTX
-log families" further down). `Case.ingest()` walks every `--source` root
-exactly once (`ingest/scan.py:scan_sources()`, bucketing files for both
-pipelines from a single pass instead of two independent tree walks) and
-then shares a total local `workers` budget across both pipelines. With
-`workers=1`, the pipelines run serially in the calling process; with a
-larger budget, they can parse concurrently. Each has a bounded worker
-queue underneath, and an
-optional progress callback (`ingest/jobs.py:ProgressReporter`) is threaded
-through both, which is what backs `seclogx ingest`'s live progress display
-and its `--background`/`ingest-status` job tracking (see
-[08. Performance & scale](guides/08_performance_and_scale.md)).
-`query.py`'s `CaseDB` and the plain-language `search.py` interface sit on
-top of whichever tables either pipeline produced, with no distinction
-between them at the query layer.
+seclogx preserves Python/Jupyter analysis interfaces and uses Rust parsing,
+Arrow batches, DuckDB SQL and partitioned Parquet underneath. Supported families
+and canonical columns are listed in [schemas](schema.md) and the
+[log guide](guides/02_log_types_and_schema.md).
 
-```
- .evtx files (multiple hosts/paths)
-        |
-        v
- [1] discovery + parallel staging  (ingest/evtx/discovery.py, ingest/evtx/stage.py, ingest/evtx/orchestrator.py)
-        |  ProcessPoolExecutor, one worker per file
-        v
- cases/<name>/staging/<batch_id>/<host>/*.ndjson.gz   (+ chunk manifests via IngestReport)
-        |
-        v
- [2] DuckDB bulk flatten  (ingest/evtx/flatten.py, schema.py)
-        |  set-based SQL over bounded groups of staged shards
-        v
- cases/<name>/lake/events/host=<h>/channel=<c>/*.parquet
-        |
-        v
- [3] query + detection  (query.py, detect/*, timeline.py)
-        |  DuckDB view + pandas, Sigma rules compiled to DuckDB SQL
-        v
- pandas DataFrames (CLI tables/CSV, or directly in a notebook via Case)
-```
+## Discovery and decoding
 
-## Stage 1: discovery + parallel staging
+`Case.ingest()` scans sources once. Physical file identity deduplicates overlapping
+paths with the same host label; different hosts remain distinct evidence. EVTX ANSI
+metadata also participates in identity. Auxiliary classification reads a bounded
+16 KiB prefix; unknown files are reported without a full hash or parser task.
 
-`ingest/evtx/discovery.py` recursively finds `.evtx` under one or more `--source
-PATH[:HOST]` inputs (forensic acquisitions rarely live under one tidy
-directory). The shared scanner deduplicates physical file identity where
-available, falling back to a resolved path; `ingest/common.py` holds the
-`SourceSpec`/`sha256_file`/`parse_source_arg` primitives it shares with
-the non-EVTX pipeline's own discovery module (see "Non-EVTX log
-families" below).
+UTF-16 requires a BOM or strong asymmetric NUL/ASCII byte-lane evidence. Even byte
+length alone is never sufficient. Prefix decoding tolerates a final incomplete
+multibyte character and precedes binary-density/XML checks. Without UTF-16 evidence,
+strict UTF-8 and GB18030 precede Latin-1; QCloud retains its UTF-16 BOM requirement.
+BOM-less all-non-ASCII text remains ambiguous. Text preparation combines hashing
+with ordinary UTF-8 validation, with extra passes for fallback encodings. Source
+identity, size and timestamp checks detect ordinary changes, not arbitrary
+manipulation of an immutable acquisition snapshot.
 
-`ingest/evtx/stage.py` runs in a worker process per file
-(`ingest/evtx/orchestrator.py` coordinates via `ProcessPoolExecutor` --
-files are independent and parsing is CPU/IO-bound, so this is where
-parallelism buys speed). Each worker streams `PyEvtxParser.records_json()`
-straight to `staging/<batch_id>/<host>/` with minimal Python-side
-transformation. `ingest/staging.py:StagingWriter` rotates gzip NDJSON
-shards at record boundaries, targeting 64 MiB of uncompressed encoded
-bytes by default. It retains one encoded record, not a shard-sized
-Python buffer; compression writes use a bounded 256 KiB buffer. Batch
-directories isolate independent ingest attempts.
-Staged NDJSON is gzipped (level 1): rendered-as-JSON EVTX
-records run considerably larger than the source binary `.evtx` (verbose
-field names, string-encoded binary values), and `staging/` is kept by
-default (see "Case workspace layout" below) -- uncompressed, that
-combination was the dominant driver of a case directory growing to
-several times the source evidence size. DuckDB's `read_ndjson`
-(Stage 2) decompresses `.gz` input transparently, so
-nothing downstream treats compressed and uncompressed staging
-differently.
+## Parsing and bounded staging
 
-With `keep_raw=True`, raw XML is indexed by event record ID in a temporary
-SQLite database on disk, then looked up during the JSON pass. This avoids
-a whole-file XML dictionary, while retaining the cost of an extra parse,
-SQLite I/O, and temporary disk space. XML capture remains best effort.
+The default is at most eight local parsing workers shared by both pipelines.
+`workers=1` executes serially. Pending tasks are bounded and only manifests cross
+processes. Compatible UTF-8 Common/Combined and IIS W3C sources use the bundled Rust
+extension automatically. It releases the GIL and constructs Arrow buffers without
+per-record Python dictionaries crossing the native boundary. Unsupported input
+uses Python compatibility parsing; explicit backend overrides remain diagnostic.
 
-Staging catches parse failures at the file level and records a `partial`
-status with the exact number of records recovered, rather than letting a
-partial read pass as a silent success -- `ingest/evtx/manifest.py`'s
-`StagedFile`/`IngestReport` are the direct fix for the "ELK silently
-drops records on import" pain point this tool exists to solve. See
-`docs/known_limitations.md`'s "Ingestion / schema" section for exactly
-when this triggers (a corrupted chunk partway through a file).
-(`ingest/common.py` also holds the `StageStatus` vocabulary and `now_iso()`
-helper both pipelines' manifests share.)
+Compatible Web/IIS input streams directly to DuckDB with local execution/storage,
+no broker and no retained staging. Other auxiliary sources finish staging and
+close their pool before direct sources run sequentially in the coordinator.
+Capability fallback deletes that source's private native output before complete
+Python replay. Source changes, I/O failures and malformed native batches are fatal.
 
-## Stage 2: DuckDB bulk flatten
+Staged auxiliary and EVTX sources automatically use Arrow IPC/ZSTD level 1 at
+16 MiB or more and gzip NDJSON below that size. Arrow batches target 16,384 rows
+and a 16 MiB conservative estimate; an indivisible record may exceed the target.
+Shards target 64 MiB uncompressed; encoded records above 32 MiB are rejected.
+Explicit native auxiliary staging requires Arrow; direct output has no size
+threshold. `staging_format` is an advanced diagnostic override.
 
-On a staged path, after staging completes, its orchestrator groups shards
-by their recorded uncompressed size (256 MiB per conversion by default).
-`ingest/evtx/flatten.py` reads each group in a
-DuckDB `read_ndjson(..., filename=true)` call, joins it against an
-in-memory manifest table for provenance (host, source path, file hash),
-and extracts every normalized column via the SQL expressions defined
-once in `schema.py` (`EXTRACTION_SQL`) -- the single source of truth for
-both the column list and how each column is derived. Missing JSON paths
-extract to `NULL` rather than erroring, which is what absorbs the huge
-per-provider field variance across hundreds of Windows event providers.
+Text and Registry ingest emit records. Direct parser APIs without an emitter can
+still return complete lists. Physical text lines are limited to 8 Mi characters;
+logical-record limits also apply. Scheduled Task XML uses an 8 MiB document limit.
+Registry recovery and unusually large values remain memory exceptions. See
+[known limitations](known_limitations.md).
 
-The result is written as Parquet, Hive-partitioned by `host` then
-`channel` (`COPY ... PARTITION_BY (host, channel)`). DuckDB percent-encodes
-partition values containing `/` (common in channel names like
-`Microsoft-Windows-Sysmon/Operational`) and decodes them back
-transparently on read.
+## EVTX recovery and source ANSI metadata
 
-`IngestOptions`, exported by `seclogx`, supplies `memory_limit="2GB"`,
-`threads=2`, `staging_chunk_bytes=64 * 1024 * 1024`, and
-`flatten_batch_bytes=256 * 1024 * 1024`, and `staging_format="auto"`. Both `Case.ingest(options=...)`
-and `Case.ingest_background(options=...)` accept it. Chunk and batch
-sizes are byte targets: indivisible records/shards can exceed a target.
-Encoded records above 32 MiB are explicitly rejected.
+EVTX already uses the Rust `evtx` dependency. Each worker assigns one native
+thread, avoiding an extra all-core pool per process. Recovery continues after
+recoverable iterator errors, allowing later valid chunks to be read. I/O failures,
+source changes and memory exhaustion remain fatal. A finite physical-input bound
+prevents a broken iterator from raising forever without advancing.
 
-The process-local `CONVERSION_LOCK` serializes DuckDB ingest conversions
-within one coordinator or Notebook process. It does not coordinate
-separate processes/machines or limit unrelated queries. DuckDB's memory
-setting applies to one conversion instance's managed memory, not total
-RSS: parser processes, Python objects, library buffers and other jobs
-need additional memory. Windows local storage still pre-creates Hive
-partition directories. Auxiliary staging records a bounded partition set,
-so it usually avoids a second scan; legacy manifests, unsupported values,
-or exceeded metadata bounds retain the scan fallback. EVTX retains its
-existing partition scan.
+The SHA pass also audits structurally valid chunk headers using physical record
+ordinals, not event IDs. Recovery-count discrepancies produce `partial`, including
+detectable record loss suppressed internally by the dependency. Header checks
+cannot prove that every damaged record was exposed or recoverable. Manifests
+record recovered/error counts and `header_record_count`.
 
-## Stage 3: query + detection
+EVTX does not reliably identify its source ANSI code page. The explicit default
+is `windows-1252`, independent of the analyst's OS locale. Known source metadata
+can be supplied using `SourceSpec(path, host, ansi_codec="gbk")`; `cp936` is an alias.
+`ansi_codec` and `ansi_codec_source` record the decision. Unicode fields are
+unaffected. This is evidence metadata, not a performance choice.
 
-`query.py`'s `CaseDB` registers one view per table subdirectory found
-under `lake/` (`read_parquet(..., hive_partitioning=true,
-union_by_name=true)` each) -- `events` for Windows Event Log, plus
-whichever of `web_logs`/`web_error_logs`/`scheduled_tasks`/
-`exchange_message_tracking`/`exchange_logs`/`syslog`/`auditd_logs`/
-`journal_logs`/`db_logs`/`qcloud_logs`/`registry` the case has data for -- and exposes
-`.sql()`, a generic `.table(name)` (full contents of any table as a
-DataFrame), and a handful of convenience filters, always returning
-pandas DataFrames. `Case` mirrors this with a named, DataFrame-returning
-accessor per log family (`web_logs()`, `web_error_logs()`,
-`scheduled_tasks()`, `exchange_message_tracking()`, `exchange_logs()`,
-`syslog()`, `auditd_logs()`, `journal_logs()`, `db_logs()`,
-`qcloud_logs()`, `registry()`)
--- the same first-class treatment
-`events` gets via `summary()`/`hosts()`/`channels()`, so no log family
-requires raw SQL just to get a DataFrame. See `docs/schema.md` for every
-table's full column list.
+`keep_raw=True` adds an XML pass and a temporary disk-backed SQLite index, then
+attaches XML by event record ID during JSON recovery. Missing XML/recovery errors
+are reported; storage failures abort. Arrow preserves rendered JSON/XML and removes
+the outer NDJSON serialization/reparse. It does not remove the dependency's
+per-record Python boundary or JSON rendering.
 
-### Bounded-memory delivery: `.sql()`/`.table()` vs. `.sql_chunks()`/`.table_chunks()`
+## Canonical conversion
 
-DuckDB executes lazily with predicate pushdown over the Parquet lake, but
-`.sql()`/`.table()` still call `.fetchdf()`, which materializes the
-*entire* result as one pandas DataFrame -- fine for a filtered or
-aggregated result, but any table here can realistically reach real-world
-log volumes (web access/error logs especially, easily terabyte-scale
-across a case), at which point one in-memory DataFrame for a whole table
-is the actual bottleneck, independent of how lazy the query engine
-underneath is. `.sql_chunks()`/`.table_chunks()` use DuckDB's
-`fetch_df_chunk()` on a dedicated cursor instead, yielding an
-`Iterator[pd.DataFrame]` of roughly `chunksize`-row chunks. This bounds
-result delivery by row count when the caller releases each chunk; row
-width, retained chunks, and DuckDB joins/sorts/aggregations still consume
-additional memory. `IngestOptions` configures ingest conversions, not
-these query connections or pandas allocations. See "Bounded-memory access for
-large tables" in
-[03. Querying & search](guides/03_querying_and_search.md) for the full
-mechanism and usage examples.
+DuckDB converts bounded shard groups (256 MiB target) with fixed raw input types
+and canonical SQL. EVTX Arrow record IDs are explicitly cast to BIGINT. Manifest
+joins attach provenance. Parquet uses ZSTD level 1 and each table's Hive partitions.
+Windows pre-creates partition directories. Auxiliary manifests avoid rereads with
+bounded partition metadata (4,096 values/1 MiB per source), otherwise a scan is
+retained. EVTX retains its partition scan, reopening its Arrow reader before COPY.
+Staged and written counts must agree before cleanup or success.
 
-The table/query accessors have
-`_chunks` siblings built the same way (`Case.query_chunks()`,
-`Case.web_logs_chunks()`, `Case.timeline_chunks()`, ...), and the CLI
-(`query`/`table`/`tasks`/`timeline`) uses the chunked path automatically
-for both `--out` (streamed straight to CSV, one chunk at a time -- see
-`cli/_render.py`'s `export_chunks_to_csv`) and the console preview
-(`print_df_chunks` pulls only enough rows for the table, never the whole
-result, at the cost of not being able to report an exact "N more rows"
-count without materializing everything to know it).
+`CONVERSION_LOCK` serializes conversions within one coordinator. Defaults are
+DuckDB `memory_limit="2GB"` and `threads=2`. Managed conversion memory is not total
+RSS, Windows private bytes, parser memory or pandas results. Separate jobs have
+separate budgets; ordinary query connections do not inherit ingest settings.
 
-### Querying without SQL: `search.py`
+## Atomic catalog and retry
 
-`seclogx search` / `Case.search()` let an analyst filter any table with
-plain field/operator/value conditions -- no SQL. `search.py` translates
-these into the same parameterized SQL `.sql()`/`.sql_chunks()` already
-run, in three steps:
+Each attempt writes isolated `.ingest/<id>/` output. One atomic `case.json`
+replacement commits exact Parquet filenames, source ledger and run history
+together. Uncommitted output is invisible. Direct source publication remains
+inside the private attempt; a later failure cannot expose a partial new batch.
 
-1. **Field resolution** (`resolve_field`): a field name that matches one
-   of the table's real columns is used directly; otherwise it's looked up
-   as a key inside whichever of the table's columns hold a JSON *object*
-   (`event_data`, `extra`, `fields`, ...). Which columns those are comes
-   from this project's own schema modules (`schema.py`'s `CORE_COLUMNS`,
-   `ingest/logsources/schema.py`'s `TABLES`) -- their declared JSON-type
-   annotations -- rather than DuckDB's catalog, because every JSON-bearing
-   column here is physically stored as VARCHAR (see schema.py's
-   `event_data` comment), so asking DuckDB "is this column's type JSON"
-   always says no. Content-sniffing the catalog instead (sample a value,
-   check it looks like `{...}`) breaks silently whenever a JSON-object
-   column is all-NULL in a given case; reading the declared type doesn't
-   have that failure mode. JSON *array*
-   columns (`scheduled_tasks.actions`/`triggers`) are excluded from this
-   even though they're declared JSON too -- keyed extraction doesn't
-   apply to a list the same way. An unresolvable field raises
-   `UnknownFieldError` listing the table's actual columns, rather than a
-   raw "column not found" from DuckDB -- but only on a table with no
-   JSON-object catchall to fall back to (e.g. `scheduled_tasks`); on a
-   table that has one (`events`, `web_logs`, ...) an unknown key is
-   indistinguishable from "a real key just not present in this data,"
-   and both correctly return zero matches instead (see
-   `docs/known_limitations.md`'s "Plain-language search" section).
-2. **Operator compilation** (`_condition_sql`): `equals` casts both sides
-   to VARCHAR and compares (optionally via `LOWER()` for the default
-   case-insensitive behavior) -- deliberately always a text comparison so
-   an analyst doesn't need to know or care whether the underlying column
-   is numeric; `contains` is `LIKE`/`ILIKE` with the literal value's `%`/
-   `_`/`\` escaped (it's a literal substring search, not a wildcard
-   pattern); `regex` is `regexp_matches(expr, pattern, options)`, with
-   `options='i'` for case-insensitive (DuckDB's regex case-insensitivity
-   flag). Multiple values on one condition combine with OR (`status`
-   equals 404 or 500); multiple conditions combine with AND by default,
-   OR if `match="any"`.
-3. **Memory-safety check** (reusing `CaseDB.estimate()`): `search()`
-   estimates the result size before fetching and raises
-   `ResultTooLargeError` -- naming `search_chunks()`/`search_to_csv()` as
-   the alternatives -- rather than materializing a result too large for
-   the machine's available memory. `search_chunks()`/`search_to_csv()`
-   skip the eager-result check and deliver one DataFrame at a time
-   (the same `sql_chunks()`/`export_chunks_to_csv()` path described above).
-   This does not impose a hard memory ceiling on query execution.
+Identity combines canonical path, host, detected kind, EVTX ANSI codec, EVTX raw
+retention, ingest contract and SHA-256. Unchanged committed sources are skipped
+and listed in `report.already_imported`. Different hosts/decoding semantics remain
+distinct. Committed partial sources retain their partial status. Rows repeated
+inside a source file are not deduplicated.
 
-`discover_fields()` (`seclogx fields` / `Case.fields()`) answers "what
-can I even search on" by reading real data rather than documentation: it
-fetches one bounded sample (`LIMIT sample_size`, default 5000 -- a single
-query, safe at any table size) as a DataFrame, then for each column
-either reports it directly (a real column) or, for whichever columns
-`_json_object_columns` says hold a JSON object, `json.loads()`s every
-sampled value in Python and aggregates the union of keys with a
-popularity count and one example value per key. This is deliberately
-plain Python over the sample rather than a SQL-side aggregation (e.g.
-`json_keys()` + `unnest()`) -- simpler to get right, and the sample is
-already bounded so there's no performance case for pushing it into SQL.
+Legacy `lake/` files are adopted without rewriting. A one-time DuckDB aggregation
+of their provenance columns reconstructs path/host/SHA-256 entries. Unchanged
+sources can then be skipped for the default EVTX decoding and `keep_raw=False`
+policy (auxiliary sources are independent of that flag). The status is explicitly
+`legacy_unknown`: existing rows do not prove the old parse was complete. Alternate
+EVTX code pages or raw retention are distinct imports. Existing duplicate rows
+are not removed. Missing required provenance prevents automatic adoption for
+further ingest; the old Case can still be opened for analysis.
 
-`query.py`'s `ResultSizeEstimate`/`CaseDB.estimate()` and
-`memcheck.available_memory_bytes()` (best-effort, no new dependency:
-`/proc/meminfo` on Linux, `os.sysconf` as a coarser POSIX fallback,
-`GlobalMemoryStatusEx` via `ctypes` on Windows, `None` -- treated as
-"unknown, be conservative" -- if none of those work) aren't
-search-specific; anything wanting a "is this safe to fetch eagerly"
-answer can reuse them the same way.
+Failed attempts replay in a fresh workspace, not from byte-offset checkpoints.
+Cleanup removes inactive uncommitted bulk output while retaining state/report
+metadata. Coordinator ownership and worker leases protect active writers,
+including surviving workers after coordinator exit. Remote ownership/configuration
+is not guessed; source evidence and committed output are excluded. Concurrent
+commits serialize metadata and reject a source another attempt committed first.
+This addresses process interruption and reported I/O failures, not universal
+power-loss durability or a distributed SQL transaction.
 
-`detect/` compiles Sigma rules to DuckDB SQL via a custom pySigma backend
-(`detect/backend.py`) and a field-mapping pipeline (`detect/pipeline.py`)
--- see `docs/sigma_backend.md` for how that works and how to extend it.
-Most Sigma logsource categories target `events`; `category: webserver`
-rules target `web_logs` instead (`LOGSOURCE_TABLE` in `pipeline.py`).
-`detect/hunt.py` runs each rule against the right table, attaches ATT&CK
-tags (`attack.py`), and reports rules that failed to convert or execute
-(including "this case has no `<table>` table ingested") rather than
-dropping them silently.
+## Small-file compaction
 
-Hunting still materializes each rule's matches as a DataFrame, retains
-them, and concatenates the results. There is no `hunt_chunks()` path or
-search-style eager-result guard; distributed hunting also returns match
-frames to the coordinator. A broad rule can therefore exceed available
-memory even when ingest and ordinary chunked queries remain bounded.
+After a successful ingest, local maintenance automatically considers partitions
+with at least 128 files smaller than 8 MiB each. It groups at most 256 MiB of
+compressed input per conversion, using one 2GB/two-thread DuckDB budget.
+`Case.compact()` or `seclogx compact CASE` explicitly considers groups of two or
+more small files. Rows and schema are checked before an atomic catalog swap.
+Compaction does not change the provenance/ledger or deduplicate event rows.
 
-`timeline.py` is a thin cross-host, filterable time-sorted view over the
-same `events` table.
+Original files remain available to existing registered `CaseDB` snapshots.
+`Case.cleanup_ingest()` can reclaim retired managed `.ingest/` files after no
+registered reader holds them. Legacy `lake/` files are retained for compatibility
+with older readers. Direct external DuckDB/file readers do not register leases;
+finish them before requesting reclamation. S3 automatic compaction is skipped,
+and explicit S3 compaction is unsupported. Compaction can temporarily require
+both input and replacement output space; no universal speedup is promised.
 
-## Non-EVTX log families
+## Query and detection
 
-The shared source scan also feeds a separate staging/flatten pipeline for
-artifacts that aren't `.evtx` at all: on-disk Scheduled Task definitions,
-IIS/nginx/Apache/Tomcat HTTP access **and** error/diagnostic logs, IIS
-HTTP.sys (HTTPERR) logs, Exchange's self-describing CSV logs, three
-Linux log families (generic syslog -- which is also where `auth.log`/
-`secure` content lands, see below -- the Linux Audit Framework/auditd,
-and systemd journal export), database server logs (MySQL/MariaDB
-error/general/slow query logs, PostgreSQL, MSSQL, Oracle alert log),
-Tencent Cloud Host Security client text logs (YDService, HIDS/YDLive,
-vulnerability/baseline scanners, YDFlame/YDUtils/YDQuaraV2, YDEyes), and
-Windows Registry hives (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/
-UsrClass -- binary hive parsing delegated to the `regipy` dependency,
-the same "trust a library for a complex binary forensic format" choice
-already made for `.evtx` via the `evtx` dependency)
-(`ingest/logsources/discovery.py`, `ingest/logsources/stage.py`,
-`ingest/logsources/orchestrator.py` + `ingest/logsources/flatten.py` --
-this second pair mirrors the EVTX pipeline's own orchestrator/flatten
-split), orchestrated from `Case.ingest()`
-alongside the EVTX pipeline; see `docs/known_limitations.md` for what
-happens when a source has one but not the other.
+`CaseDB` captures one committed catalog and creates views with
+`read_parquet(..., hive_partitioning=true, union_by_name=true)`. Existing readers
+keep that snapshot. Reopen after independent/background ingest; foreground ingest
+resets its own cached connection.
 
-The default chooses direct native conversion for compatible local Web/IIS
-sources. Other formats, compatibility replays, retained staging and remote
-execution/storage use this staged auxiliary path:
+Whole-result query/table methods create complete pandas DataFrames. Their
+`_chunks` siblings bound delivered batches when callers release them; wide records
+and joins/sorts still require memory. `search()` estimates before eager delivery;
+chunked search and CLI exports stream.
 
-```
- same --source PATH[:HOST] inputs
-        |
-        v
- [1] classify   (ingest/logsources/sniff.py)
-        |  content-sniffed, not trusted from filename/extension --
-        |  forensic exports routinely rename/relocate files
-        v
- scheduled_task | iis | web_access | web_error_{nginx,apache,tomcat} | iis_httperr
-   | exchange_message_tracking | exchange_generic | syslog | auditd
-   | journal_export | mysql_error | mysql_general | mysql_slow
-   | postgresql | mssql | oracle_alert | qcloud_{ydservice,go,scanner,ydeyes}
-   | registry_hive | unknown
-        |
-        v
- [2] parse + stage  (ingest/logsources/parsers/{scheduled_tasks,iis,webaccess,weberror,exchange,syslog,auditd,journal,dblogs,qcloud,registry}.py)
-        |  dispatched by ingest/logsources/orchestrator.py's
-        |  bounded worker queue, one file task per worker -- emits each
-        |  completed dict to gzip NDJSON or bounded Arrow/ZSTD shards under
-        |  staging_aux/<batch_id>/<host>/
-        v
- [3] flatten    (ingest/logsources/flatten.py, ingest/logsources/schema.py)
-        |  DuckDB reads bounded shard groups for each table off disk
-        |  (read_ndjson or streaming Arrow reader, fixed text columns) and applies
-        |  canonical TRY_CAST expressions, with missing fields as NULL
-        v
- cases/<name>/lake/{web_logs,web_error_logs,scheduled_tasks,exchange_message_tracking,exchange_logs,syslog,auditd_logs,journal_logs,db_logs,qcloud_logs,registry}/host=<h>/[log_type=<t>/]*.parquet
+Sigma compilation validates fields/identifiers, and execution accepts one read
+query on a restricted connection. Complete hunt results are stored in Parquet,
+not accumulated without bounds in pandas. Small hunts retain `.matches`; large
+hunts use `preview()`, `iter_chunks()` or `save()`. `total_matches` is the complete
+count, not preview length. See [hunting](guides/04_threat_hunting.md).
+
+## Workspace and distributed storage
+
+```text
+cases/<name>/
+  case.json                   # committed catalog, ledger and history
+  .ingest/<id>/
+    state.json, report.json   # ownership and source outcomes
+    s_evtx/, s_aux/            # staging, removed by default
+    _ingest_private/          # direct conversion scratch
+    lake/<table>/...parquet   # visible only through committed catalog
+    logs/                     # reconciliation summaries
+  lake/<table>/...parquet     # legacy output adopted without rewriting
+  jobs/                       # background state and logs
+  hunts/                      # complete hunt results
 ```
 
-**`syslog` covers `auth.log`/`secure` too -- there's no separate sniff
-kind or table for it.** Both are the same BSD/RFC-3164-or-RFC-5424
-envelope as `/var/log/syslog`; only the program names inside (`sshd`,
-`sudo`, `su`, `useradd`, ...) distinguish auth-relevant content, and that
-distinction is made afterward, on already-ingested data, by
-`ingest/logsources/parsers/syslog.py`'s `extract_auth_events()` (exposed
-as `Case.auth_events()` / `seclogx auth`) -- the same "derived heuristic
-view over an already-ingested table" pattern `Case.suspicious_tasks()`
-uses over `scheduled_tasks`, not a separate ingest-time table.
+S3 transaction output uses `s3://<bucket>/<name>/ingest/<id>/lake/`. Metadata,
+staging and leases remain on a shared local/NFS case directory. RQ distributes
+independent file/rule jobs, not a single DuckDB query. Redis coordinates distributed
+metadata commits; local cases use file locks. Credentials follow the provider's
+normal chain. See [distributed deployment](guides/10_distributed_deployment.md).
 
-Access logs (`web_logs`) and error/diagnostic logs (`web_error_logs`) are
-each web applications' two major log categories, and are kept as
-separate tables since they're structurally unrelated (access logs have a
-request/response shape; error logs are severity + free text).
-
-After discovery's suffix/empty-file filters, auxiliary classification
-uses content (see `sniff.classify_file`) because these artifacts are
-routinely renamed or relocated during acquisition (a live Task Scheduler
-task file has *no* extension at all). A classified file matching none of
-the supported formats is reported as `unrecognized`
-(`AuxIngestReport.unknown_samples`). This is not an inventory of filtered
-or unreadable paths; see the discovery caveat in known limitations.
-
-IIS and Exchange logs are both self-describing (`#Fields:` header naming
-the columns actually enabled for that site/log), so the parsers read the
-header rather than assuming a fixed field set. nginx/Apache/Tomcat access
-logs are not self-describing this way (unlike their *error* logs, which
-are engine-specific and unambiguous) -- see `docs/known_limitations.md`'s
-"Non-EVTX log ingestion" section for exactly which formats get a real
-detection versus a best-effort path/filename heuristic
-(`sniff.guess_web_log_type`).
-
-Text log and registry parsers expose an `emit` path used by ingest.
-Their public collecting calls still return complete lists when `emit`
-is omitted; those compatibility calls are not bounded by record count.
-`textdecode.iter_text_lines` validates encoding through fixed-size reads
-before emitting any rows, then reopens the file for strict decoding.
-This adds sequential I/O but prevents a late decoding failure from
-switching encoding after part of a file has already been emitted.
-QCloud retains its BOM-required UTF-16 detection policy. Exchange CSV
-keeps quoted multiline fields and their original line endings; multiline
-parsers emit completed logical records.
-
-Auxiliary flattening declares each input field as VARCHAR before canonical
-casts, instead of sampling and inferring a schema for each shard group.
-This prevents date-shaped free text from becoming a timestamp and changing
-spelling when different shard boundaries produce different samples.
-
-`staging_format="auto"` selects Arrow IPC/ZSTD level 1 for auxiliary source
-files at least 16 MiB, and gzip NDJSON for smaller files. Explicit `arrow`
-and `ndjson` override the selection. Arrow buffers are bounded by a 16 MiB
-conservative estimate and 16,384 rows, with the same 32 MiB encoded-record
-ceiling; one large record can exceed the batch target. IPC schemas fix raw
-columns as strings, then DuckDB applies the existing canonical casts. The
-reader opens one shard at a time. A fixed 1 MiB output buffer coalesces IPC
-metadata and column writes; closing the sink must succeed before a shard
-is published. Mixed formats for one table are converted
-in separate groups. Auxiliary Parquet uses ZSTD level 1. EVTX staging is
-unchanged. This staged path writes intermediate files before conversion.
-
-The main package includes a Rust extension for compatible UTF-8 CLF/Combined
-and IIS access logs. Ordinary installation builds it with the Python package;
-analysts keep the same `Case.ingest(sources)` API. Its Rust loop releases the GIL
-and builds bounded Arrow string buffers without recreating Python row
-dictionaries. Arrow C Data capsules stay within one process. Batch validation,
-partition metadata and canonical SQL remain in the Python package.
-
-`IngestOptions.parser_backend` defaults to `auto`. Compatible inputs use native
-parsing; unsupported inputs or an unavailable runtime component use Python.
-Advanced `python` and strict `native` overrides are retained for diagnosis.
-On the staged path, native parsing requires Arrow. A capability mismatch after
-accepted batches aborts and deletes all of that source's shards before complete
-Python replay; source changes, I/O failures and malformed batches are fatal.
-Per-file reports record the actual backend and fallback reason. Hash/encoding
-preparation remains, as does IPC storage when the staged path is selected.
-
-`direct_parquet=None` resolves automatically: `keep_staging=False` (the public
-default), local execution/storage, no broker and backend `auto` or `native`
-select the direct path in `ingest/logsources/direct.py`. Other configurations
-select staging. An explicit `True` retains strict configuration validation;
-`False` forces staging for diagnosis. Direct output covers compatible
-Common/Combined and IIS sources, including small files. `staging_format`
-applies to other sources and compatibility replay, not the direct path.
-
-The coordinator removes eligible sources from its ordinary queue, finishes
-the remaining staging jobs and closes their pool, then converts direct sources
-sequentially. Each direct conversion holds the same `CONVERSION_LOCK` as EVTX
-and staged flattening for its DuckDB lifetime. Within that process this shares
-one configured conversion memory/thread budget; independent processes remain
-separate.
-
-The native producer feeds bounded raw VARCHAR Arrow batches to DuckDB through
-an in-process reader. Existing canonical SQL writes ZSTD Parquet privately
-under `<case>/_ingest_private/`, outside the queryable `lake/` tree. After
-conversion, reader/writer closure and source identity checks, the source's
-completed output is published under its normal `web_logs` Hive partition.
-Ordinary parse errors can publish an accepted prefix as `partial`; zero valid
-rows produce a failed manifest without a Parquet file. I/O, source changes,
-invalid batch contracts and conversion failures are fatal and remove that
-source's private output. Earlier published sources are not rolled back.
-
-In auto mode, unavailable/incompatible native components, encodings or syntax
-fall back to whole-source Python staging after private output cleanup. The
-same `PreparedText` identity/encoding is passed to staging, with native and
-direct parsing disabled; a change cannot be hidden by preparing a new source.
-Strict native mode fails instead. Hash and encoding preparation remain a
-pre-read. Direct and later staged conversions share one batch timestamp.
-Manifests distinguish parser selection (`parser_backend`, `backend_reason`)
-from output (`output_format`, `parquet_paths`); direct results are counted once
-and skipped by staged flattening and shard cleanup.
-
-This source-level publication is not an atomic ingest transaction, a query
-snapshot or an idempotent commit. A crash may leave `_ingest_private` files;
-there is no automatic private-file recovery or resume protocol.
-
-Text preparation computes SHA-256 and strict UTF-8 validation in one pass.
-Fallback encodings retain their complete validation and priority order.
-Parsing reuses the prepared encoding only inside a matching path/policy
-scope. File identity, size and timestamps are checked for ordinary source
-changes; this is not an immutable evidence snapshot. A detected change or
-staging persistence error is fatal rather than published as a partial parse
-when detected during parsing. A preparation read/change failure is reported
-as a failed source before rows are emitted. Already-rejected UTF-8 is not
-decoded again during fallback. These checks cover prepared text logs;
-EVTX, Registry and task XML retain their separate hash/read paths.
-Partition collection is bounded to 4,096 values/1 MiB per source, and uses
-the canonical text spelling before Hive path escaping.
-
-Physical text lines have an 8 Mi-character limit; logical-record limits
-and exceptions are documented in [known limitations](known_limitations.md).
-Registry traversal uses a seekable file-backed hive and emits rows;
-transaction-log recovery still uses regipy's potentially in-memory path.
-Scheduled Task XML remains a whole-document parser, with an 8 MiB
-document limit enforced by ingest. Supported non-EVTX files are no longer
-excluded simply because their source size exceeds 2 GiB.
-
-## Case workspace layout
-
-```
-cases/<case_name>/
-  case.json                     # hosts, source paths, ingest run history
-  staging/<batch_id>/<host>/*.ndjson.gz      # one or more gzip shards per source EVTX
-  staging_aux/<batch_id>/<host>/*.{ndjson.gz,arrow}  # bounded auxiliary shards
-  _ingest_private/               # unpublished direct Parquet / DuckDB scratch
-  logs/ingest_<batch_id>.log    # reconciliation summary per ingest run
-  lake/
-    events/host=<h>/channel=<c>/*.parquet
-    web_logs/host=<h>/log_type=<t>/*.parquet
-    web_error_logs/host=<h>/log_type=<t>/*.parquet
-    scheduled_tasks/host=<h>/*.parquet
-    exchange_message_tracking/host=<h>/*.parquet
-    exchange_logs/host=<h>/log_type=<t>/*.parquet
-    syslog/host=<h>/*.parquet
-    auditd_logs/host=<h>/record_type=<r>/*.parquet
-    journal_logs/host=<h>/*.parquet
-    db_logs/host=<h>/log_type=<t>/*.parquet
-    qcloud_logs/host=<h>/log_type=<t>/*.parquet
-    registry/host=<h>/hive_type=<t>/*.parquet
-```
-
-`query.py`'s `CaseDB` creates a view per subdirectory of `lake/` that
-actually contains Parquet files (named after the subdirectory), so a case
-only ever exposes tables it has ingested data for, and a future log
-family only needs a lake subdirectory to become queryable -- no changes
-to `query.py` itself.
-
-Only `lake/` is affected by cluster mode's storage backend (see below) --
-`case.json`, `staging/`, `staging_aux/`, and `logs/` always stay on
-whatever local/NFS directory `--case-root` points at, in every mode.
-
-## Why not Dask / a distributed query engine -- and what got distributed instead
-
-Designed for a single workstation by default, not a cluster: DuckDB gives
-lazy, out-of-core *query execution* with predicate pushdown over Parquet
-without any cluster setup, and parsing is parallelized locally via
-`ProcessPoolExecutor`. The other half of "no cluster needed at real-world
-scale" is bounded-memory *delivery* of results to the analyst (see
-"Bounded-memory delivery" above) -- lazy execution underneath doesn't
-help if the last step still materializes the whole result as one
-DataFrame. **This is still exactly true for query execution**: DuckDB
-remains the only query engine, and any single query or Sigma rule still
-runs on exactly one process. No distributed SQL planner was added, and
-none is planned -- that would mean reimplementing a distributed OLAP
-engine, not extending this one.
-
-What *did* get built, opt-in, is `src/seclogx/distributed/` (see
-[10. Distributed deployment](guides/10_distributed_deployment.md) for the
-user-facing guide): a `JobQueue` abstraction (`LocalJobQueue`, the same
-`ProcessPoolExecutor` behavior as always; `RQJobQueue`, Redis-backed via
-`rq`, consumed by `seclogx worker` processes) that both ingest
-orchestrators and `detect/hunt.py`'s rule loop dispatch through instead of
-constructing a process pool directly, plus a `StorageBackend` abstraction
-(`LocalStorageBackend`; `S3StorageBackend`, via DuckDB's `httpfs`
-extension for the Parquet I/O and boto3 for cheap metadata/listing) that
-`CaseDB` and the flatten step of both pipelines use instead of raw
-`pathlib` calls against `lake/`. This is exactly the previously-anticipated
-extension point realized: **the partitioned Parquet lake is what makes
-this possible without touching ingest stages 1-2's actual parsing logic
-or query stage 3's actual DuckDB execution** -- "distributed" here means
-job-level parallelism (many independent DuckDB processes/queries against
-one shared lake), never intra-query execution. Activation is entirely
-environment-variable driven (`SECLOGX_BROKER_URL`/`SECLOGX_STORAGE_BACKEND`
-and friends) with zero new CLI flags on any existing command, and default
-(no env vars set) behavior is unchanged from before this existed -- see
-`distributed/config.py`'s `ClusterConfig`.
-
-Two correctness gaps this surfaced (and fixed) along the way, independent
-of whether cluster mode is ever turned on:
-
-- `flatten_case`/`flatten_table`'s `COPY ... TO ... PARTITION_BY (...)`
-  had no unique-filename guarantee across independent COPY invocations --
-  fine when flattening was always serialized per case (true before this),
-  but a collision risk when independent coordinators flatten
-  into the same case concurrently. DuckDB's
-  `FILENAME_PATTERN '{uuid}'` COPY option assigns distinct output names.
-  This does not make a whole ingest atomic. The finite
-  set of local Hive partition directories is also pre-created with
-  `mkdir(exist_ok=True)` before COPY, avoiding a Windows race when two
-  DuckDB connections create the same new partition simultaneously -- no
-  lock is needed for this piece.
-- `Case._load_meta`/`_save_meta`'s `case.json` read-modify-write had no
-  lock at all -- a latent lost-update race even with two plain `seclogx
-  ingest` runs on one machine, not just a cluster-mode concern. Now always
-  lock-protected (`distributed/locking.py`): a stdlib-only file lock
-  locally (no new dependency for default use), a Redis-based lock instead
-  once a broker is configured (more reliable than a POSIX file lock over a
-  network filesystem for coordinating genuinely separate machines).
-
-**Staged sources still separate staging from conversion.** Text/registry
-records are emitted to disk without retaining a whole file's rows, and only
-shard manifests cross the worker boundary. Automatic direct conversion bypasses
-those shards for compatible local web sources. Other formats and compatibility
-replays still complete staging before bounded flatten calls, so temporary disk
-usage can grow with their complete staged dataset. File discovery and manifests
-scale with file/shard count. The local queue bounds in-flight tasks; there is
-no general overlapped staging/flattening pipeline with disk-space backpressure.
-
-`keep_staging=False` is the public default. Automatic direct output bypasses
-staging for eligible sources; other successful conversions delete their
-temporary shards. `keep_staging=True` retains those intermediates and selects
-the staged path. Source evidence is never deleted. Resumable/idempotent ingest and atomic queryable snapshots are not
-implemented. Resource targets do not guarantee a fixed
-throughput or RSS for arbitrary formats, record sizes or machines.
-Repeated ingestion can add duplicate rows, and a failure after some
-flatten batches were written can leave partial output. Batch-isolated
-scratch space and unique Parquet filenames do not provide a transaction
-or a commit manifest for the lake. See the
-[performance guide](guides/08_performance_and_scale.md) for resource settings
-and their limits.
+Staged input still completes staging before conversion; there is no general
+disk-space backpressure pipeline overlapping them. Temporary space can grow with
+all staged input. Resource targets do not guarantee fixed throughput.

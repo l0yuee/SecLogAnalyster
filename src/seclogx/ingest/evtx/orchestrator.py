@@ -40,7 +40,8 @@ def run_ingest(
     if not discovered:
         raise NoSourcesFoundError("no .evtx files found under the given source path(s)")
 
-    staging_dir = case_dir / "staging" / batch_id
+    staging_dir = (case_dir / "s_evtx" if case_dir.parent.name == ".ingest"
+                   else case_dir / "staging" / batch_id)
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     if progress:
@@ -71,6 +72,9 @@ def run_ingest(
     records_flattened = 0
     for batch in staged_batches(staged_files, options.flatten_batch_bytes):
         rows = flatten_case(case_dir, batch, batch_id, keep_raw=keep_raw, cluster_config=cluster_config, options=options)
+        expected = sum(f.record_count for f in batch)
+        if rows != expected:
+            raise RuntimeError(f"EVTX conversion integrity failure: staged {expected} records but wrote {rows}; staging retained")
         records_flattened += rows
         if progress:
             progress.on_table_flattened("events", rows)

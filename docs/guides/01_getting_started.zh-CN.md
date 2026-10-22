@@ -21,8 +21,9 @@ seclogx 的目标就是让排查的最初几个小时变得高效：
   5424，含 `auth.log`/`secure` 的内容）、Linux 审计框架（auditd）与 systemd journal
   导出日志、**数据库**日志（MySQL/MariaDB 错误/通用查询/慢查询日志、PostgreSQL、
   MSSQL、Oracle 告警日志）、**腾讯云主机安全**客户端文本日志（YDService、HIDS/YDLive、
-  漏洞/基线扫描器、YDFlame/YDUtils/YDQuaraV2、YDEyes），以及 **Windows 注册表**配置单元（SYSTEM/SOFTWARE/SAM/
-  SECURITY/DEFAULT，以及每个用户的 NTUSER.DAT/UsrClass.dat）。EVTX 通过 `.evtx` 后缀发现；辅助来源候选文件通过有限大小的内容前缀分类，同时受后缀排除规则和部分格式的文件名/路径提示影响，因此重命名可能影响识别。完整的十二张表全貌见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)。
+  漏洞/基线扫描器、YDFlame/YDUtils/YDQuaraV2、YDEyes）、**阿里云安全中心（安骑士/Aegis）**
+  Linux 客户端文本日志（AliSecCheck、AliSecCheckTmp、AliHips、PythonLoader、客户端/监控与更新组件），以及 **Windows 注册表**配置单元（SYSTEM/SOFTWARE/SAM/
+  SECURITY/DEFAULT，以及每个用户的 NTUSER.DAT/UsrClass.dat）。EVTX 通过 `.evtx` 后缀发现；辅助来源候选文件通过有限大小的内容前缀分类，同时受后缀排除规则和部分格式的文件名/路径提示影响，因此重命名可能影响识别。完整的表结构见[《2. 日志类型与模式》](02_log_types_and_schema.zh-CN.md)。
 - Python `Case` 对象提供 DataFrame 与分块迭代器，命令行提供预览和 CSV 导出，并内置基于 Sigma 规则的威胁狩猎能力，自动打上 MITRE
   ATT&CK 标签，覆盖 Windows 事件日志与 Web 访问日志两类数据。**同样不需要写 SQL**：
   `seclogx search` / `Case.search()` 可以用纯字段/取值条件——精确、模糊或正则匹配——过滤任意一张表。
@@ -228,7 +229,7 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 
 接下来可以看：
 
-- **[2. 日志类型与模式](02_log_types_and_schema.zh-CN.md)** -- 十二张表各自存放什么，该看什么。
+- **[2. 日志类型与模式](02_log_types_and_schema.zh-CN.md)** -- 各张表分别存放什么，该看什么。
 - **[3. 查询与搜索](03_querying_and_search.zh-CN.md)** -- SQL、免 SQL 的 `search()` 接口，以及有界内存交付。
 - **[4. 威胁狩猎](04_threat_hunting.zh-CN.md)** -- Sigma 规则与 ATT&CK 标签。
 - **[5. 命令行参考](05_cli_reference.zh-CN.md)** / **[6. Python API](06_python_api.zh-CN.md)** -- 完整的命令/方法参考。

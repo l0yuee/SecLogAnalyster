@@ -325,6 +325,33 @@ QCLOUD_LOGS_COLUMNS: list[tuple[str, str]] = [
 ]
 QCLOUD_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
 
+# Alibaba Cloud Security Center / Aegis client text logs. Component labels
+# identify the deployed log location; event_type is a conservative operational
+# label, not an assertion that a threat was detected. Retain the source record.
+AEGIS_LOGS_COLUMNS: list[tuple[str, str]] = [
+    ("host", "VARCHAR"),
+    ("log_type", "VARCHAR"),  # detect|rtap|hips|hips_debug|reverse_shell|python_loader|security_check|client|monitor|update|agent
+    ("component", "VARCHAR"),
+    ("logger", "VARCHAR"),
+    ("time_created", "TIMESTAMP"),
+    ("severity", "VARCHAR"),
+    ("context_id", "VARCHAR"),  # opaque numeric logger context; not assumed to be a PID
+    ("event_type", "VARCHAR"),
+    ("task_name", "VARCHAR"),
+    ("task_id", "VARCHAR"),
+    ("duration_ms", "BIGINT"),
+    ("message", "VARCHAR"),
+    ("raw_line", "VARCHAR"),
+    ("extra", "JSON"),
+    ("source_path", "VARCHAR"),
+    ("source_file", "VARCHAR"),
+    ("file_sha256", "VARCHAR"),
+    ("ingest_batch_id", "VARCHAR"),
+    ("ingested_at", "TIMESTAMP"),
+    ("schema_version", "UTINYINT"),
+]
+AEGIS_LOGS_PARTITION_COLUMNS = ["host", "log_type"]
+
 # Windows Registry hives -- SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
 # per-user NTUSER.DAT/UsrClass.dat, and (a bonus, since the underlying
 # regipy dependency already supports it) AmCache.hve/BCD. One row per
@@ -371,6 +398,7 @@ TABLES: dict[str, dict] = {
     "journal_logs": {"columns": JOURNAL_LOGS_COLUMNS, "partition_by": JOURNAL_LOGS_PARTITION_COLUMNS},
     "db_logs": {"columns": DB_LOGS_COLUMNS, "partition_by": DB_LOGS_PARTITION_COLUMNS},
     "qcloud_logs": {"columns": QCLOUD_LOGS_COLUMNS, "partition_by": QCLOUD_LOGS_PARTITION_COLUMNS},
+    "aegis_logs": {"columns": AEGIS_LOGS_COLUMNS, "partition_by": AEGIS_LOGS_PARTITION_COLUMNS},
     "registry": {"columns": REGISTRY_COLUMNS, "partition_by": REGISTRY_PARTITION_COLUMNS},
 }
 

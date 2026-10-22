@@ -15,7 +15,7 @@ S3 兼容的对象存储上，而不必局限于本地磁盘。
 开启集群模式改变的是两件事：
 
 1. **导入（ingest）。** 两条导入通路（`.evtx`，以及非 EVTX
-   的各个日志族——计划任务/Web 日志/Exchange/syslog/auditd/journal/数据库/QCloud/注册表）都会把各自的单文件解析任务交给一个任务队列去分发，而不是像本地模式那样交给本地进程池。在本地模式下，这个队列的行为其实就是
+   的各个日志族——计划任务/Web 日志/Exchange/syslog/auditd/journal/数据库/QCloud/Aegis/注册表）都会把各自的单文件解析任务交给一个任务队列去分发，而不是像本地模式那样交给本地进程池。在本地模式下，这个队列的行为其实就是
    `ProcessPoolExecutor`。一旦配置了 broker，同样的任务就会被放入队列，供任意数量的 `seclogx worker`
    进程认领执行，前提是这些进程能够访问来源和暂存路径。worker 解析并写出暂存分片；
    协调端收到清单后读取分片，执行有界的 DuckDB 到 Parquet 转换。

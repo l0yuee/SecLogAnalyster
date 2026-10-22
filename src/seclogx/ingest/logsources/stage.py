@@ -28,6 +28,12 @@ from .manifest import AuxStagedFile, StageStatus, now_iso
 from .native import NativeBackendUnavailable, NativeBatchError, select_native_parser, stage_native_batches
 from .partitioning import PartitionCollector
 from .schema import TABLES
+from .parsers.aegis import (
+    parse_aegis_core_file,
+    parse_aegis_python_file,
+    stream_aegis_core_file,
+    stream_aegis_python_file,
+)
 from .parsers.auditd import parse_auditd_file
 from .parsers.dblogs import (
     parse_mssql_file,
@@ -56,6 +62,8 @@ from .parsers.syslog import parse_syslog_file
 from .parsers.webaccess import parse_web_access_file
 from .parsers.weberror import parse_apache_error_file, parse_iis_httperr_file, parse_nginx_error_file, parse_tomcat_error_file
 from .sniff import (
+    KIND_AEGIS_CORE,
+    KIND_AEGIS_PYTHON,
     KIND_AUDITD,
     KIND_EXCHANGE_GENERIC,
     KIND_EXCHANGE_MESSAGE_TRACKING,
@@ -89,6 +97,14 @@ _QCLOUD_STREAM_PARSERS = {
     KIND_QCLOUD_SCANNER: stream_qcloud_scanner_file,
     KIND_QCLOUD_YDEYES: stream_qcloud_ydeyes_file,
 }
+
+_AEGIS_STREAM_PARSERS = {
+    KIND_AEGIS_CORE: stream_aegis_core_file,
+    KIND_AEGIS_PYTHON: stream_aegis_python_file,
+}
+# Tencent retains its historical BOM-only decoding policy. Aegis uses the
+# common BOM/NUL-lane detection policy shared by classification and parsing.
+_BOM_UTF16_KINDS = set(_QCLOUD_STREAM_PARSERS)
 
 # Keep small artifacts cheap; amortize IPC schemas/buffers over larger input.
 AUTO_ARROW_MIN_BYTES = 16 * 1024 * 1024
@@ -138,7 +154,7 @@ def stage_aux_file(
     if prepared is not None:
         if (cf.kind in (KIND_REGISTRY_HIVE, KIND_SCHEDULED_TASK)
                 or prepared.path != cf.path.resolve()
-                or prepared.utf16_requires_bom != (cf.kind in _QCLOUD_STREAM_PARSERS)):
+                or prepared.utf16_requires_bom != (cf.kind in _BOM_UTF16_KINDS)):
             raise ValueError("prepared source does not match the parser's source and decoding policy")
         # A direct-output fallback must reuse the original hash/encoding and
         # reject source changes, never prepare and silently accept new bytes.
@@ -146,7 +162,7 @@ def stage_aux_file(
     try:
         if cf.kind not in (KIND_REGISTRY_HIVE, KIND_SCHEDULED_TASK):
             if prepared is None:
-                prepared = prepare_text(cf.path, utf16_requires_bom=cf.kind in _QCLOUD_STREAM_PARSERS)
+                prepared = prepare_text(cf.path, utf16_requires_bom=cf.kind in _BOM_UTF16_KINDS)
             file_sha256 = prepared.sha256
         else:
             file_sha256 = sha256_file(cf.path)
@@ -289,6 +305,8 @@ def _table_for_kind(kind: str) -> str:
         return "db_logs"
     if kind in _QCLOUD_STREAM_PARSERS:
         return "qcloud_logs"
+    if kind in _AEGIS_STREAM_PARSERS:
+        return "aegis_logs"
     if kind == KIND_REGISTRY_HIVE:
         return "registry"
     raise ValueError(f"no parser registered for kind {kind!r}")
@@ -304,6 +322,9 @@ def _parse(cf: ClassifiedFile, *, emit=None) -> tuple[list[dict], str, int, int]
     if cf.kind in _QCLOUD_STREAM_PARSERS and emit is not None:
         ok, err = _QCLOUD_STREAM_PARSERS[cf.kind](cf.path, cf.host, emit)
         return [], "qcloud_logs", ok, err
+    if cf.kind in _AEGIS_STREAM_PARSERS and emit is not None:
+        ok, err = _AEGIS_STREAM_PARSERS[cf.kind](cf.path, cf.host, emit)
+        return [], "aegis_logs", ok, err
     if cf.kind == KIND_IIS:
         rows, ok, err = parse_iis_file(cf.path, cf.host, emit=emit)
         return rows, "web_logs", ok, err
@@ -365,6 +386,12 @@ def _parse(cf: ClassifiedFile, *, emit=None) -> tuple[list[dict], str, int, int]
     if cf.kind == KIND_QCLOUD_YDEYES:
         rows, ok, err = parse_qcloud_ydeyes_file(cf.path, cf.host)
         return rows, "qcloud_logs", ok, err
+    if cf.kind == KIND_AEGIS_CORE:
+        rows, ok, err = parse_aegis_core_file(cf.path, cf.host)
+        return rows, "aegis_logs", ok, err
+    if cf.kind == KIND_AEGIS_PYTHON:
+        rows, ok, err = parse_aegis_python_file(cf.path, cf.host)
+        return rows, "aegis_logs", ok, err
     if cf.kind == KIND_REGISTRY_HIVE:
         rows, ok, err = parse_registry_hive_file(cf.path, cf.host, emit=emit)
         return rows, "registry", ok, err

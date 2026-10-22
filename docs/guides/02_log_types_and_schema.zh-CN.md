@@ -75,7 +75,7 @@ WHERE channel = 'Microsoft-Windows-Sysmon/Operational' AND event_id = 1
 `seclogx query ... event_data::VARCHAR ILIKE '%...%'` 对其做全文检索（见[《7. 常用查询》](07_recipes.zh-CN.md)），或继续往下看
 `seclogx fields`——它能直接从你的数据里列出真实字段名。
 
-## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`qcloud_logs`、`registry`
+## 其他表：`web_logs`、`web_error_logs`、`scheduled_tasks`、`exchange_message_tracking`、`exchange_logs`、`syslog`、`auditd_logs`、`journal_logs`、`db_logs`、`qcloud_logs`、`aegis_logs`、`registry`
 
 Windows 事件日志并不是 `ingest` 唯一会归一化的数据。以下每一类数据的形态都与事件日志本质不同，因此各自拥有独立的表，而不是硬塞进
 `events` 里——完整列参考见 `docs/schema.md`。其中每一张表也都有对应的 `Case`
@@ -104,6 +104,7 @@ Arrow IPC/ZSTD level 1，更小的文件使用 gzip NDJSON。二者均使用固�
 | `journal_logs` | systemd journal 导出格式（`journalctl -o json`） | `unit`、`syslog_identifier`、`priority`、`comm`、`exe`、`message`、`fields`（JSON） |
 | `db_logs` | 数据库服务器日志：MySQL/MariaDB（错误日志、通用查询日志、慢查询日志）、PostgreSQL、MSSQL、Oracle 告警日志，统一存放 | `log_type`、`severity`、`error_code`、`thread_id`、`user_name`、`query_time_sec`、`rows_examined`、`message` |
 | `qcloud_logs` | 腾讯云主机安全客户端文本日志：YDService、HIDS/YDLive、漏洞/基线扫描器、YDFlame/YDUtils/YDQuaraV2、YDEyes | `log_type`、`severity`、`module`、`event_type`、`user_name`、`source_ip`、`file_path`、`file_md5`、`message`、`extra` |
+| `aegis_logs` | 阿里云安全中心（安骑士/Aegis）Linux 客户端文本日志：AliSecCheck、AliSecCheckTmp、AliHips、PythonLoader、客户端/监控与更新组件 | `log_type`、`component`、`logger`、`severity`、`event_type`、`task_name`、`task_id`、`duration_ms`、`message`、`raw_line` |
 | `registry` | Windows 注册表配置单元：SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/UsrClass/AmCache，每个值一行 | `hive_type`、`full_path`、`value_name`、`value_type`、`value_text`、`value_int`、`entropy` |
 
 在查询这些表之前，有几点需要了解：
@@ -175,6 +176,7 @@ Arrow IPC/ZSTD level 1，更小的文件使用 gzip NDJSON。二者均使用固�
 | systemd journal 导出 | `journal_logs` | 无——用 `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | 不支持——直接查询 |
 | 数据库日志（MySQL/MariaDB/PostgreSQL/MSSQL/Oracle） | `db_logs` | 无——用 `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | 不支持——直接查询 |
 | 腾讯云主机安全客户端日志 | `qcloud_logs` | 无——用 `table qcloud_logs` / `query` | `qcloud_logs(log_type=)` / `qcloud_logs_chunks(log_type=)` | 不支持——直接查询 |
+| 阿里云安全中心（安骑士/Aegis）客户端日志 | `aegis_logs` | 无——用 `table aegis_logs` / `query` | `aegis_logs(log_type=)` / `aegis_logs_chunks(log_type=)` | 不支持——使用搜索/SQL |
 | Windows 注册表配置单元 | `registry` | `registry [--suspicious] [--hive-type]` | `registry(hive_type=)` / `registry_chunks(hive_type=)`，`suspicious_registry()`（启发式） | 不支持——用 `suspicious_registry()` 或直接查询 |
 
 `seclogx sources <case>`并不针对某一张具体的表——它是在使用上述任何一种接口之前，最值得先运行的一个命令：给出每张表的行数统计，让你在决定具体查哪张表之前，先了解案例里实际有什么。
@@ -219,6 +221,9 @@ Arrow IPC/ZSTD level 1，更小的文件使用 gzip NDJSON。二者均使用固�
   扫描器命令执行，再通过 `source_ip`、`user_name`、`file_md5`、`file_path`、
   `subject_process_id` 与 `trace_id` 关联；未被语义提取覆盖的组件活动仍可按 `module` 和
   `message` 排查。
+- **`aegis_logs`**——先按 `log_type`、`component`、`severity` 与 `message` 重建
+  客户端活动，再用 `task_name`/`task_id` 关联已识别的任务生命周期记录。任务开始或完成
+  本身不代表发现安全威胁；调查具体线索时应保留原始记录及来源信息。
 - **`registry`**——优先运行 `suspicious_registry()`：Run/RunOnce
   启动项、服务的 `ImagePath`/`ServiceDll`、COM CLSID `InprocServer32`
   劫持、Winlogon 的 `Shell`/`Userinit`/`Notify` 篡改、`AppInit_DLLs`、
@@ -226,6 +231,66 @@ Arrow IPC/ZSTD level 1，更小的文件使用 gzip NDJSON。二者均使用固�
   的二进制值（`WHERE entropy > 7.5` 可以直接找出注册表值中可能存在的编码/打包载荷）。若要做开放式排查，可按已知持久化位置对
   `full_path`/`value_name` 做全文扫描，或用 `key_last_write_time`
   找出事件时间窗口附近被修改过的键。
+
+## 阿里云安全中心（安骑士/Aegis）
+
+把采集到的 Aegis 目录交给普通导入接口即可，尽量保留原有子目录结构；无需额外安装依赖
+或选择解析模式：
+
+```python
+from seclogx import Case, SourceSpec
+
+c = Case.create("aegis-review")
+report = c.ingest([SourceSpec("/evidence/aegis", host="LINUX01")])
+c.table_counts()
+c.fields("aegis_logs")
+```
+
+下表路径相对于采集的 `aegis` 根目录（源主机通常是 `/usr/local/aegis`）。分类同时要求
+受支持的文本记录头和路径/产品上下文，并不是将这些目录中的所有文件都当作日志。
+
+| 采集路径 | `log_type` | 上下文 |
+|---|---|---|
+| `AliSecCheck/data/detect/log` | `detect` | 威胁检测组件 |
+| `AliSecCheck/data/rtap/log` | `rtap` | 实时防护组件 |
+| `AliSecCheck/data/debug_hips.log` | `hips_debug` | HIPS 调试 |
+| `globalcfg/AliHips/log` | `hips` | 主机入侵防御组件 |
+| `data/atd_lnx_reverse_shell.log` | `reverse_shell` | 反弹 Shell 检查组件 |
+| `PythonLoader/data/*.log`、`PythonLoader/data/data.<数字>.N` | `python_loader` | Python 加载器检查 |
+| `AliSecCheckTmp/data/*/log` | `security_check`；若子目录名为 `detect`/`rtap`，则使用对应类别 | 临时安全检查组件 |
+| `AliSecCheckTmp/data/data.N` | `security_check` | 临时安全检查组件 |
+| 其他已识别的 `AliSecCheck/data/*.log` / `AliSecCheckTmp/data/*.log` | `security_check`，或上方更具体的子类 | 组件运行/配置诊断 |
+| `aegis_client/<版本>/data` | `client` | 客户端组件（`component=AegisClient`） |
+| `aegis_client/<版本>/yun_dun_monitor_log` | `monitor` | 客户端监控（`component=AegisClient`） |
+| `aegis_update/data` | `update` | 更新组件（`component=AegisUpdate`） |
+
+`data.N` 和 `data.<数字>.N` 等明文轮转文件使用相同解析器，其中 `N` 与 `<数字>` 均表示
+文件名中的数字段。上下文无法确定更具体的子类时，`log_type`
+为 `agent`。文件名含 `config` 但内容为受支持的日志布局时仍可识别；配置文档和二进制文件
+不会仅因位于同一目录而变成日志记录。
+
+```python
+# 只有选中的数据量较小时，才整体读取为 DataFrame。
+c.aegis_logs(log_type="hips")
+
+# 较大来源逐块处理并释放。
+for chunk in c.aegis_logs_chunks(log_type="detect", chunksize=10_000):
+    print(chunk[["time_created", "severity", "task_name", "message"]].head())
+
+c.search("aegis_logs", eq={"event_type": "task_completed"})
+```
+
+`raw_line` 保留完整多行文本，包括原始换行及空行。完整合法的 JSON 对象/数组还可保留在
+`extra.json_payload` 中；包含无效 Unicode 或超过 JSON 嵌套深度限制的内容仅保留原文，
+不会因此中断后续记录的导入。Python 对象表示仅保留文本，绝不执行。只有明确的调度文案会
+提取为 `task_queued`、`task_started` 或 `task_completed`；
+日志类别及严重级别本身不等于安全告警结论。`context_id` 保留头部数字字符串，不猜测它是
+PID 还是线程 ID。`时间戳 [数字] 正文` 这种核心日志头没有级别，`severity` 保留为 NULL。
+时间保留来源的本地墙上时间，跨来源关联时应结合源主机时区信息。
+专有二进制文件和压缩轮转文件需要另行准备，不能保证覆盖客户端所有版本。单条逻辑记录
+超过 4,194,304 字符或 100,000 物理行时明确报错，不输出截断记录；此前完整记录可能以
+部分恢复状态保留，应检查导入报告。详见[字段参考](../schema.md#aegis_logs)及
+[已知限制](../known_limitations.md#alibaba-cloud-security-center-aegis-client-log-ingestion)。
 
 ## 我能查询哪些字段？
 
@@ -282,6 +347,7 @@ c.fields("web_logs")   # -> status、uri_stem、client_ip 等（真实列）
 | `journal_logs` | `unit`、`syslog_identifier`、`message`、`priority` |
 | `db_logs` | 先看 `log_type`，再看 `severity`、`error_code`、`message`；`mysql_slow` 行还有 `query_time_sec`、`rows_examined` |
 | `qcloud_logs` | `event_type`、`module`、`severity`、`source_ip`、`user_name`、`file_md5`、`file_path`、`trace_id`、`message` |
+| `aegis_logs` | `log_type`、`component`、`severity`、`task_name`、`task_id`、`event_type`、`duration_ms`、`message` |
 | `registry` | `full_path`、`value_name`、`value_text`、`entropy`、`hive_type` |
 
 特别是对 `events` 而言，注意有哪些字段存在取决于具体的*通道（channel）*——`Image`/`CommandLine`

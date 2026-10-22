@@ -1,3 +1,4 @@
 # Fixture checksums cover the original bytes on every checkout platform.
 tests/fixtures/compact_corpus/** -text
 tests/fixtures/evtx/*.evtx -text
+tests/fixtures/aegis/** -text

@@ -35,13 +35,16 @@ seclogx exists to make the first hours of triage fast:
   journal export logs, **database** logs (MySQL/MariaDB error/
   general/slow query logs, PostgreSQL, MSSQL, Oracle alert log), **Tencent
   Cloud Host Security** client text logs (YDService, HIDS/YDLive, scanners,
-  YDFlame/YDUtils/YDQuaraV2, YDEyes), and **Windows Registry** hives (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
+  YDFlame/YDUtils/YDQuaraV2, YDEyes), **Alibaba Cloud Security Center (Aegis)**
+  Linux client text logs (AliSecCheck, AliSecCheckTmp, AliHips, PythonLoader,
+  client/monitor and updater),
+  and **Windows Registry** hives (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT,
   per-user NTUSER.DAT/UsrClass.dat). EVTX discovery uses the `.evtx` suffix;
   auxiliary candidates are classified from a bounded content prefix, with
   suffix exclusions and some format-specific filename/path hints. Renaming
   evidence can therefore affect detection. See
-  [02. Log types & schema](02_log_types_and_schema.md) for the full
-  twelve-table picture.
+  [02. Log types & schema](02_log_types_and_schema.md) for the
+  complete table overview.
 - You get DataFrames and chunk iterators through a Python `Case` object,
   plus CLI previews/CSV export and built-in
   Sigma-rule threat hunting with MITRE ATT&CK tagging, covering both
@@ -306,7 +309,7 @@ seclogx timeline incident42 --host WKS01 --event-id 4624 --out logons.csv
 Where to go next:
 
 - **[02. Log types & schema](02_log_types_and_schema.md)** -- what each of
-  the twelve tables holds and what to look for in it.
+  the tables holds and what to look for in it.
 - **[03. Querying & search](03_querying_and_search.md)** -- SQL, the
   no-SQL `search()` interface, and bounded-memory delivery.
 - **[04. Threat hunting](04_threat_hunting.md)** -- Sigma rules and ATT&CK

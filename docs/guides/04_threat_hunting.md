@@ -45,7 +45,7 @@ webshell or exploitation-pattern rules -- none are bundled by default in
 v1. This project's routing does not cover on-disk Scheduled Task
 definitions, web application **error** logs (`web_error_logs`), Exchange
 message tracking, Linux text logs, database logs (`db_logs`), Tencent
-client logs (`qcloud_logs`), or the Windows Registry
+client logs (`qcloud_logs`), Aegis client logs (`aegis_logs`), or the Windows Registry
 (`registry` -- Sigma's registry categories model *live* monitoring
 telemetry, not a static offline hive dump), so those aren't part of a
 Sigma hunt; use `Case.suspicious_tasks()` / `seclogx tasks --suspicious`

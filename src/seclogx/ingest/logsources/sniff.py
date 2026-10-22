@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 from ...textdecode import decode_text as _decode_text
+from .parsers.aegis import classify_aegis_prefix
 
 KIND_SCHEDULED_TASK = "scheduled_task"
 KIND_IIS = "iis"
@@ -40,6 +41,8 @@ KIND_QCLOUD_YDSERVICE = "qcloud_ydservice"
 KIND_QCLOUD_GO = "qcloud_go"
 KIND_QCLOUD_SCANNER = "qcloud_scanner"
 KIND_QCLOUD_YDEYES = "qcloud_ydeyes"
+KIND_AEGIS_CORE = "aegis_core"
+KIND_AEGIS_PYTHON = "aegis_python"
 
 WEB_ERROR_KINDS = {KIND_WEB_ERROR_NGINX: "nginx", KIND_WEB_ERROR_APACHE: "apache", KIND_WEB_ERROR_TOMCAT: "tomcat"}
 
@@ -110,6 +113,21 @@ def _decode_lines(raw: bytes) -> list[str]:
     return _decode_text(raw, partial=True).splitlines()
 
 
+def _executable_prefix(raw: bytes) -> bool:
+    if raw.startswith(b"\x7fELF"):
+        return True
+    if not raw.startswith(b"MZ"):
+        return False
+    # MZ alone can also begin a perfectly valid CLF hostname. Require a
+    # binary DOS header or an actual PE signature inside the bounded peek.
+    if any(byte < 32 and byte not in (9, 10, 13) for byte in raw[:64]):
+        return True
+    if len(raw) >= 64:
+        pe_offset = int.from_bytes(raw[60:64], "little")
+        return 64 <= pe_offset <= len(raw) - 4 and raw[pe_offset:pe_offset + 4] == b"PE\x00\x00"
+    return False
+
+
 def _looks_like_qcloud_log(path: Path, raw: bytes) -> bool:
     normalized = path.as_posix().lower()
     name = path.name.lower()
@@ -144,6 +162,12 @@ def classify_file(path: Path) -> str | None:
     # NUL-byte-density bailout further down would otherwise catch it first.
     if raw[:4] == b"regf":
         return KIND_REGISTRY_HIVE
+
+    # Client executables can embed log templates and product paths. A later
+    # matching line does not turn an ELF/PE image into a text log, even when
+    # its short prefix has too few NULs for the heuristic below.
+    if _executable_prefix(raw):
+        return None
 
     # Decode a bounded prefix incrementally: its last byte can be half of a
     # GB18030/UTF-8/UTF-16 character. UTF-16 text must be decoded before NUL
@@ -217,6 +241,12 @@ def classify_file(path: Path) -> str | None:
             return KIND_EXCHANGE_GENERIC
 
     if first_data_line:
+        # A product-qualified first Aegis record is stronger evidence than
+        # generic envelopes such as MSSQL's timestamp/source spacing. Only
+        # inspect this first record here, not later embedded client output.
+        first_aegis_kind = classify_aegis_prefix(path, first_data_line, context_text=text)
+        if first_aegis_kind is not None:
+            return first_aegis_kind
         encoded = first_data_line.encode("utf-8", errors="replace")
         if _QCLOUD_YDSERVICE_RE.match(encoded):
             return KIND_QCLOUD_YDSERVICE
@@ -247,7 +277,10 @@ def classify_file(path: Path) -> str | None:
         if _SYSLOG_5424_RE.match(encoded) or _SYSLOG_BSD_RE.match(encoded):
             return KIND_SYSLOG
 
-    return None
+    # Aegis scans past orphan text, so it must not override an established
+    # first-record/header format merely because that log quotes client output.
+    # Unclassified prefixes still allow its path/logger/product evidence.
+    return classify_aegis_prefix(path, text)
 
 
 def guess_web_log_type(path: Path) -> str:

@@ -96,7 +96,7 @@ string matching, `regexp_matches()` for regex, standard AND/OR/NOT).
   against `events` and `web_logs` in v1 -- `scheduled_tasks`,
   `web_error_logs`, `exchange_message_tracking`/`exchange_logs`, the
   three Linux tables (`syslog`/`auditd_logs`/`journal_logs`), `db_logs`,
-  `qcloud_logs`, and `registry` have no route in this project's
+  `qcloud_logs`, `aegis_logs`, and `registry` have no route in this project's
   `LOGSOURCE_TABLE` (Sigma's
   scheduled-task detections target the event log, not on-disk task
   definitions;

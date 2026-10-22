@@ -112,7 +112,7 @@ analysts can distinguish supported behavior from remaining gaps.
   GB18030 (a superset of GBK/GB2312) before a Latin-1 fallback**
   (`textdecode.decode_text` for small documents and
   `textdecode.iter_text_lines` for streaming logs; QCloud only considers
-  UTF-16 when a BOM is present). Other text inputs require a UTF-16 BOM
+  UTF-16 when a BOM is present). Other text inputs, including Aegis, require a UTF-16 BOM
   or strong interleaved NUL/ASCII evidence before trying UTF-16. This
   covers many Chinese-locale inputs and binary-ish
   data without crashing, but is still a best-effort guess, not real
@@ -255,6 +255,43 @@ analysts can distinguish supported behavior from remaining gaps.
   columns; all other content remains fully available in `message`, `raw_line`,
   and `extra`. Physical continuation lines are attached to the preceding
   logical event rather than counted as parse errors.
+
+## Alibaba Cloud Security Center (Aegis) client log ingestion
+
+- **Support covers recognized Linux client text layouts.** Core headers with
+  severity before/after a numeric context, headers with only a numeric context,
+  and the Python logging layout are parsed from AliSecCheck, AliSecCheckTmp,
+  AliHips, PythonLoader, client/monitor and updater sources. Plain-text `data.N`
+  and `data.<number>.N` rotations are eligible; the suffix does not imply a binary format. Private
+  binary formats, encrypted payloads and automatic decompression of archived
+  rotations are not supported. Paths alone are not a format specification,
+  and coverage of every client version is not guaranteed.
+- **Classification needs both a matching record header and Aegis context.**
+  Product/component paths or recognizable product markers provide that
+  context. Unrelated text under an `aegis` directory is not automatically
+  accepted; a renamed and relocated log with no product marker may be unknown.
+  `log_type` falls back to `agent` when the sub-log cannot be established.
+- **Operational messages are not security verdicts.** Only recognized task
+  scheduling/start/completion messages receive `event_type` values; other
+  messages remain searchable without an inferred alert label. `context_id`
+  preserves the numeric header token as a string without deciding whether it
+  is a process or thread ID. Headers with only a numeric context have NULL
+  severity. Timestamps retain source wall-clock time without
+  inferring a timezone.
+- **Multiline records are bounded, not truncated.** Continuations, pretty
+  JSON and blank lines remain in `message` and `raw_line`, with source line
+  endings retained in `raw_line`. Python representation text is never
+  executed. A logical record above 4,194,304 characters or 100,000 physical
+  lines raises a parse error before that incomplete record is emitted.
+  Earlier complete records may be reported as a partial recovery; inspect the
+  ingest report. Raw text retention does not promise structured extraction of
+  every JSON/Python payload field. JSON enrichment that cannot be represented
+  as valid Unicode or exceeds the JSON parser/encoder depth is omitted; the
+  complete source record remains available and later records are still read.
+- **No additional parser package or analyst option is required.** The normal
+  ingest path uses a streaming Python parser and automatically selects bounded
+  Arrow or NDJSON staging. This does not extend the Rust/direct-Parquet path to
+  Aegis or provide a total-process memory or throughput guarantee.
 
 ## Windows Registry hive ingestion
 
@@ -547,13 +584,13 @@ analysts can distinguish supported behavior from remaining gaps.
   text lines are bounded at 8 Mi characters. Exchange/Tomcat logical
   records have an 8 Mi-character limit; database logical records also
   limit characters and line count (Oracle retains a 200-continuation-line
-  bound). QCloud limits a logical record to 4 Mi characters or 100,000
+  bound). QCloud and Aegis limit a logical record to 4,194,304 characters or 100,000
   lines. CSV retains Python's field limit (normally 128 Ki characters),
   with an explicit exception on excess. Tomcat's 200-continuation-line
   bound raises before the incomplete current entry is emitted. Encoding
   after validation is strict; no replacement characters are silently
   inserted to handle later decode failures. QCloud requires a BOM before
-  trying UTF-16; other text parsers require a BOM or strong NUL/ASCII evidence.
+  trying UTF-16; other text parsers, including Aegis, require a BOM or strong NUL/ASCII evidence.
 - **`IngestOptions` limits each conversion's work, not total RSS.**
   Defaults are `memory_limit="2GB"`, `threads=2`,
   `staging_chunk_bytes=64 * 1024 * 1024` and

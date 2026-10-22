@@ -18,7 +18,7 @@ Parquet lake live on S3-compatible object storage instead of local disk.
 Turning cluster mode on changes two things:
 
 1. **Ingest.** Both ingest paths (`.evtx`, and the non-EVTX families --
-   Scheduled Tasks/web logs/Exchange/syslog/auditd/journal/database/QCloud/registry) dispatch their
+   Scheduled Tasks/web logs/Exchange/syslog/auditd/journal/database/QCloud/Aegis/registry) dispatch their
    per-file parsing tasks through a job queue instead of a local process
    pool. Locally, that queue is just today's `ProcessPoolExecutor`
    behavior. Once a broker is configured, the same tasks are enqueued for

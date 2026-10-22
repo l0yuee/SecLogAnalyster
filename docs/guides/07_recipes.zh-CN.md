@@ -263,6 +263,24 @@ WHERE error_code IS NOT NULL                          -- MySQL 的 MY-xxxxx / Or
 ORDER BY time_created
 ```
 
+**安骑士：查看客户端错误与已完成的检查任务，避免把每条运行记录都当成告警：**
+
+```python
+for chunk in c.search_chunks("aegis_logs", eq={"severity": "ERROR"}, chunksize=10_000):
+    print(chunk[["time_created", "host", "log_type", "component", "message"]].head())
+
+c.query("""
+    SELECT time_created, host, log_type, task_name, task_id, duration_ms, message
+    FROM aegis_logs
+    WHERE event_type = 'task_completed'
+    ORDER BY time_created DESC LIMIT 100
+""")
+```
+
+使用 `c.aegis_logs_chunks(log_type="reverse_shell")` 可查看该组件的完整记录；记录出现在
+这个子日志中并不代表已确认反弹 Shell。跨主机关联需要源主机的时区信息，`raw_line`
+与来源信息仍可供复核。
+
 **注册表：找出所有配置单元中熵值偏高的二进制值（可能是藏在注册表值里的编码/打包载荷），以及一次快速的持久化排查：**
 
 ```python

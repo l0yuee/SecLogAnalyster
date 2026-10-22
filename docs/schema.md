@@ -6,7 +6,7 @@ and every other log family's schema further down (`## Non-EVTX log
 tables`, from `src/seclogx/ingest/logsources/schema.py`) -- `events`,
 `web_logs`, `web_error_logs`, `scheduled_tasks`,
 `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`,
-`journal_logs`, `db_logs`, `qcloud_logs`, `registry`. See "Quick reference: analyzing each log type" in
+`journal_logs`, `db_logs`, `qcloud_logs`, `aegis_logs`, `registry`. See "Quick reference: analyzing each log type" in
 [`docs/guides/02_log_types_and_schema.md`](guides/02_log_types_and_schema.md)
 for how to actually query each one, and `docs/architecture.md` for how
 they're ingested.
@@ -360,6 +360,39 @@ lines are attached to the preceding event. Partition columns: `host, log_type`.
 | `raw_line` | `VARCHAR` | Original complete logical record, including continuation lines |
 | `extra` | `JSON` | Additional structured fields such as scanner commands, account details, and quarantine result flags |
 | `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+## `aegis_logs`
+
+Alibaba Cloud Security Center (Aegis/安骑士) Linux client text logs. Core
+log-header layouts with severity before or after the numeric context, a
+numeric-context-only layout, and the Python logging layout share this schema. The
+component path and log context determine `log_type`; header shape alone does
+not establish that an arbitrary application log is an Aegis log. Partition
+columns: `host, log_type`.
+
+| Column | Type | Description |
+|---|---|---|
+| `host` | `VARCHAR` | Analyst-assigned host label (partition key) |
+| `log_type` | `VARCHAR` | `detect`, `rtap`, `hips`, `hips_debug`, `reverse_shell`, `python_loader`, `security_check`, `client`, `monitor`, `update`, or `agent` when the sub-log cannot be established (partition key) |
+| `component` | `VARCHAR` | `AliSecCheck`, `AliSecCheckTmp`, `AliHips`, `PythonLoader`, `AegisClient`, `AegisUpdate`, or `aegis`, where identifiable |
+| `logger` | `VARCHAR` | Logger name when the header carries one |
+| `time_created` | `TIMESTAMP` | Source wall-clock timestamp; no timezone is inferred |
+| `severity` | `VARCHAR` | Log severity where present; NULL for the numeric-context-only header; not a security-alert verdict |
+| `context_id` | `VARCHAR` | Bare numeric context identifier from a core header; its PID/thread meaning is not inferred |
+| `event_type` | `VARCHAR` | `task_queued`, `task_started`, or `task_completed` only for recognized task-lifecycle messages; otherwise NULL |
+| `task_name`, `task_id` | `VARCHAR` | Task name and string identifier where recognized |
+| `duration_ms` | `BIGINT` | Task duration in milliseconds where explicitly recorded |
+| `message` | `VARCHAR` | Message body, including attached continuation lines and blank lines |
+| `raw_line` | `VARCHAR` | Complete logical text record, preserving the header, continuation lines and line endings |
+| `extra` | `JSON` | Additional metadata such as `line_count`, `queue_length`, or a complete JSON object/array under `json_payload`; arbitrary payload fields are not guaranteed as extracted keys |
+| `source_path`, `source_file`, `file_sha256`, `ingest_batch_id`, `ingested_at`, `schema_version` | | Provenance |
+
+Multiline JSON and Python representation text remain available in the message
+and raw record; Python expressions are never executed. These are client
+operational logs and can include diagnostic or configuration messages. A
+`detect` or `reverse_shell` source is not evidence that every row is an alert.
+For source paths and analysis examples, see the
+[log guide](guides/02_log_types_and_schema.md#alibaba-cloud-security-center-aegis).
 
 ## `registry`
 

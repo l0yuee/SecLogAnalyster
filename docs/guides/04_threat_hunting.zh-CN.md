@@ -29,7 +29,7 @@ Sysmon 类别需要采集并导入对应 Sysmon 日志；`ps_script`/`ps_module`
 `hunt` 同样支持 Sigma 的 `category: webserver` 规则（针对 `web_logs`，即**访问日志**运行），方便你自行提供
 IIS/nginx/Apache 的 webshell 或漏洞利用特征规则——v1 默认不内置此类规则。本项目当前没有为磁盘上计划任务定义、Web
 应用**错误日志**（`web_error_logs`）、Exchange 邮件跟踪日志、Linux 文本日志、数据库日志（`db_logs`）、
-腾讯客户端日志（`qcloud_logs`）或 Windows 注册表（`registry`——Sigma 的注册表类别针对的是*实时*监控遥测，
+腾讯客户端日志（`qcloud_logs`）、安骑士客户端日志（`aegis_logs`）或 Windows 注册表（`registry`——Sigma 的注册表类别针对的是*实时*监控遥测，
 而不是离线的静态配置单元转储）配置 Sigma 路由，因此这些数据不属于当前 Sigma
 狩猎的范围；请改用 `Case.suspicious_tasks()` / `seclogx tasks --suspicious`
 排查计划任务，`Case.suspicious_registry()` / `seclogx registry --suspicious`

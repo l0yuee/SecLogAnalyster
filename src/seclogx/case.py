@@ -672,6 +672,21 @@ class Case:
     ) -> Iterator[pd.DataFrame]:
         return self._log_type_chunks("qcloud_logs", log_type, chunksize)
 
+    def aegis_logs(self, log_type: str | None = None) -> pd.DataFrame:
+        """Alibaba Cloud Security Center (Aegis) client text logs.
+
+        ``log_type`` selects a source category such as ``detect``, ``rtap``,
+        ``hips``, ``hips_debug``, ``reverse_shell``, or ``python_loader``.
+        Large result sets should use ``aegis_logs_chunks``.
+        """
+        return self._log_type_table("aegis_logs", log_type)
+
+    def aegis_logs_chunks(
+        self, log_type: str | None = None, chunksize: int = DEFAULT_CHUNKSIZE
+    ) -> Iterator[pd.DataFrame]:
+        """Yield Alibaba Cloud client records in bounded DataFrame chunks."""
+        return self._log_type_chunks("aegis_logs", log_type, chunksize)
+
     def registry(self, hive_type: str | None = None) -> pd.DataFrame:
         """Every discovered registry key/value, normalized across every
         ingested hive (SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/

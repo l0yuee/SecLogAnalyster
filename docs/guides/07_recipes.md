@@ -280,6 +280,26 @@ WHERE error_code IS NOT NULL                          -- MySQL MY-xxxxx / Oracle
 ORDER BY time_created
 ```
 
+**Aegis: inspect client errors and completed checks without interpreting
+every operational record as an alert:**
+
+```python
+for chunk in c.search_chunks("aegis_logs", eq={"severity": "ERROR"}, chunksize=10_000):
+    print(chunk[["time_created", "host", "log_type", "component", "message"]].head())
+
+c.query("""
+    SELECT time_created, host, log_type, task_name, task_id, duration_ms, message
+    FROM aegis_logs
+    WHERE event_type = 'task_completed'
+    ORDER BY time_created DESC LIMIT 100
+""")
+```
+
+Use `c.aegis_logs_chunks(log_type="reverse_shell")` to inspect that component's
+complete records. A row's presence in this sub-log is not a confirmed
+reverse-shell finding. Timestamps need the source host's timezone for
+cross-host correlation; `raw_line` and source provenance remain available.
+
 **Registry: high-entropy binary values across every hive (possible
 encoded/packed payloads stashed in a value), and a quick persistence
 sweep:**

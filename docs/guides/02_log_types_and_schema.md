@@ -90,7 +90,7 @@ If you don't know the exact field name for something, `CaseDB.search()`
 search across it -- see [07. Recipes](07_recipes.md) -- or read on for
 `seclogx fields`, which lists real field names directly from your data.
 
-## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `qcloud_logs`, `registry`
+## The other tables: `web_logs`, `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`, `exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `qcloud_logs`, `aegis_logs`, `registry`
 
 Windows Event Log isn't the only artifact `ingest` normalizes. Each of
 these is fundamentally a different shape, so each gets its own table
@@ -126,6 +126,7 @@ accepted subject to parser/record limits.
 | `journal_logs` | systemd journal export format (`journalctl -o json`) | `unit`, `syslog_identifier`, `priority`, `comm`, `exe`, `message`, `fields` (JSON) |
 | `db_logs` | Database server logs: MySQL/MariaDB (error, general query, slow query), PostgreSQL, MSSQL, Oracle alert log, unified | `log_type`, `severity`, `error_code`, `thread_id`, `user_name`, `query_time_sec`, `rows_examined`, `message` |
 | `qcloud_logs` | Tencent Cloud Host Security client text logs: YDService, HIDS/YDLive, vulnerability/baseline scanners, YDFlame/YDUtils/YDQuaraV2, YDEyes | `log_type`, `severity`, `module`, `event_type`, `user_name`, `source_ip`, `file_path`, `file_md5`, `message`, `extra` |
+| `aegis_logs` | Alibaba Cloud Security Center (Aegis) Linux client text logs: AliSecCheck, AliSecCheckTmp, AliHips, PythonLoader, client/monitor and updater | `log_type`, `component`, `logger`, `severity`, `event_type`, `task_name`, `task_id`, `duration_ms`, `message`, `raw_line` |
 | `registry` | Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT/NTUSER/UsrClass/AmCache, one row per value | `hive_type`, `full_path`, `value_name`, `value_type`, `value_text`, `value_int`, `entropy` |
 
 A few things worth knowing before you query these:
@@ -231,6 +232,7 @@ gets on top of that.
 | systemd journal export | `journal_logs` | none -- use `table journal_logs` / `query` | `journal_logs()` / `journal_logs_chunks()` | No -- query directly |
 | Database logs (MySQL/MariaDB/PostgreSQL/MSSQL/Oracle) | `db_logs` | none -- use `table db_logs` / `query` | `db_logs(log_type=)` / `db_logs_chunks(log_type=)` | No -- query directly |
 | Tencent Cloud Host Security client logs | `qcloud_logs` | none -- use `table qcloud_logs` / `query` | `qcloud_logs(log_type=)` / `qcloud_logs_chunks(log_type=)` | No -- query directly |
+| Alibaba Cloud Security Center (Aegis) client logs | `aegis_logs` | none -- use `table aegis_logs` / `query` | `aegis_logs(log_type=)` / `aegis_logs_chunks(log_type=)` | No -- use search/SQL |
 | Windows Registry hives | `registry` | `registry [--suspicious] [--hive-type]` | `registry(hive_type=)` / `registry_chunks(hive_type=)`, `suspicious_registry()` (heuristic) | No -- use `suspicious_registry()` / query directly |
 
 `seclogx sources <case>` isn't table-specific -- it's the one command to
@@ -295,6 +297,11 @@ What to actually look for in each, at a glance (full recipes in
   execution. Pivot with `source_ip`, `user_name`, `file_md5`, `file_path`,
   `subject_process_id`, and `trace_id`; use `module` and `message` for
   component-specific activity not covered by enrichment.
+- **`aegis_logs`** -- start with `log_type`, `component`, `severity` and
+  `message` to reconstruct client activity. Recognized task-lifecycle records
+  can be correlated by `task_name`/`task_id`; a task starting or completing
+  does not by itself indicate a security detection. Keep the original record
+  and source provenance when investigating a possible finding.
 - **`registry`** -- `suspicious_registry()` runs first: Run/RunOnce
   startup items, service `ImagePath`/`ServiceDll`, COM CLSID
   `InprocServer32` hijacking, Winlogon `Shell`/`Userinit`/`Notify`
@@ -304,6 +311,77 @@ What to actually look for in each, at a glance (full recipes in
   For open-ended digging, `full_path`/`value_name` sweeps by known
   persistence locations, or `key_last_write_time` to spot recently
   modified keys around an incident window.
+
+## Alibaba Cloud Security Center (Aegis)
+
+Pass an acquired Aegis directory to ordinary ingest, preserving its subdirectory
+layout when possible. No extra dependency or parser switch is needed:
+
+```python
+from seclogx import Case, SourceSpec
+
+c = Case.create("aegis-review")
+report = c.ingest([SourceSpec("/evidence/aegis", host="LINUX01")])
+c.table_counts()
+c.fields("aegis_logs")
+```
+
+The following paths are relative to the acquired `aegis` root (normally
+`/usr/local/aegis` on the source host). A matching supported text header is
+required as well as path/product context; this is not a whitelist accepting
+every file in these directories.
+
+| Acquired path | `log_type` | Context |
+|---|---|---|
+| `AliSecCheck/data/detect/log` | `detect` | Detection component |
+| `AliSecCheck/data/rtap/log` | `rtap` | Real-time protection component |
+| `AliSecCheck/data/debug_hips.log` | `hips_debug` | HIPS diagnostics |
+| `globalcfg/AliHips/log` | `hips` | Host intrusion prevention component |
+| `data/atd_lnx_reverse_shell.log` | `reverse_shell` | Reverse-shell checking component |
+| `PythonLoader/data/*.log`, `PythonLoader/data/data.<number>.N` | `python_loader` | Python loader checks |
+| `AliSecCheckTmp/data/*/log` | `security_check`; `detect`/`rtap` for those named subdirectories | Temporary security-check component |
+| `AliSecCheckTmp/data/data.N` | `security_check` | Temporary security-check component |
+| Other recognized `AliSecCheck/data/*.log` / `AliSecCheckTmp/data/*.log` | `security_check`, or a more specific subtype above | Component operational/configuration diagnostics |
+| `aegis_client/<version>/data` | `client` | Client component (`component=AegisClient`) |
+| `aegis_client/<version>/yun_dun_monitor_log` | `monitor` | Client monitor (`component=AegisClient`) |
+| `aegis_update/data` | `update` | Updater (`component=AegisUpdate`) |
+
+Plain-text rotations such as `data.N` and `data.<number>.N` use the same parser;
+`N` and `<number>` stand for numeric filename segments. `agent` is the
+fallback subtype when the available context does not establish a more specific
+one. File names containing `config` can still be logs when their contents have
+the supported log layout; configuration documents and binaries are not parsed
+as log records merely because they share a directory.
+
+```python
+# A whole-table accessor is suitable only when the selected data is small.
+c.aegis_logs(log_type="hips")
+
+# Process and release each chunk for larger sources.
+for chunk in c.aegis_logs_chunks(log_type="detect", chunksize=10_000):
+    print(chunk[["time_created", "severity", "task_name", "message"]].head())
+
+c.search("aegis_logs", eq={"event_type": "task_completed"})
+```
+
+`raw_line` retains complete multiline text, including line endings and blank
+lines. Complete JSON objects/arrays can also appear under `extra.json_payload`;
+payloads containing invalid Unicode or exceeding JSON depth limits stay as raw
+text without interrupting later records. Python representation text stays as
+text and is never executed. Only
+recognized scheduling messages are labeled `task_queued`, `task_started` or
+`task_completed`. The log category and severity do not constitute a security
+alert verdict. `context_id` is an opaque numeric string, not an inferred PID or
+thread ID. The core header `timestamp [number] message` has no severity, so
+`severity` is NULL. Timestamps retain source wall-clock time; supply the host's timezone
+knowledge when correlating other evidence. Proprietary binary files and
+compressed rotations need separate preparation; coverage of every client
+version is not guaranteed. A logical record above 4,194,304 characters or
+100,000 physical lines produces an explicit error, not a truncated row.
+Earlier complete records may remain as partial recovery; inspect the ingest
+report. See the
+[column reference](../schema.md#aegis_logs) and
+[limits](../known_limitations.md#alibaba-cloud-security-center-aegis-client-log-ingestion).
 
 ## Which fields can I search on?
 
@@ -370,6 +448,7 @@ vary):
 | `journal_logs` | `unit`, `syslog_identifier`, `message`, `priority` |
 | `db_logs` | `log_type` first, then `severity`, `error_code`, `message`; `mysql_slow` rows also have `query_time_sec`, `rows_examined` |
 | `qcloud_logs` | `event_type`, `module`, `severity`, `source_ip`, `user_name`, `file_md5`, `file_path`, `trace_id`, `message` |
+| `aegis_logs` | `log_type`, `component`, `severity`, `task_name`, `task_id`, `event_type`, `duration_ms`, `message` |
 | `registry` | `full_path`, `value_name`, `value_text`, `entropy`, `hive_type` |
 
 For `events` specifically, note that which fields exist depends on the

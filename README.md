@@ -34,6 +34,11 @@ workspace instead of raw XML and inconsistent text logs.
   and YDEyes text logs -- unified in `qcloud_logs`, with structured login,
   blocklist, malware/path/hash/trace, process, account, and command fields
   while retaining each complete raw record.
+- **Alibaba Cloud Security Center (Aegis) logs**: Linux AliSecCheck,
+  AliHips, PythonLoader, client/monitor and updater text logs, including
+  plain-text `data.N` rotations, in `aegis_logs`. Component, available severity and recognized task
+  lifecycle fields accompany the complete multiline record. Ordinary
+  `ingest` detects these logs without extra dependencies or mode switches.
 - **Windows Registry**: raw hive files (SYSTEM, SOFTWARE, SAM, SECURITY,
   DEFAULT, per-user `NTUSER.DAT`/`UsrClass.dat`) parsed completely --
   every key and value, not a sample -- into one `registry` table, with
@@ -56,7 +61,7 @@ workspace instead of raw XML and inconsistent text logs.
   keys found in a bounded sample, with counts and example values.
 - **pandas-native**: every log family -- events, web access/error logs,
   Scheduled Tasks, Exchange logs, syslog, auditd, systemd journal, database
-  logs, Tencent Cloud Host Security logs, Registry hives -- is reachable as a `pandas.DataFrame` through a
+  logs, Tencent Cloud Host Security and Aegis logs, Registry hives -- is reachable as a `pandas.DataFrame` through a
   named accessor
   (`c.web_logs()`, `c.scheduled_tasks()`, `c.syslog()`, ...), the same
   first-class treatment `events` gets, ready for a notebook.
@@ -136,7 +141,7 @@ Jupyter kernels. See the installation guide for wheel download and install comma
 # .evtx, Scheduled Task definitions, IIS/nginx/Apache/Tomcat access AND
 # error logs, Exchange CSV logs, Linux syslog/auth.log, auditd, and
 # systemd journal export logs, MySQL/PostgreSQL/MSSQL/Oracle database
-# logs, Tencent Cloud Host Security logs, and raw Windows Registry hives are discovered and
+# logs, Tencent Cloud Host Security/Aegis logs, and raw Windows Registry hives are discovered and
 # classified automatically in the same pass. Each --source can carry an
 # explicit host label (PATH:HOST); if omitted, the source directory's
 # name is used.
@@ -235,6 +240,7 @@ c.auditd_logs()                   # Linux Audit Framework
 c.journal_logs()                  # systemd journal export
 c.db_logs(log_type="mysql_slow")  # MySQL/MariaDB, PostgreSQL, MSSQL, Oracle logs
 c.qcloud_logs(log_type="ydservice") # Tencent Cloud Host Security / YunJing logs
+c.aegis_logs(log_type="detect")    # Alibaba Cloud Security Center / Aegis client logs
 c.registry()                      # Windows Registry hives: SYSTEM/SOFTWARE/SAM/SECURITY/NTUSER/...
 c.suspicious_registry()           # high-entropy values + Run/services/COM/IFEO persistence heuristics
 c.suspicious_tasks()              # heuristic triage over scheduled_tasks
@@ -276,7 +282,7 @@ for chunk in c.query_chunks("SELECT * FROM web_error_logs WHERE severity = 'erro
 | `seclogx compact <case>` | Merge small local Parquet files while preserving active readers |
 | `seclogx query <case> "<SQL>"` | Ad hoc SQL against any table in the case, streamed in bounded-memory chunks whether printing a preview or writing `--out` |
 | `seclogx summary <case>` / `channels <case>` | Quick overview of the `events` (Windows Event Log) table |
-| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, qcloud_logs, registry) |
+| `seclogx sources <case>` | Row count per table (events, web_logs, web_error_logs, scheduled_tasks, exchange_message_tracking, exchange_logs, syslog, auditd_logs, journal_logs, db_logs, qcloud_logs, aegis_logs, registry) |
 | `seclogx table <case> <name>` | Preview any table or stream its rows to CSV with `--out` |
 | `seclogx fields <case> <table>` | List columns and sampled JSON-catchall keys, with counts and example values |
 | `seclogx search <case> <table> [--eq/--contains/--regex FIELD=VALUE]...` | Query any table without writing SQL: exact/fuzzy/regex conditions, case-insensitive by default, combined with AND (or `--match-any` for OR) |

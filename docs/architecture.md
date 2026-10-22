@@ -15,11 +15,20 @@ metadata also participates in identity. Auxiliary classification reads a bounded
 UTF-16 requires a BOM or strong asymmetric NUL/ASCII byte-lane evidence. Even byte
 length alone is never sufficient. Prefix decoding tolerates a final incomplete
 multibyte character and precedes binary-density/XML checks. Without UTF-16 evidence,
-strict UTF-8 and GB18030 precede Latin-1; QCloud retains its UTF-16 BOM requirement.
+strict UTF-8 and GB18030 precede Latin-1; QCloud requires a UTF-16 BOM.
 BOM-less all-non-ASCII text remains ambiguous. Text preparation combines hashing
 with ordinary UTF-8 validation, with extra passes for fallback encodings. Source
 identity, size and timestamp checks detect ordinary changes, not arbitrary
 manipulation of an immutable acquisition snapshot.
+
+Aegis client logs require a supported core/Python header plus product context
+from the path or content. Plain-text `data.N` and `data.<number>.N` rotations
+follow the same classification path. Client/monitor headers without a severity
+retain a NULL severity rather than inferring a level. Their streaming parser keeps complete multiline records,
+including blank lines, and adds only recognized task-lifecycle fields to
+`aegis_logs`; it does not execute Python payload text or decode private binary
+formats. A logical record is limited to 4,194,304 characters and 100,000 lines.
+These sources use the ordinary automatic Arrow/NDJSON staging path.
 
 ## Parsing and bounded staging
 

@@ -43,7 +43,8 @@ given source paths into the case in one pass: `.evtx`, Scheduled Task
 definitions, IIS/nginx/Apache/Tomcat access and error logs, Exchange CSV logs,
 Linux syslog/`auth.log`, auditd, and systemd journal export logs,
 MySQL/MariaDB/PostgreSQL/MSSQL/Oracle database logs, Tencent Cloud Host
-Security client logs, and raw Windows Registry hive files. This is the
+Security client logs, Alibaba Cloud Security Center (Aegis) client text logs,
+and raw Windows Registry hive files. This is the
 core command.
 
 | Option | Default | Meaning |
@@ -288,7 +289,7 @@ Sysmon was running).
 
 Row count per table currently in the case -- `events`, `web_logs`,
 `web_error_logs`, `scheduled_tasks`, `exchange_message_tracking`,
-`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `qcloud_logs`,
+`exchange_logs`, `syslog`, `auditd_logs`, `journal_logs`, `db_logs`, `qcloud_logs`, `aegis_logs`,
 `registry`, whichever are present. The quickest way to see what log
 families a case actually has before writing queries against them.
 
